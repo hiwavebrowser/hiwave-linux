@@ -1,0 +1,31 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "security-isolation",
+  "title": "Phase 20: Security & Isolation",
+  "description": "Security hardening with CSP, same-origin policy, CORS, secure contexts, and sandboxing preparation.",
+  "agent_role": "implementer",
+  "priority": "critical",
+  "estimated_hours": 48,
+  "deliverables": [
+    "Content Security Policy parsing and enforcement",
+    "Same-origin policy for cross-origin restrictions",
+    "CORS preflight and response headers",
+    "Secure contexts detection (HTTPS)",
+    "Process isolation preparation (future)"
+  ],
+  "acceptance_criteria": [
+    "CSP blocks inline scripts when configured",
+    "Cross-origin XHR/fetch blocked correctly",
+    "CORS preflight works"
+  ],
+  "ci_gates": [
+    "cargo fmt --check",
+    "cargo clippy --workspace -- -D warnings",
+    "cargo test --workspace",
+    "cargo test --package rustkit-test -- security"
+  ],
+  "depends_on": ["networking-http", "dom-bindings"],
+  "status": "pending",
+  "created_at": "2026-01-02T22:00:00Z"
+}
+

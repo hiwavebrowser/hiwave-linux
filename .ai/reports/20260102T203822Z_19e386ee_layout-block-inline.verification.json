@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "layout-block-inline",
+  "status": "fail",
+  "started_at": "2026-01-02T20:38:22.646345+00:00",
+  "finished_at": "2026-01-02T20:38:23.026018+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-layout/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 32,
+      "stdout_path": ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-LAYOUT.md'), 'RUSTKIT-LAYOUT.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 33,
+      "stdout_path": ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-layout",
+      "exit_code": 101,
+      "duration_ms": 314,
+      "stdout_path": ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline",
+    "logs": [
+      ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T203822Z_19e386ee/layout-block-inline/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "8344920e20aaebe9ccbf76ea0ccf5fdd3c10558eff624d00e7f04c97d3665409"
+  }
+}

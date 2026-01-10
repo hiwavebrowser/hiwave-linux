@@ -1,0 +1,65 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "layout-block-inline",
+  "title": "Implement block + inline layout, text shaping, and painting for basic pages",
+  "status": "completed",
+  "depends_on": ["css-style-system"],
+  "goal": "Create layout engine for block and inline flow, text shaping, and painting to render basic HTML pages.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-layout/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-layout/Cargo.toml",
+      "crates/rustkit-layout/src/lib.rs",
+      "docs/RUSTKIT-LAYOUT.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-layout/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-LAYOUT.md'), 'RUSTKIT-LAYOUT.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-layout",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-layout crate",
+    "Implement LayoutBox tree construction from styled DOM",
+    "Implement block layout algorithm",
+    "Implement inline layout with text runs",
+    "Implement text shaping (DirectWrite or HarfBuzz)",
+    "Implement display list generation",
+    "Implement painting: backgrounds, borders, text",
+    "Add pixel tests for layout correctness",
+    "Document layout system"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

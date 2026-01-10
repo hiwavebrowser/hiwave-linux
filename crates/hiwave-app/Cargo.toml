@@ -1,0 +1,66 @@
+[package]
+name = "hiwave-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "HiWave browser application for Linux with RustKit engine"
+
+[[bin]]
+name = "hiwave"
+path = "src/main.rs"
+
+[features]
+# Default to GTK WebKit mode on Linux
+default = ["webview-fallback"]
+# WebView: Uses system WebKit (GTK WebKit2) for everything
+webview-fallback = ["wry", "tao", "muda"]
+# RustKit hybrid: Pure Rust browser engine for content rendering (EXPERIMENTAL on Linux)
+# Requires X11/Wayland RustKit viewhost implementation
+rustkit = ["rustkit-engine", "rustkit-viewhost", "rustkit-net", "wry", "tao", "muda", "tokio"]
+# Native Linux: EXPERIMENTAL - Full native Linux app without wry/tao (work in progress)
+# This uses RustKit for ALL rendering (Chrome UI, Content, Shelf)
+native-linux = ["rustkit-engine", "rustkit-viewhost", "rustkit-bindings", "rustkit-net", "tokio"]
+
+[dependencies]
+# WebView (for Chrome UI, Shelf, and secondary windows)
+wry = { workspace = true, optional = true }
+tao = { workspace = true, optional = true }
+muda = { workspace = true, optional = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+log = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-log = { workspace = true }
+
+# URL handling
+url = { workspace = true }
+urlencoding = "2.1"
+
+# Platform
+dirs = { workspace = true }
+
+# File dialogs
+rfd = { workspace = true }
+
+# Workspace crates
+hiwave-core = { workspace = true }
+hiwave-shell = { workspace = true }
+hiwave-shield = { workspace = true }
+hiwave-vault = { workspace = true }
+hiwave-analytics = { workspace = true }
+
+# GTK for Linux
+gtk = "0.18.2"
+
+# RustKit engine (optional)
+rustkit-engine = { workspace = true, optional = true }
+rustkit-viewhost = { workspace = true, optional = true }
+rustkit-bindings = { workspace = true, optional = true }
+rustkit-net = { workspace = true, optional = true }
+tokio = { version = "1.42", features = ["rt", "time"], optional = true }

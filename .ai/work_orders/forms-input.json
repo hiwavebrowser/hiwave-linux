@@ -1,0 +1,31 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "forms-input",
+  "title": "Phase 15: Forms & Input",
+  "description": "Implement HTML form controls including text inputs, buttons, checkboxes, selects, form submission, and validation.",
+  "agent_role": "implementer",
+  "priority": "high",
+  "estimated_hours": 40,
+  "deliverables": [
+    "Text inputs (<input type=text>, <textarea>)",
+    "Buttons (<button>, <input type=submit>)",
+    "Checkboxes and radio buttons",
+    "Select dropdowns with option list",
+    "Form submission (GET/POST)",
+    "HTML5 constraint validation"
+  ],
+  "acceptance_criteria": [
+    "Login forms work (username/password/submit)",
+    "Search boxes accept input and submit",
+    "Checkboxes toggle state"
+  ],
+  "ci_gates": [
+    "cargo fmt --check",
+    "cargo clippy --workspace -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "depends_on": ["event-handling", "text-rendering"],
+  "status": "pending",
+  "created_at": "2026-01-02T22:00:00Z"
+}
+

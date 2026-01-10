@@ -1,0 +1,30 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "images-media",
+  "title": "Phase 16: Images & Media",
+  "description": "Support visual media including image decoding, sizing, background images, lazy loading, and favicons.",
+  "agent_role": "implementer",
+  "priority": "high",
+  "estimated_hours": 32,
+  "deliverables": [
+    "Image decoding (PNG, JPEG, GIF, WebP)",
+    "Image sizing (width, height, object-fit)",
+    "Background images (background-image, background-size)",
+    "Lazy loading support",
+    "Favicon loading and exposure"
+  ],
+  "acceptance_criteria": [
+    "Render pages with images correctly",
+    "Background images display",
+    "Favicons appear in HiWave tab UI"
+  ],
+  "ci_gates": [
+    "cargo fmt --check",
+    "cargo clippy --workspace -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "depends_on": ["css-box-model"],
+  "status": "pending",
+  "created_at": "2026-01-02T22:00:00Z"
+}
+

@@ -1,0 +1,62 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "observability-hardening",
+  "title": "Add comprehensive error handling, logging, and resilience",
+  "status": "completed",
+  "depends_on": ["multiview-integration"],
+  "goal": "Create a dedicated crate for centralized error types, logging configuration, and resilience patterns across all RustKit crates.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-common/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-common/Cargo.toml",
+      "crates/rustkit-common/src/lib.rs",
+      "docs/RUSTKIT-COMMON.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-common/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-COMMON.md'), 'RUSTKIT-COMMON.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-common",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-common crate",
+    "Define unified RustKitError enum",
+    "Add logging configuration utilities",
+    "Add retry and timeout utilities",
+    "Add result extension traits",
+    "Document error handling patterns"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

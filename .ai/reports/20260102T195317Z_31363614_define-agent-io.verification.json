@@ -1,0 +1,30 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "define-agent-io",
+  "status": "pass",
+  "started_at": "2026-01-02T19:53:17.384250+00:00",
+  "finished_at": "2026-01-02T19:53:17.487931+00:00",
+  "gates": [
+    {
+      "id": "validate-roadmap",
+      "cmd": "python tools/ai-orchestrator/aiorch.py validate-roadmap",
+      "exit_code": 0,
+      "duration_ms": 103,
+      "stdout_path": ".ai/artifacts/20260102T195317Z_31363614/define-agent-io/validate-roadmap.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T195317Z_31363614/define-agent-io/validate-roadmap.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T195317Z_31363614/define-agent-io",
+    "logs": [
+      ".ai/artifacts/20260102T195317Z_31363614/define-agent-io/validate-roadmap.stdout.txt",
+      ".ai/artifacts/20260102T195317Z_31363614/define-agent-io/validate-roadmap.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "794ad6ed3aa592170b833261996e20cd5bcf2a4b5baa2d7bb12116b1528b3ad6"
+  }
+}

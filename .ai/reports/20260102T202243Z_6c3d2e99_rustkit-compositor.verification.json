@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "rustkit-compositor",
+  "status": "pass",
+  "started_at": "2026-01-02T20:22:43.652902+00:00",
+  "finished_at": "2026-01-02T20:22:59.715334+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-compositor/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 33,
+      "stdout_path": ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-COMPOSITOR.md'), 'RUSTKIT-COMPOSITOR.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 31,
+      "stdout_path": ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-compositor",
+      "exit_code": 0,
+      "duration_ms": 15997,
+      "stdout_path": ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor",
+    "logs": [
+      ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T202243Z_6c3d2e99/rustkit-compositor/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "f406d289993ac22394d85110b6d3c2a54e428dcb27b1a7b65df22d1cbce06936"
+  }
+}

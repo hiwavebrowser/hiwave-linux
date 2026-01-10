@@ -1,0 +1,62 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "html-dom-pipeline",
+  "title": "Implement HTML parsing + DOM tree + basic render tree construction",
+  "status": "completed",
+  "depends_on": ["engine-scheduler-core"],
+  "goal": "Create HTML parsing using html5ever and build a DOM tree that can be traversed for rendering. Support loading and rendering HiWave internal HTML pages.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-dom/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-dom/Cargo.toml",
+      "crates/rustkit-dom/src/lib.rs",
+      "docs/RUSTKIT-DOM.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-dom/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-DOM.md'), 'RUSTKIT-DOM.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-dom",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-dom crate with html5ever dependency",
+    "Implement Node, Element, Text, Document types",
+    "Implement DOM tree traversal (parent, children, siblings)",
+    "Implement html5ever TreeSink for DOM construction",
+    "Parse HiWave internal HTML pages as test cases",
+    "Document DOM API"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

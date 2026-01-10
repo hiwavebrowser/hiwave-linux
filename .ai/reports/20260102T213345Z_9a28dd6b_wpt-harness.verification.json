@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "wpt-harness",
+  "status": "pass",
+  "started_at": "2026-01-02T21:33:45.474344+00:00",
+  "finished_at": "2026-01-02T21:33:46.598718+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-test/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 32,
+      "stdout_path": ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-TESTING.md'), 'RUSTKIT-TESTING.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 32,
+      "stdout_path": ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-test",
+      "exit_code": 0,
+      "duration_ms": 1059,
+      "stdout_path": ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness",
+    "logs": [
+      ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T213345Z_9a28dd6b/wpt-harness/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "0301524964dce2029bc0459bf07975cf43dcc80d3604d78c47042004a0d5a513"
+  }
+}

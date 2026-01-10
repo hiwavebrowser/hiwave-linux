@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "dom-bindings",
+  "status": "pass",
+  "started_at": "2026-01-02T20:48:19.029144+00:00",
+  "finished_at": "2026-01-02T20:48:31.063936+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-bindings/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 34,
+      "stdout_path": ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-BINDINGS.md'), 'RUSTKIT-BINDINGS.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 35,
+      "stdout_path": ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-bindings",
+      "exit_code": 0,
+      "duration_ms": 11964,
+      "stdout_path": ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings",
+    "logs": [
+      ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T204819Z_7c049095/dom-bindings/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "d993533b131b6beb51a1235ce674a8e713885a94be49c4d9355d3cc3c7674c54"
+  }
+}

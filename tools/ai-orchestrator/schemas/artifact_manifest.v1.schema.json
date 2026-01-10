@@ -1,0 +1,15 @@
+﻿{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hiwave.local/schemas/artifact_manifest.v1.schema.json",
+  "title": "ArtifactManifest (v1)",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "kind", "run_id", "created_at"],
+  "properties": {
+    "schema_version": {"const": "artifact_manifest.v1"},
+    "kind": {"type": "string", "enum": ["ci", "canary", "swarm", "bisect"]},
+    "run_id": {"type": "string"},
+    "work_order_id": {"type": "string"},
+    "created_at": {"type": "string"}
+  }
+}

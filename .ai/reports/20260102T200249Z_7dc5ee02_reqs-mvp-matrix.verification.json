@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "reqs-mvp-matrix",
+  "status": "fail",
+  "started_at": "2026-01-02T20:02:49.230615+00:00",
+  "finished_at": "2026-01-02T20:02:52.687370+00:00",
+  "gates": [
+    {
+      "id": "format",
+      "cmd": "cargo fmt --check",
+      "exit_code": 0,
+      "duration_ms": 335,
+      "stdout_path": ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/format.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/format.stderr.txt"
+    },
+    {
+      "id": "lint",
+      "cmd": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "exit_code": 101,
+      "duration_ms": 3089,
+      "stdout_path": ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/lint.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/lint.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/MVP-REQUIREMENTS.md'), 'MVP-REQUIREMENTS.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 32,
+      "stdout_path": ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/docs-exist.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix",
+    "logs": [
+      ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/format.stdout.txt",
+      ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/lint.stdout.txt",
+      ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/format.stderr.txt",
+      ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/lint.stderr.txt",
+      ".ai/artifacts/20260102T200249Z_7dc5ee02/reqs-mvp-matrix/docs-exist.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "7c57a7c965416cc965d6dd79bacb51610cc72b7377ded431e277d3fd3d6e8739"
+  }
+}

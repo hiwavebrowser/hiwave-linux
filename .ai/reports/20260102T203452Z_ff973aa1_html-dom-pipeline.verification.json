@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "html-dom-pipeline",
+  "status": "fail",
+  "started_at": "2026-01-02T20:34:52.415275+00:00",
+  "finished_at": "2026-01-02T20:34:52.752205+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-dom/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 32,
+      "stdout_path": ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-DOM.md'), 'RUSTKIT-DOM.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 34,
+      "stdout_path": ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-dom",
+      "exit_code": 101,
+      "duration_ms": 270,
+      "stdout_path": ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline",
+    "logs": [
+      ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T203452Z_ff973aa1/html-dom-pipeline/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "9a96244ccc9543b3a2fe9ebd88c0e1ed81e9faf85f37465b235547a0f47ce0da"
+  }
+}

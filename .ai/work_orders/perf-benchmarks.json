@@ -1,0 +1,64 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "perf-benchmarks",
+  "title": "Create performance benchmarking infrastructure for RustKit",
+  "status": "completed",
+  "depends_on": ["wpt-harness"],
+  "goal": "Build benchmarking tools to measure and track RustKit engine performance across parsing, styling, layout, and rendering.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-bench/",
+      "benches/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-bench/Cargo.toml",
+      "crates/rustkit-bench/src/lib.rs",
+      "benches/rustkit.rs",
+      "docs/RUSTKIT-PERF.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-bench/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-PERF.md'), 'RUSTKIT-PERF.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-bench",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-bench crate",
+    "Add benchmarks for HTML parsing",
+    "Add benchmarks for CSS parsing", 
+    "Add benchmarks for layout",
+    "Add benchmarks for rendering",
+    "Document performance testing approach"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

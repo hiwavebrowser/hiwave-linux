@@ -1,0 +1,30 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "navigation-history",
+  "title": "Phase 19: Navigation & History",
+  "description": "Complete navigation support with History API, back/forward, hash navigation, and page lifecycle events.",
+  "agent_role": "implementer",
+  "priority": "high",
+  "estimated_hours": 32,
+  "deliverables": [
+    "History API (pushState, replaceState, popstate)",
+    "Back/Forward navigation",
+    "Hash fragment scrolling",
+    "Page lifecycle events (beforeunload, unload)",
+    "Navigation timing API"
+  ],
+  "acceptance_criteria": [
+    "SPA navigation works",
+    "Back/forward buttons work",
+    "Hash links scroll to elements"
+  ],
+  "ci_gates": [
+    "cargo fmt --check",
+    "cargo clippy --workspace -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "depends_on": ["event-handling"],
+  "status": "pending",
+  "created_at": "2026-01-02T22:00:00Z"
+}
+

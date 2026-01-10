@@ -1,0 +1,30 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "guardrails",
+  "title": "Guardrails: allowlists, dangerous-op approvals, evidence gates",
+  "status": "pending",
+  "depends_on": ["agent-roles-runtime", "repo-integration-bot"],
+  "goal": "Prevent unsafe autonomous actions and enforce mandatory evidence before merging (local-only).",
+  "acceptance": {
+    "gates": [
+      {
+        "id": "placeholder",
+        "type": "custom",
+        "cmd": "python -c \"print('guardrails: placeholder gate (will be replaced)')\"",
+        "timeout_seconds": 10
+      }
+    ]
+  },
+  "steps": [
+    "Implement allowlisted command execution with explicit approval for dangerous operations.",
+    "Add filesystem allowlists for agent tools.",
+    "Enforce 'no merge without VerificationReport evidence'."
+  ],
+  "rollback": {
+    "strategy": "Disable guardrails temporarily by config; revert guardrail code if needed."
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+
+

@@ -1,0 +1,62 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "reqs-mvp-matrix",
+  "title": "Define MVP compatibility matrix and acceptance tests for WinCairo limitations",
+  "status": "completed",
+  "depends_on": [],
+  "goal": "Create a comprehensive MVP requirements document that defines target sites, required web APIs, performance targets, and automated acceptance tests for each issue in WINCAIRO-LIMITATIONS.md",
+  "scope": {
+    "allowed_paths": [
+      "docs/",
+      "crates/hiwave-smoke/",
+      "tests/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "docs/MVP-REQUIREMENTS.md",
+      "docs/ACCEPTANCE-TESTS.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "mvp-reqs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/MVP-REQUIREMENTS.md'), 'MVP-REQUIREMENTS.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "acceptance-tests-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/ACCEPTANCE-TESTS.md'), 'ACCEPTANCE-TESTS.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-content-check",
+        "type": "custom",
+        "cmd": "python -c \"content = open('docs/MVP-REQUIREMENTS.md', encoding='utf-8').read(); assert 'Target Sites' in content and 'Required Web APIs' in content and 'Performance Targets' in content, 'Missing required sections'\"",
+        "timeout_seconds": 10
+      }
+    ]
+  },
+  "steps": [
+    "Analyze WINCAIRO-LIMITATIONS.md to identify all blockers and issues",
+    "Define target sites for MVP (GitHub, Wikipedia, news sites, OAuth flows)",
+    "Specify required Web APIs (cookies, localStorage, fetch, history, CORS)",
+    "Define measurable success criteria for each limitation",
+    "Create automated acceptance test specifications",
+    "Document performance targets and stability requirements"
+  ],
+  "rollback": {
+    "strategy": "Revert documentation changes if requirements are found to be incorrect or incomplete"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

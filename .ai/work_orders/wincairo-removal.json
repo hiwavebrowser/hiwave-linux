@@ -1,0 +1,68 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "wincairo-removal",
+  "title": "Remove WinCairo WebKit dependency and transition to RustKit",
+  "status": "completed",
+  "depends_on": ["perf-benchmarks", "hiwave-integration"],
+  "goal": "Remove the webkit-wincairo and webkit-wincairo-sys crates, making RustKit the sole custom browser engine backend for HiWave.",
+  "scope": {
+    "allowed_paths": [
+      "Cargo.toml",
+      "crates/hiwave-app/",
+      "crates/webkit-wincairo/",
+      "crates/webkit-wincairo-sys/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "Cargo.toml",
+      "crates/hiwave-app/Cargo.toml",
+      "crates/hiwave-app/src/webview.rs",
+      "crates/hiwave-app/src/main.rs",
+      "docs/MIGRATION-RUSTKIT.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "no-wincairo-dep",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert not os.path.exists('crates/webkit-wincairo/Cargo.toml'), 'webkit-wincairo still exists'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "workspace-builds",
+        "type": "build",
+        "cmd": "cargo build --workspace",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "rustkit-builds",
+        "type": "build",
+        "cmd": "cargo build -p hiwave-app --features rustkit",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Audit all WinCairo usage in codebase",
+    "Remove webkit-wincairo-sys from workspace",
+    "Remove webkit-wincairo from workspace",
+    "Update hiwave-app Cargo.toml",
+    "Update webview.rs to remove wincairo support",
+    "Update main.rs to remove wincairo conditionals",
+    "Create migration documentation"
+  ],
+  "rollback": {
+    "strategy": "Git revert - WinCairo crates preserved in git history"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

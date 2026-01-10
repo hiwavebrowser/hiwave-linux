@@ -1,0 +1,30 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "define-agent-io",
+  "title": "Define WorkOrder/VerificationReport schemas + shared RoadmapIndex",
+  "status": "in_progress",
+  "depends_on": [],
+  "goal": "Create machine-readable schemas and a shared roadmap index that all agents read/write, with lightweight validation tooling.",
+  "acceptance": {
+    "gates": [
+      {
+        "id": "validate-roadmap",
+        "type": "custom",
+        "cmd": "python tools/ai-orchestrator/aiorch.py validate-roadmap",
+        "timeout_seconds": 60
+      }
+    ]
+  },
+  "steps": [
+    "Add JSON Schemas for WorkOrder, VerificationReport, and RoadmapIndex.",
+    "Add a tracked .ai/roadmap_index.json referencing all planned work orders.",
+    "Add lightweight validation CLI."
+  ],
+  "rollback": {
+    "strategy": "Revert the commit introducing tools/ai-orchestrator and .ai/ schema/index files."
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+
+

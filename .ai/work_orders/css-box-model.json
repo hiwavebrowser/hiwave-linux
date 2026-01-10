@@ -1,0 +1,33 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "css-box-model",
+  "title": "Phase 12: CSS Box Model & Visual Formatting",
+  "description": "Complete the CSS box model implementation for proper layout including margin collapse, padding/borders, positioned elements, floats, and z-index stacking.",
+  "agent_role": "implementer",
+  "priority": "critical",
+  "estimated_hours": 40,
+  "deliverables": [
+    "Margin collapse implementation in rustkit-layout",
+    "Full padding/borders support with correct painting order",
+    "Positioned elements (relative, absolute, fixed, sticky)",
+    "Basic float layout and clearance",
+    "Z-index stacking contexts",
+    "WPT tests passing for css/CSS2/box-model/"
+  ],
+  "acceptance_criteria": [
+    "Pass 50% of WPT css/CSS2/box-model/ tests",
+    "Render simple layouts (header/content/footer) correctly",
+    "Positioned elements respect containing block",
+    "Floats wrap text correctly"
+  ],
+  "ci_gates": [
+    "cargo fmt --check",
+    "cargo clippy --workspace -- -D warnings",
+    "cargo test --workspace",
+    "cargo test --package rustkit-test -- box_model"
+  ],
+  "depends_on": ["wincairo-removal"],
+  "status": "completed",
+  "created_at": "2026-01-02T22:00:00Z"
+}
+

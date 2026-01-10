@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "networking-http",
+  "status": "fail",
+  "started_at": "2026-01-02T20:57:32.182594+00:00",
+  "finished_at": "2026-01-02T20:57:47.693260+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-net/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 34,
+      "stdout_path": ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-NET.md'), 'RUSTKIT-NET.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 35,
+      "stdout_path": ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-net",
+      "exit_code": 101,
+      "duration_ms": 15441,
+      "stdout_path": ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http",
+    "logs": [
+      ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T205732Z_cacf7d0b/networking-http/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "356c87e7fc97e05403b8f2c1b190e7f307312c99e5eb7c1c585abdc937a5dd69"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "css-flexbox",
+  "title": "Phase 17: CSS Flexbox",
+  "description": "Implement CSS Flexbox layout including flex containers, items, alignment, and gap properties.",
+  "agent_role": "implementer",
+  "priority": "high",
+  "estimated_hours": 48,
+  "deliverables": [
+    "Flex container (display: flex, direction, wrap)",
+    "Flex items (flex-grow, flex-shrink, flex-basis)",
+    "Alignment (justify-content, align-items, align-self)",
+    "Order property",
+    "Gap properties (gap, row-gap, column-gap)"
+  ],
+  "acceptance_criteria": [
+    "Pass 40% of WPT css/css-flexbox/ tests",
+    "HiWave chrome UI layouts correctly",
+    "Flex wrap works"
+  ],
+  "ci_gates": [
+    "cargo fmt --check",
+    "cargo clippy --workspace -- -D warnings",
+    "cargo test --workspace",
+    "cargo test --package rustkit-test -- flexbox"
+  ],
+  "depends_on": ["css-box-model"],
+  "status": "pending",
+  "created_at": "2026-01-02T22:00:00Z"
+}
+

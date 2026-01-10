@@ -1,0 +1,63 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "networking-http",
+  "title": "Implement HTTP networking layer with async fetch support",
+  "status": "completed",
+  "depends_on": ["engine-scheduler-core"],
+  "goal": "Create HTTP client using reqwest with async support, resource loading, and fetch API for JavaScript.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-net/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-net/Cargo.toml",
+      "crates/rustkit-net/src/lib.rs",
+      "docs/RUSTKIT-NET.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-net/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-NET.md'), 'RUSTKIT-NET.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-net",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-net crate with reqwest dependency",
+    "Implement ResourceLoader for URL fetching",
+    "Implement Request/Response types",
+    "Implement fetch() API for JavaScript",
+    "Add request/response headers support",
+    "Add timeout and cancellation",
+    "Document networking API"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

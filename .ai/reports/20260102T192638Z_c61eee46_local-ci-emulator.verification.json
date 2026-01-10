@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "local-ci-emulator",
+  "status": "fail",
+  "started_at": "2026-01-02T19:26:38.574271+00:00",
+  "finished_at": "2026-01-02T19:26:51.137696+00:00",
+  "gates": [
+    {
+      "id": "fmt",
+      "cmd": "cargo fmt --check",
+      "exit_code": 0,
+      "duration_ms": 323,
+      "stdout_path": ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/fmt.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/fmt.stderr.txt"
+    },
+    {
+      "id": "clippy",
+      "cmd": "cargo clippy --workspace --all-targets --all-features",
+      "exit_code": 0,
+      "duration_ms": 3318,
+      "stdout_path": ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/clippy.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/clippy.stderr.txt"
+    },
+    {
+      "id": "test",
+      "cmd": "cargo test --workspace",
+      "exit_code": 101,
+      "duration_ms": 8920,
+      "stdout_path": ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/test.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/test.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator",
+    "logs": [
+      ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/fmt.stdout.txt",
+      ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/clippy.stdout.txt",
+      ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/test.stdout.txt",
+      ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/fmt.stderr.txt",
+      ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/clippy.stderr.txt",
+      ".ai/artifacts/20260102T192638Z_c61eee46/local-ci-emulator/test.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "c9300332ac941050f430a8e62b7fabebbff17d019fece6d6fd860988d261c255"
+  }
+}

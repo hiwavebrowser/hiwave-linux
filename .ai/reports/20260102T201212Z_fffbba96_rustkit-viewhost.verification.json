@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "rustkit-viewhost",
+  "status": "fail",
+  "started_at": "2026-01-02T20:12:12.844260+00:00",
+  "finished_at": "2026-01-02T20:12:13.145858+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-viewhost/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 31,
+      "stdout_path": ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-VIEWHOST.md'), 'RUSTKIT-VIEWHOST.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 38,
+      "stdout_path": ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-viewhost",
+      "exit_code": 101,
+      "duration_ms": 232,
+      "stdout_path": ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost",
+    "logs": [
+      ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T201212Z_fffbba96/rustkit-viewhost/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "5877a2353d8512a44818f487fbdb184987d09d00fc34edac84dd84e64207f60f"
+  }
+}

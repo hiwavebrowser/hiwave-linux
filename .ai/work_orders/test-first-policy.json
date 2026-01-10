@@ -1,0 +1,30 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "test-first-policy",
+  "title": "Test-first policy enforcement (regression tests required per fix)",
+  "status": "pending",
+  "depends_on": ["local-ci-emulator"],
+  "goal": "Enforce a policy that any bugfix requires an accompanying regression test (or explicit waiver) before merge.",
+  "acceptance": {
+    "gates": [
+      {
+        "id": "placeholder",
+        "type": "custom",
+        "cmd": "python -c \"print('test-first-policy: placeholder gate (will be replaced)')\"",
+        "timeout_seconds": 10
+      }
+    ]
+  },
+  "steps": [
+    "Define a convention for linking PRs/WorkOrders to tests added.",
+    "Implement an automated check that fails merges if no test evidence is present.",
+    "Add a waiver mechanism requiring explicit coordinator approval."
+  ],
+  "rollback": {
+    "strategy": "Temporarily disable policy enforcement via config; revert check implementation if needed."
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+
+

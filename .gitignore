@@ -1,0 +1,55 @@
+# Claude Code
+.claude/
+.claude/*
+
+# Environment
+.env
+.env.*
+
+# Rust build artifacts
+target/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+nul
+
+# Test artifacts
+*.db
+!schema.db
+
+# Logs
+*.log
+
+# Local config
+*.local.toml
+
+# WinCairo WebKit DLLs (large binaries - use setup script)
+deps/wincairo/*.dll
+deps/wincairo/*.lib
+deps/wincairo/*.pdb
+!deps/wincairo/README.md
+deps/wincairo/*
+!deps/wincairo/include
+
+# AI Orchestrator artifacts (large generated files)
+.ai/artifacts/
+.ai/cache/
+
+# AI Orchestrator tool and roadmap are tracked
+# tools/ai-orchestrator/ - TRACKED
+# .ai/roadmap_index.json - TRACKED
+# .ai/work_orders/ - TRACKED
+# .ai/reports/ - TRACKED
+
+# Internal planning docs
+docs/plans/
+
+docs/unshared/*

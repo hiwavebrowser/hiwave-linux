@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "observability-hardening",
+  "status": "pass",
+  "started_at": "2026-01-02T21:10:24.135766+00:00",
+  "finished_at": "2026-01-02T21:10:31.313263+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-common/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 33,
+      "stdout_path": ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-COMMON.md'), 'RUSTKIT-COMMON.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 42,
+      "stdout_path": ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-common",
+      "exit_code": 0,
+      "duration_ms": 7102,
+      "stdout_path": ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening",
+    "logs": [
+      ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T211024Z_4f6b539b/observability-hardening/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "82c7d7f4cecda25318de6e5a792c83bcd3f87595156448543ee224dfc4d374f3"
+  }
+}

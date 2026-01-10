@@ -1,0 +1,30 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "throughput-metrics",
+  "title": "Swarm throughput metrics + weekly review hooks",
+  "status": "pending",
+  "depends_on": ["agent-roles-runtime", "artifact-store"],
+  "goal": "Track lead time, merge success rate, canary failure rate, MTTR, and surface weekly summaries for tuning prompts and gates.",
+  "acceptance": {
+    "gates": [
+      {
+        "id": "placeholder",
+        "type": "custom",
+        "cmd": "python -c \"print('throughput-metrics: placeholder gate (will be replaced)')\"",
+        "timeout_seconds": 10
+      }
+    ]
+  },
+  "steps": [
+    "Define metrics schema and storage under .ai/reports/metrics.jsonl.",
+    "Emit metrics from CI emulator, canary runner, and auto-revert/bisect flows.",
+    "Generate a weekly summary report."
+  ],
+  "rollback": {
+    "strategy": "Disable metrics emission via config; delete local metrics logs."
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+
+

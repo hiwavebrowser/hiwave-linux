@@ -1,0 +1,30 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "agent-roles-runtime",
+  "title": "Coordinator/Architect/Implementer/Verifier agent runtime + structured handoffs",
+  "status": "pending",
+  "depends_on": ["define-agent-io"],
+  "goal": "Implement a local agent runtime that can run multiple role agents, coordinate their outputs, and enforce tool access policies and handoff formats.",
+  "acceptance": {
+    "gates": [
+      {
+        "id": "placeholder",
+        "type": "custom",
+        "cmd": "python -c \"print('agent-roles-runtime: placeholder gate (will be replaced)')\"",
+        "timeout_seconds": 10
+      }
+    ]
+  },
+  "steps": [
+    "Define role prompts/contracts and a coordinator state machine.",
+    "Implement parallel agent execution with deterministic outputs where possible.",
+    "Implement tool access policies (allowlisted commands, filesystem allowlists)."
+  ],
+  "rollback": {
+    "strategy": "Revert agent runtime and role definitions."
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+
+

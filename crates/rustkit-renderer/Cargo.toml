@@ -1,0 +1,45 @@
+[package]
+name = "rustkit-renderer"
+version = "0.1.0"
+edition = "2021"
+description = "GPU display list renderer for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# RustKit crates
+rustkit-layout = { path = "../rustkit-layout" }
+rustkit-css = { path = "../rustkit-css" }
+# rustkit-svg = { path = "../rustkit-svg" }
+rustkit-common = { path = "../rustkit-common" }
+
+# GPU rendering
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+
+# Text rendering
+rustkit-text = { path = "../rustkit-text" }
+
+# Core
+thiserror = "1.0"
+tracing = "0.1"
+
+# Collections
+hashbrown = "0.14"
+
+# Screenshot support
+png = "0.17"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["sync"] }
+
+[target.'cfg(windows)'.dependencies]
+# Needed for DirectWrite-based glyph rasterization in `src/glyph.rs`.
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_DirectWrite",
+  "Win32_System_Com",
+] }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

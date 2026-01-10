@@ -1,0 +1,58 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "hiwave-integration",
+  "title": "Integrate RustKit engine into HiWave as alternative backend",
+  "status": "completed",
+  "depends_on": ["multiview-integration", "observability-hardening"],
+  "goal": "Create an adapter that implements HiWave's IWebView trait using the RustKit engine, allowing HiWave to use either WRY/WebView2 or RustKit as the rendering backend.",
+  "scope": {
+    "allowed_paths": [
+      "crates/hiwave-app/",
+      "Cargo.toml",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "Cargo.toml",
+      "crates/hiwave-app/Cargo.toml",
+      "crates/hiwave-app/src/webview_rustkit.rs",
+      "crates/hiwave-app/src/lib.rs",
+      "docs/HIWAVE-RUSTKIT.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/HIWAVE-RUSTKIT.md'), 'HIWAVE-RUSTKIT.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "workspace-builds",
+        "type": "build",
+        "cmd": "cargo build -p hiwave-app --features rustkit",
+        "timeout_seconds": 600
+      }
+    ]
+  },
+  "steps": [
+    "Update workspace Cargo.toml with rustkit dependencies",
+    "Add rustkit feature to hiwave-app",
+    "Create webview_rustkit.rs implementing IWebView",
+    "Add feature-gated imports in lib.rs",
+    "Document RustKit integration"
+  ],
+  "rollback": {
+    "strategy": "Revert feature additions, keep rustkit crates"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

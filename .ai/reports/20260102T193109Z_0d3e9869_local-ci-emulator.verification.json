@@ -1,0 +1,60 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "local-ci-emulator",
+  "status": "pass",
+  "started_at": "2026-01-02T19:31:09.753625+00:00",
+  "finished_at": "2026-01-02T19:31:46.200412+00:00",
+  "gates": [
+    {
+      "id": "fmt",
+      "cmd": "cargo fmt --check",
+      "exit_code": 0,
+      "duration_ms": 329,
+      "stdout_path": ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/fmt.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/fmt.stderr.txt"
+    },
+    {
+      "id": "clippy",
+      "cmd": "cargo clippy --workspace --all-targets --all-features",
+      "exit_code": 0,
+      "duration_ms": 3601,
+      "stdout_path": ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/clippy.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/clippy.stderr.txt"
+    },
+    {
+      "id": "test",
+      "cmd": "cargo test --workspace",
+      "exit_code": 0,
+      "duration_ms": 2495,
+      "stdout_path": ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/test.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/test.stderr.txt"
+    },
+    {
+      "id": "build_release_app",
+      "cmd": "cargo build -p hiwave-app --release",
+      "exit_code": 0,
+      "duration_ms": 30020,
+      "stdout_path": ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/build_release_app.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/build_release_app.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator",
+    "logs": [
+      ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/fmt.stdout.txt",
+      ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/clippy.stdout.txt",
+      ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/test.stdout.txt",
+      ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/build_release_app.stdout.txt",
+      ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/fmt.stderr.txt",
+      ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/clippy.stderr.txt",
+      ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/test.stderr.txt",
+      ".ai/artifacts/20260102T193109Z_0d3e9869/local-ci-emulator/build_release_app.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "b660a529387a72c2c67a53c7e388294b57477bb10e9a99ba16ed5de553e3cd88"
+  }
+}

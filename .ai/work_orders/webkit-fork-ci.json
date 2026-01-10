@@ -1,0 +1,63 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "webkit-fork-ci",
+  "title": "Create and wire up a maintained WebKit fork for Windows builds + LayoutTests/WPT subset",
+  "status": "completed",
+  "depends_on": ["reqs-mvp-matrix"],
+  "goal": "Set up a maintainable WebKit fork with Windows CI, ability to run LayoutTests/WPT subset, and serve as the reference implementation for the Rust rewrite.",
+  "scope": {
+    "allowed_paths": [
+      "docs/",
+      "tools/webkit-fork/",
+      ".github/workflows/",
+      "scripts/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "docs/WEBKIT-FORK-SETUP.md",
+      "tools/webkit-fork/README.md",
+      "scripts/build-webkit.ps1"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "fork-setup-docs",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/WEBKIT-FORK-SETUP.md'), 'WEBKIT-FORK-SETUP.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "build-script-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('scripts/build-webkit.ps1'), 'build-webkit.ps1 missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "blocker-repros-documented",
+        "type": "custom",
+        "cmd": "python -c \"content = open('docs/WEBKIT-FORK-SETUP.md', encoding='utf-8').read(); assert 'Minimal Reproductions' in content, 'Missing reproduction docs'\"",
+        "timeout_seconds": 10
+      }
+    ]
+  },
+  "steps": [
+    "Document WebKit fork setup and sync strategy",
+    "Create Windows build script for WinCairo port",
+    "Document minimal reproductions for resize, multi-view, and callback issues",
+    "Define LayoutTests/WPT subset to run for validation",
+    "Set up local test runner for regression detection"
+  ],
+  "rollback": {
+    "strategy": "Revert documentation and scripts if fork strategy changes"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

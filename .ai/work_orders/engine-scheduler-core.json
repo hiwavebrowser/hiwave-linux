@@ -1,0 +1,62 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "engine-scheduler-core",
+  "title": "Implement engine core runtime (task queues, timers, navigation state machine)",
+  "status": "completed",
+  "depends_on": ["rustkit-viewhost"],
+  "goal": "Create the core engine runtime with task scheduling, timers, deterministic event delivery, and navigation state machine for reliable page lifecycle events.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-core/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-core/Cargo.toml",
+      "crates/rustkit-core/src/lib.rs",
+      "docs/RUSTKIT-CORE.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-core/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-CORE.md'), 'RUSTKIT-CORE.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-core",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-core crate with async runtime dependencies",
+    "Implement TaskQueue with priority levels",
+    "Implement Timer system (setTimeout/setInterval equivalent)",
+    "Implement NavigationStateMachine with state transitions",
+    "Add tracing and structured logging support",
+    "Document event loop architecture"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

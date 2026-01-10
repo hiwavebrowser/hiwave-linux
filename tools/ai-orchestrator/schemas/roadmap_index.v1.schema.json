@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hiwave.local/schemas/roadmap_index.v1.schema.json",
+  "title": "RoadmapIndex (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "created_at", "updated_at", "work_orders"],
+  "properties": {
+    "schema_version": { "const": "roadmap_index.v1" },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "work_orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "status"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "in_progress", "completed", "blocked", "cancelled"]
+          },
+          "depends_on": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "work_order_path": { "type": "string" }
+        }
+      }
+    }
+  }
+}
+

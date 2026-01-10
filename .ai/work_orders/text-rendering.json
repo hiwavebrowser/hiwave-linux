@@ -1,0 +1,32 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "text-rendering",
+  "title": "Phase 13: Text Rendering & Fonts",
+  "description": "Improve text rendering quality with font fallback, Unicode shaping, text decorations, and web fonts support.",
+  "agent_role": "implementer",
+  "priority": "critical",
+  "estimated_hours": 32,
+  "deliverables": [
+    "Font fallback chain for missing glyphs",
+    "Complex script support via DirectWrite",
+    "Text decoration (underline, strikethrough, overline)",
+    "Proper line-height calculation",
+    "Font variants (bold, italic, weights)",
+    "Basic @font-face loading"
+  ],
+  "acceptance_criteria": [
+    "Render mixed-language content (Latin + CJK)",
+    "Pass WPT css/css-text/ basic tests",
+    "Text decorations render correctly"
+  ],
+  "ci_gates": [
+    "cargo fmt --check",
+    "cargo clippy --workspace -- -D warnings",
+    "cargo test --workspace",
+    "cargo test --package rustkit-test -- text"
+  ],
+  "depends_on": ["css-box-model"],
+  "status": "completed",
+  "created_at": "2026-01-02T22:00:00Z"
+}
+

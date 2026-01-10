@@ -1,0 +1,63 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "dom-bindings",
+  "title": "Create JavaScript-to-DOM bindings for web API compatibility",
+  "status": "completed",
+  "depends_on": ["js-engine-integration", "html-dom-pipeline"],
+  "goal": "Create bindings that expose DOM APIs to JavaScript, enabling document.getElementById, element manipulation, and event handling.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-bindings/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-bindings/Cargo.toml",
+      "crates/rustkit-bindings/src/lib.rs",
+      "docs/RUSTKIT-BINDINGS.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-bindings/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-BINDINGS.md'), 'RUSTKIT-BINDINGS.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-bindings",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-bindings crate",
+    "Implement document global object",
+    "Implement document.getElementById/querySelector",
+    "Implement Element property access",
+    "Implement Element.addEventListener",
+    "Implement window.location",
+    "Document bindings API"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

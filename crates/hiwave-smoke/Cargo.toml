@@ -1,0 +1,12 @@
+﻿[package]
+name = "hiwave-smoke"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wry.workspace = true
+tao.workspace = true
+serde_json.workspace = true

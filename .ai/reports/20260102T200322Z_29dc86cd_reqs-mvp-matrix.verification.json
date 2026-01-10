@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "reqs-mvp-matrix",
+  "status": "pass",
+  "started_at": "2026-01-02T20:03:22.031737+00:00",
+  "finished_at": "2026-01-02T20:03:22.125740+00:00",
+  "gates": [
+    {
+      "id": "mvp-reqs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/MVP-REQUIREMENTS.md'), 'MVP-REQUIREMENTS.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 31,
+      "stdout_path": ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/mvp-reqs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/mvp-reqs-exist.stderr.txt"
+    },
+    {
+      "id": "acceptance-tests-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/ACCEPTANCE-TESTS.md'), 'ACCEPTANCE-TESTS.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 32,
+      "stdout_path": ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/acceptance-tests-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/acceptance-tests-exist.stderr.txt"
+    },
+    {
+      "id": "docs-content-check",
+      "cmd": "python -c \"content = open('docs/MVP-REQUIREMENTS.md', encoding='utf-8').read(); assert 'Target Sites' in content and 'Required Web APIs' in content and 'Performance Targets' in content, 'Missing required sections'\"",
+      "exit_code": 0,
+      "duration_ms": 31,
+      "stdout_path": ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/docs-content-check.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/docs-content-check.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix",
+    "logs": [
+      ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/mvp-reqs-exist.stdout.txt",
+      ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/acceptance-tests-exist.stdout.txt",
+      ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/docs-content-check.stdout.txt",
+      ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/mvp-reqs-exist.stderr.txt",
+      ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/acceptance-tests-exist.stderr.txt",
+      ".ai/artifacts/20260102T200322Z_29dc86cd/reqs-mvp-matrix/docs-content-check.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "babf178e3018c4559cb5ac9b88adc96397c45e093034d5f8d31edb062c550ab7"
+  }
+}

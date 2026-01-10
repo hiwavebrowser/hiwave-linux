@@ -1,0 +1,63 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "multiview-integration",
+  "title": "Create multi-view orchestration layer that integrates all RustKit crates",
+  "status": "completed",
+  "depends_on": ["rustkit-viewhost", "rustkit-compositor", "html-dom-pipeline", "js-engine-integration", "networking-http"],
+  "goal": "Create the rustkit-engine crate that orchestrates all RustKit components to provide a complete browser engine with multi-view support.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-engine/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-engine/Cargo.toml",
+      "crates/rustkit-engine/src/lib.rs",
+      "docs/RUSTKIT-ENGINE.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-engine/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-ENGINE.md'), 'RUSTKIT-ENGINE.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-engine",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-engine crate integrating all RustKit crates",
+    "Implement Engine struct with multi-view management",
+    "Implement View struct wrapping viewhost/compositor/dom",
+    "Implement load_url() coordinating net/dom/css/layout",
+    "Implement resize handling across all layers",
+    "Add IPC between views",
+    "Document engine API"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

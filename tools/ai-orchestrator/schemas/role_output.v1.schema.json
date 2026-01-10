@@ -1,0 +1,13 @@
+﻿{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hiwave.local/schemas/role_output.v1.schema.json",
+  "title": "RoleOutput (v1)",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["role", "work_order_id", "summary"],
+  "properties": {
+    "role": {"type": "string", "enum": ["architect", "implementer", "verifier", "coordinator"]},
+    "work_order_id": {"type": "string", "minLength": 1},
+    "summary": {"type": "string"}
+  }
+}

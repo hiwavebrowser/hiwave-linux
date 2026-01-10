@@ -1,0 +1,30 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "canary-runner",
+  "title": "Local canary runner: build + scripted smoke flows + health signals",
+  "status": "pending",
+  "depends_on": ["local-ci-emulator", "artifact-store"],
+  "goal": "After each merge, run scripted smoke flows (resize drag, multi-view, navigation) and emit a health signal; auto-trigger revert on failure.",
+  "acceptance": {
+    "gates": [
+      {
+        "id": "placeholder",
+        "type": "custom",
+        "cmd": "python -c \"print('canary-runner: placeholder gate (will be replaced)')\"",
+        "timeout_seconds": 10
+      }
+    ]
+  },
+  "steps": [
+    "Implement a canary runner command that builds and runs smoke flows.",
+    "Capture logs/screenshots/traces under .ai/artifacts.",
+    "Emit a machine-readable health summary consumed by auto-revert."
+  ],
+  "rollback": {
+    "strategy": "Disable canary and revert associated scripts."
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+
+

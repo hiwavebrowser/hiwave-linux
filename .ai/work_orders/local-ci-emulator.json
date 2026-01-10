@@ -1,0 +1,47 @@
+﻿{
+  "schema_version": "work_order.v1",
+  "id": "local-ci-emulator",
+  "title": "Local CI emulator command producing a merge report artifact",
+  "status": "in_progress",
+  "depends_on": ["define-agent-io", "artifact-store"],
+  "goal": "Provide a single local command that runs all merge gates and outputs a signed VerificationReport + artifacts that can be used for auto-merge decisions.",
+  "acceptance": {
+    "gates": [
+      {
+        "id": "fmt",
+        "type": "format",
+        "cmd": "cargo fmt --check",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "clippy",
+        "type": "lint",
+        "cmd": "cargo clippy --workspace --all-targets --all-features",
+        "timeout_seconds": 1800
+      },
+      {
+        "id": "test",
+        "type": "test",
+        "cmd": "cargo test --workspace",
+        "timeout_seconds": 3600
+      },
+      {
+        "id": "build_release_app",
+        "type": "build",
+        "cmd": "cargo build -p hiwave-app --release",
+        "timeout_seconds": 3600
+      }
+    ]
+  },
+  "steps": [
+    "Implement an orchestrator command that reads WorkOrder acceptance gates, runs them, and records results.",
+    "Capture stdout/stderr under .ai/artifacts/<run_id>/<work_order_id>/.",
+    "Emit a signed VerificationReport under .ai/reports/."
+  ],
+  "rollback": {
+    "strategy": "Revert CI emulator scripts and report generation."
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

@@ -1,0 +1,30 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "artifact-store",
+  "title": "Local artifact store layout for logs/traces/screenshots + deterministic references",
+  "status": "pending",
+  "depends_on": ["define-agent-io"],
+  "goal": "Create a stable .ai/artifacts layout and a standard artifact manifest so PRs and reports can reference evidence deterministically.",
+  "acceptance": {
+    "gates": [
+      {
+        "id": "placeholder",
+        "type": "custom",
+        "cmd": "python -c \"print('artifact-store: placeholder gate (will be replaced)')\"",
+        "timeout_seconds": 10
+      }
+    ]
+  },
+  "steps": [
+    "Define artifact directory convention: .ai/artifacts/<run_id>/<work_order_id>/...",
+    "Emit a machine-readable artifact manifest referenced by VerificationReport.",
+    "Ensure .gitignore excludes artifacts and caches."
+  ],
+  "rollback": {
+    "strategy": "Revert artifact layout and related tooling changes."
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+
+

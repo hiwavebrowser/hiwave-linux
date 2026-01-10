@@ -1,0 +1,62 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "js-engine-integration",
+  "title": "Integrate JavaScript engine (V8) with RustKit",
+  "status": "completed",
+  "depends_on": ["html-dom-pipeline"],
+  "goal": "Integrate V8 JavaScript engine via rusty_v8 crate, providing script execution context and basic console/timer APIs.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-js/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-js/Cargo.toml",
+      "crates/rustkit-js/src/lib.rs",
+      "docs/RUSTKIT-JS.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-js/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-JS.md'), 'RUSTKIT-JS.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-js",
+        "timeout_seconds": 600
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-js crate with rusty_v8 dependency",
+    "Implement JsRuntime wrapper for V8 isolate",
+    "Implement script evaluation API",
+    "Implement console.log/warn/error",
+    "Implement setTimeout/setInterval",
+    "Document JS engine API"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "multiview-integration",
+  "status": "fail",
+  "started_at": "2026-01-02T21:03:31.436877+00:00",
+  "finished_at": "2026-01-02T21:03:48.390686+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-engine/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 43,
+      "stdout_path": ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-ENGINE.md'), 'RUSTKIT-ENGINE.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 34,
+      "stdout_path": ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-engine",
+      "exit_code": 101,
+      "duration_ms": 16875,
+      "stdout_path": ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration",
+    "logs": [
+      ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T210331Z_0fb3a326/multiview-integration/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "e8e01d65898c4ed239655ff466098212519aaab2753af4f15a470295c821b6b2"
+  }
+}

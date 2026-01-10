@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hiwave.local/schemas/verification_report.v1.schema.json",
+  "title": "VerificationReport (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "work_order_id",
+    "status",
+    "started_at",
+    "finished_at",
+    "gates",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": { "const": "verification_report.v1" },
+    "work_order_id": { "type": "string", "minLength": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["pass", "fail", "error"]
+    },
+    "started_at": { "type": "string" },
+    "finished_at": { "type": "string" },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "cmd", "exit_code", "duration_ms"],
+        "properties": {
+          "id": { "type": "string" },
+          "cmd": { "type": "string" },
+          "exit_code": { "type": "integer" },
+          "duration_ms": { "type": "integer", "minimum": 0 },
+          "stdout_path": { "type": "string" },
+          "stderr_path": { "type": "string" }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "artifact_dir": { "type": "string" },
+        "logs": { "type": "array", "items": { "type": "string" } },
+        "screenshots": { "type": "array", "items": { "type": "string" } },
+        "traces": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
+

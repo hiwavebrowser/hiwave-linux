@@ -1,0 +1,49 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "request-interception",
+  "title": "Implement request interception for URL filtering and modification",
+  "status": "completed",
+  "depends_on": ["networking-http"],
+  "goal": "Create request interception layer that allows HiWave to filter, modify, or block requests before they are sent.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-net/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-net/src/intercept.rs",
+      "docs/RUSTKIT-NET.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-net",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Add InterceptHandler trait",
+    "Implement request filtering by URL pattern",
+    "Implement request modification (headers, body)",
+    "Implement request blocking",
+    "Add callback for navigation decisions",
+    "Document interception API"
+  ],
+  "rollback": {
+    "strategy": "Revert intercept.rs changes"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

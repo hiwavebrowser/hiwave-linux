@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "webkit-fork-ci",
+  "status": "pass",
+  "started_at": "2026-01-02T20:08:14.363855+00:00",
+  "finished_at": "2026-01-02T20:08:14.460858+00:00",
+  "gates": [
+    {
+      "id": "fork-setup-docs",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/WEBKIT-FORK-SETUP.md'), 'WEBKIT-FORK-SETUP.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 30,
+      "stdout_path": ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/fork-setup-docs.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/fork-setup-docs.stderr.txt"
+    },
+    {
+      "id": "build-script-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('scripts/build-webkit.ps1'), 'build-webkit.ps1 missing'\"",
+      "exit_code": 0,
+      "duration_ms": 32,
+      "stdout_path": ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/build-script-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/build-script-exists.stderr.txt"
+    },
+    {
+      "id": "blocker-repros-documented",
+      "cmd": "python -c \"content = open('docs/WEBKIT-FORK-SETUP.md', encoding='utf-8').read(); assert 'Minimal Reproductions' in content, 'Missing reproduction docs'\"",
+      "exit_code": 0,
+      "duration_ms": 33,
+      "stdout_path": ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/blocker-repros-documented.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/blocker-repros-documented.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci",
+    "logs": [
+      ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/fork-setup-docs.stdout.txt",
+      ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/build-script-exists.stdout.txt",
+      ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/blocker-repros-documented.stdout.txt",
+      ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/fork-setup-docs.stderr.txt",
+      ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/build-script-exists.stderr.txt",
+      ".ai/artifacts/20260102T200814Z_30358398/webkit-fork-ci/blocker-repros-documented.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "cae3fdc2c813a0ac25c054524ce8272f795a25b002668810e78cb4779696903a"
+  }
+}

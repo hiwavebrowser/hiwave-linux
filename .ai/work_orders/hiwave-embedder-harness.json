@@ -1,0 +1,62 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "hiwave-embedder-harness",
+  "title": "Build standalone HiWave-like harness to reproduce resize and multi-view issues",
+  "status": "completed",
+  "depends_on": ["reqs-mvp-matrix"],
+  "goal": "Create a minimal test harness that mimics HiWave's embedding pattern (child HWNDs, rapid set_bounds, show/hide) to reliably reproduce WinCairo issues and serve as benchmark for the new Rust engine.",
+  "scope": {
+    "allowed_paths": [
+      "crates/hiwave-smoke/",
+      "tools/embedder-harness/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/hiwave-smoke/src/main.rs",
+      "crates/hiwave-smoke/src/tests/",
+      "docs/EMBEDDER-HARNESS.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "harness-builds",
+        "type": "build",
+        "cmd": "cargo build -p hiwave-smoke --release",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "harness-runs",
+        "type": "custom",
+        "cmd": "cargo run -p hiwave-smoke --release -- --duration-ms 2000",
+        "timeout_seconds": 60
+      },
+      {
+        "id": "harness-docs",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/EMBEDDER-HARNESS.md'), 'EMBEDDER-HARNESS.md missing'\"",
+        "timeout_seconds": 10
+      }
+    ]
+  },
+  "steps": [
+    "Enhance hiwave-smoke to include stress test modes",
+    "Add multi-view creation/destruction stress test",
+    "Add rapid resize stress test (10,000 iterations)",
+    "Capture screenshots for visual regression testing",
+    "Document harness usage and interpretation of results"
+  ],
+  "rollback": {
+    "strategy": "Revert to previous hiwave-smoke implementation"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

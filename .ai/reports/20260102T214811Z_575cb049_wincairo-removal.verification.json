@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "wincairo-removal",
+  "status": "pass",
+  "started_at": "2026-01-02T21:48:11.985344+00:00",
+  "finished_at": "2026-01-02T21:48:44.883578+00:00",
+  "gates": [
+    {
+      "id": "no-wincairo-dep",
+      "cmd": "python -c \"import os; assert not os.path.exists('crates/webkit-wincairo/Cargo.toml'), 'webkit-wincairo still exists'\"",
+      "exit_code": 0,
+      "duration_ms": 32,
+      "stdout_path": ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/no-wincairo-dep.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/no-wincairo-dep.stderr.txt"
+    },
+    {
+      "id": "workspace-builds",
+      "cmd": "cargo build --workspace",
+      "exit_code": 0,
+      "duration_ms": 13372,
+      "stdout_path": ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/workspace-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/workspace-builds.stderr.txt"
+    },
+    {
+      "id": "rustkit-builds",
+      "cmd": "cargo build -p hiwave-app --features rustkit",
+      "exit_code": 0,
+      "duration_ms": 19492,
+      "stdout_path": ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/rustkit-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/rustkit-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal",
+    "logs": [
+      ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/no-wincairo-dep.stdout.txt",
+      ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/workspace-builds.stdout.txt",
+      ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/rustkit-builds.stdout.txt",
+      ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/no-wincairo-dep.stderr.txt",
+      ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/workspace-builds.stderr.txt",
+      ".ai/artifacts/20260102T214811Z_575cb049/wincairo-removal/rustkit-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "2f3f7f7edefecde5b0bc417e200e537165a57b806108c9a07433259913dc81e1"
+  }
+}

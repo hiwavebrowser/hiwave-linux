@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "hiwave-embedder-harness",
+  "status": "pass",
+  "started_at": "2026-01-02T20:08:34.047345+00:00",
+  "finished_at": "2026-01-02T20:09:02.589856+00:00",
+  "gates": [
+    {
+      "id": "harness-builds",
+      "cmd": "cargo build -p hiwave-smoke --release",
+      "exit_code": 0,
+      "duration_ms": 25792,
+      "stdout_path": ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-builds.stderr.txt"
+    },
+    {
+      "id": "harness-runs",
+      "cmd": "cargo run -p hiwave-smoke --release -- --duration-ms 2000",
+      "exit_code": 0,
+      "duration_ms": 2707,
+      "stdout_path": ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-runs.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-runs.stderr.txt"
+    },
+    {
+      "id": "harness-docs",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/EMBEDDER-HARNESS.md'), 'EMBEDDER-HARNESS.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 42,
+      "stdout_path": ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-docs.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-docs.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness",
+    "logs": [
+      ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-builds.stdout.txt",
+      ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-runs.stdout.txt",
+      ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-docs.stdout.txt",
+      ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-builds.stderr.txt",
+      ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-runs.stderr.txt",
+      ".ai/artifacts/20260102T200834Z_159446ae/hiwave-embedder-harness/harness-docs.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "af01d538484f07eceefd6b42e16405ccbe576ea386ee497ee1bf710d8dbd4802"
+  }
+}

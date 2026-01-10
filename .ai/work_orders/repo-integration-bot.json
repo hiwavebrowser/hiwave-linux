@@ -1,0 +1,30 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "repo-integration-bot",
+  "title": "Local PR/branch automation + auto-merge policy enforcement",
+  "status": "pending",
+  "depends_on": ["define-agent-io", "local-ci-emulator"],
+  "goal": "Automate branch creation, commits, PR creation (if remote exists), and safe auto-merge when gates + canary pass.",
+  "acceptance": {
+    "gates": [
+      {
+        "id": "placeholder",
+        "type": "custom",
+        "cmd": "python -c \"print('repo-integration-bot: placeholder gate (will be replaced)')\"",
+        "timeout_seconds": 10
+      }
+    ]
+  },
+  "steps": [
+    "Implement git branch/commit helpers and a queue for local-only mode.",
+    "If `gh` is available and a remote exists, create PRs automatically.",
+    "Implement policy checks: required gates, required evidence, forbidden file patterns."
+  ],
+  "rollback": {
+    "strategy": "Disable auto-merge and revert integration tooling changes."
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+
+

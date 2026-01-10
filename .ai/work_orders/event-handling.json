@@ -1,0 +1,33 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "event-handling",
+  "title": "Phase 14: Event Handling",
+  "description": "Complete input event pipeline with mouse, keyboard, focus management, hit testing, and event bubbling.",
+  "agent_role": "implementer",
+  "priority": "critical",
+  "estimated_hours": 32,
+  "deliverables": [
+    "Mouse events (click, dblclick, mousedown/up/move, hover)",
+    "Keyboard events (keydown, keyup, keypress, input)",
+    "Focus management with tab navigation",
+    "Accurate element hit detection",
+    "Event capture and bubble phases",
+    "Basic touch/pointer events"
+  ],
+  "acceptance_criteria": [
+    "Interactive buttons and links work",
+    "Form inputs accept text input",
+    "Tab navigation works correctly",
+    "Click events fire on correct elements"
+  ],
+  "ci_gates": [
+    "cargo fmt --check",
+    "cargo clippy --workspace -- -D warnings",
+    "cargo test --workspace",
+    "cargo test --package rustkit-test -- events"
+  ],
+  "depends_on": ["css-box-model"],
+  "status": "pending",
+  "created_at": "2026-01-02T22:00:00Z"
+}
+

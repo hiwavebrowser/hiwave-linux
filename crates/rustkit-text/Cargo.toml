@@ -1,0 +1,35 @@
+[package]
+name = "rustkit-text"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform text shaping and font access for RustKit"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+thiserror = "1.0"
+tracing = "0.1"
+
+# Windows (DirectWrite)
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Graphics_DirectWrite",
+] }
+
+# macOS (Core Text)
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+core-graphics = "0.23"
+core-text = "20.1"
+
+# Linux (Fontconfig + FreeType)
+[target.'cfg(target_os = "linux")'.dependencies]
+fontconfig = "0.6"
+freetype-rs = "0.35"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+

@@ -1,0 +1,61 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "rustkit-viewhost",
+  "title": "Implement Win32 ViewHost layer (child HWND creation, WM_SIZE/DPI handling, focus, visibility)",
+  "status": "completed",
+  "depends_on": ["reqs-mvp-matrix", "hiwave-embedder-harness"],
+  "goal": "Create the foundational Win32 window hosting layer that correctly manages child HWNDs, handles resize events at the OS level, and supports multiple concurrent views.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-viewhost/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-viewhost/Cargo.toml",
+      "crates/rustkit-viewhost/src/lib.rs",
+      "docs/RUSTKIT-VIEWHOST.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-viewhost/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-VIEWHOST.md'), 'RUSTKIT-VIEWHOST.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-viewhost",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-viewhost crate with Cargo.toml",
+    "Implement ViewId and ViewHost struct for HWND management",
+    "Implement WM_SIZE, WM_DPICHANGED, WM_SETFOCUS message handling",
+    "Add multi-view support with per-view state isolation",
+    "Document API and usage patterns"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

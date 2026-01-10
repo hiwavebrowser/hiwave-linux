@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hiwave.local/schemas/work_order.v1.schema.json",
+  "title": "WorkOrder (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "title",
+    "status",
+    "goal",
+    "acceptance",
+    "steps",
+    "rollback",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "work_order.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "in_progress", "completed", "blocked", "cancelled"]
+    },
+    "depends_on": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "goal": { "type": "string", "minLength": 1 },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowed_paths": { "type": "array", "items": { "type": "string" } },
+        "forbidden_paths": { "type": "array", "items": { "type": "string" } },
+        "touches": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gates"],
+      "properties": {
+        "gates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "type", "cmd"],
+            "properties": {
+              "id": { "type": "string" },
+              "type": { "type": "string", "enum": ["format", "lint", "build", "test", "stress", "custom"] },
+              "cmd": { "type": "string", "minLength": 1 },
+              "timeout_seconds": { "type": "integer", "minimum": 1, "default": 1800 }
+            }
+          }
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" }
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy"],
+      "properties": {
+        "strategy": { "type": "string", "minLength": 1 },
+        "revert_commit": { "type": "string" }
+      }
+    },
+    "owners": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "coordinator": { "type": "string" },
+        "architect": { "type": "string" },
+        "implementers": { "type": "array", "items": { "type": "string" } },
+        "verifier": { "type": "string" }
+      }
+    },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" }
+  }
+}
+

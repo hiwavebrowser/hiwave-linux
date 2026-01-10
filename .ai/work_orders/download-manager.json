@@ -1,0 +1,50 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "download-manager",
+  "title": "Implement download manager with progress tracking and cancellation",
+  "status": "completed",
+  "depends_on": ["networking-http"],
+  "goal": "Create download manager that handles file downloads with progress reporting, pause/resume, and cancellation.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-net/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-net/src/download.rs",
+      "docs/RUSTKIT-NET.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-net",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Add Download and DownloadManager types",
+    "Implement download initiation from Content-Disposition",
+    "Implement progress tracking",
+    "Implement pause/resume",
+    "Implement cancellation",
+    "Add suggested filename extraction",
+    "Document download API"
+  ],
+  "rollback": {
+    "strategy": "Revert download.rs changes"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

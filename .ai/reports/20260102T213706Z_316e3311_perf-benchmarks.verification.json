@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "perf-benchmarks",
+  "status": "pass",
+  "started_at": "2026-01-02T21:37:06.363641+00:00",
+  "finished_at": "2026-01-02T21:37:23.596064+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-bench/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 32,
+      "stdout_path": ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-PERF.md'), 'RUSTKIT-PERF.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 31,
+      "stdout_path": ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-bench",
+      "exit_code": 0,
+      "duration_ms": 17168,
+      "stdout_path": ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks",
+    "logs": [
+      ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T213706Z_316e3311/perf-benchmarks/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "2cb678002f37f24dc5f5f57416e1107173a0114fb1eaf228a02cbcef7030babd"
+  }
+}

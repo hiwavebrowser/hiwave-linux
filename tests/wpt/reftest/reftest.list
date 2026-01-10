@@ -1,0 +1,7 @@
+# RustKit Reference Tests
+# Format: == test.html reference.html (should match)
+#         != test.html reference.html (should NOT match)
+
+# Basic tests
+== color-red.html color-red-ref.html
+

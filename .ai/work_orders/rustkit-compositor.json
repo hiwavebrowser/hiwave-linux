@@ -1,0 +1,61 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "rustkit-compositor",
+  "title": "Implement GPU compositor with per-view swapchain/DirectComposition visual",
+  "status": "completed",
+  "depends_on": ["rustkit-viewhost"],
+  "goal": "Create a GPU compositor that maintains per-view surfaces, correctly handles resize, and enables multiple concurrent views to render independently.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-compositor/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-compositor/Cargo.toml",
+      "crates/rustkit-compositor/src/lib.rs",
+      "docs/RUSTKIT-COMPOSITOR.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-compositor/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-COMPOSITOR.md'), 'RUSTKIT-COMPOSITOR.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-compositor",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-compositor crate with DirectX/wgpu dependencies",
+    "Implement per-view SurfaceState with swapchain management",
+    "Implement resize handling (swapchain recreation)",
+    "Add DirectComposition visual support for smooth composition",
+    "Document compositing architecture and resource lifecycle"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

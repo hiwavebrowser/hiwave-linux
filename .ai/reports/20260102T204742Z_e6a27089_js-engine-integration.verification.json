@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "js-engine-integration",
+  "status": "pass",
+  "started_at": "2026-01-02T20:47:42.419597+00:00",
+  "finished_at": "2026-01-02T20:48:06.238437+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-js/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 46,
+      "stdout_path": ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-JS.md'), 'RUSTKIT-JS.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 39,
+      "stdout_path": ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-js",
+      "exit_code": 0,
+      "duration_ms": 23733,
+      "stdout_path": ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration",
+    "logs": [
+      ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T204742Z_e6a27089/js-engine-integration/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "cbe8edf9c63bb73dd0ae9507c1733cb276b366cc7c1ec49d3a6e0af1be36a20c"
+  }
+}

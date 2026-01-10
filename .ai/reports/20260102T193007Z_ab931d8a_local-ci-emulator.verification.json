@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "local-ci-emulator",
+  "status": "fail",
+  "started_at": "2026-01-02T19:30:07.331537+00:00",
+  "finished_at": "2026-01-02T19:30:17.232425+00:00",
+  "gates": [
+    {
+      "id": "fmt",
+      "cmd": "cargo fmt --check",
+      "exit_code": 0,
+      "duration_ms": 325,
+      "stdout_path": ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/fmt.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/fmt.stderr.txt"
+    },
+    {
+      "id": "clippy",
+      "cmd": "cargo clippy --workspace --all-targets --all-features",
+      "exit_code": 0,
+      "duration_ms": 2852,
+      "stdout_path": ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/clippy.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/clippy.stderr.txt"
+    },
+    {
+      "id": "test",
+      "cmd": "cargo test --workspace",
+      "exit_code": 101,
+      "duration_ms": 6722,
+      "stdout_path": ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/test.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/test.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator",
+    "logs": [
+      ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/fmt.stdout.txt",
+      ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/clippy.stdout.txt",
+      ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/test.stdout.txt",
+      ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/fmt.stderr.txt",
+      ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/clippy.stderr.txt",
+      ".ai/artifacts/20260102T193007Z_ab931d8a/local-ci-emulator/test.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "d081fd30a11b526d33c7a08d7748ed3d66f7aa7bbda74dc00b6c4efcb43f3e9c"
+  }
+}

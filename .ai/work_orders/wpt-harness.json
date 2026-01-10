@@ -1,0 +1,64 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "wpt-harness",
+  "title": "Create WPT-style test harness for RustKit conformance testing",
+  "status": "completed",
+  "depends_on": ["hiwave-integration"],
+  "goal": "Build a test harness that runs Web Platform Test style tests against the RustKit engine to measure and improve web standards conformance.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-test/",
+      "tests/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-test/Cargo.toml",
+      "crates/rustkit-test/src/lib.rs",
+      "tests/wpt/",
+      "docs/RUSTKIT-TESTING.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-test/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-TESTING.md'), 'RUSTKIT-TESTING.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-test",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-test crate",
+    "Implement test harness for HTML parsing",
+    "Implement test harness for CSS parsing",
+    "Implement test harness for layout",
+    "Add reference test support",
+    "Document testing approach"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+

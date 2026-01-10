@@ -1,0 +1,40 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "local-ci-emulator",
+  "status": "fail",
+  "started_at": "2026-01-02T19:07:12.657887+00:00",
+  "finished_at": "2026-01-02T19:07:13.730120+00:00",
+  "gates": [
+    {
+      "id": "fmt",
+      "cmd": "cargo fmt --check",
+      "exit_code": 0,
+      "duration_ms": 324,
+      "stdout_path": ".ai/artifacts/20260102T190712Z_240ab5c7/local-ci-emulator/fmt.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T190712Z_240ab5c7/local-ci-emulator/fmt.stderr.txt"
+    },
+    {
+      "id": "clippy",
+      "cmd": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "exit_code": 1,
+      "duration_ms": 747,
+      "stdout_path": ".ai/artifacts/20260102T190712Z_240ab5c7/local-ci-emulator/clippy.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T190712Z_240ab5c7/local-ci-emulator/clippy.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T190712Z_240ab5c7/local-ci-emulator",
+    "logs": [
+      ".ai/artifacts/20260102T190712Z_240ab5c7/local-ci-emulator/fmt.stdout.txt",
+      ".ai/artifacts/20260102T190712Z_240ab5c7/local-ci-emulator/clippy.stdout.txt",
+      ".ai/artifacts/20260102T190712Z_240ab5c7/local-ci-emulator/fmt.stderr.txt",
+      ".ai/artifacts/20260102T190712Z_240ab5c7/local-ci-emulator/clippy.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "b7020064a8577deef511dd411e761faf6ef45c3e99050f1f1eb41bec3667d662"
+  }
+}

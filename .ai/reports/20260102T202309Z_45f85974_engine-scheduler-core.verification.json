@@ -1,0 +1,50 @@
+{
+  "schema_version": "verification_report.v1",
+  "work_order_id": "engine-scheduler-core",
+  "status": "fail",
+  "started_at": "2026-01-02T20:23:09.134552+00:00",
+  "finished_at": "2026-01-02T20:23:25.792342+00:00",
+  "gates": [
+    {
+      "id": "crate-exists",
+      "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-core/Cargo.toml'), 'Cargo.toml missing'\"",
+      "exit_code": 0,
+      "duration_ms": 39,
+      "stdout_path": ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/crate-exists.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/crate-exists.stderr.txt"
+    },
+    {
+      "id": "docs-exist",
+      "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-CORE.md'), 'RUSTKIT-CORE.md missing'\"",
+      "exit_code": 0,
+      "duration_ms": 32,
+      "stdout_path": ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/docs-exist.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/docs-exist.stderr.txt"
+    },
+    {
+      "id": "crate-builds",
+      "cmd": "cargo build -p rustkit-core",
+      "exit_code": 101,
+      "duration_ms": 16586,
+      "stdout_path": ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/crate-builds.stdout.txt",
+      "stderr_path": ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/crate-builds.stderr.txt"
+    }
+  ],
+  "artifacts": {
+    "artifact_dir": ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core",
+    "logs": [
+      ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/crate-exists.stdout.txt",
+      ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/docs-exist.stdout.txt",
+      ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/crate-builds.stdout.txt",
+      ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/crate-exists.stderr.txt",
+      ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/docs-exist.stderr.txt",
+      ".ai/artifacts/20260102T202309Z_45f85974/engine-scheduler-core/crate-builds.stderr.txt"
+    ],
+    "screenshots": [],
+    "traces": []
+  },
+  "signature": {
+    "type": "sha256",
+    "value": "069a20a573942814d61b35804cfd9a9dce1a22ec2eb521849f719ae21149651d"
+  }
+}

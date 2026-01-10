@@ -1,0 +1,63 @@
+{
+  "schema_version": "work_order.v1",
+  "id": "css-style-system",
+  "title": "Implement CSS parsing + cascade/inheritance and connect to layout",
+  "status": "completed",
+  "depends_on": ["html-dom-pipeline"],
+  "goal": "Create CSS parsing using cssparser and implement cascade/inheritance to compute styles for DOM elements.",
+  "scope": {
+    "allowed_paths": [
+      "crates/rustkit-css/",
+      "docs/"
+    ],
+    "forbidden_paths": [],
+    "touches": [
+      "crates/rustkit-css/Cargo.toml",
+      "crates/rustkit-css/src/lib.rs",
+      "docs/RUSTKIT-CSS.md"
+    ]
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "id": "crate-exists",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('crates/rustkit-css/Cargo.toml'), 'Cargo.toml missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "docs-exist",
+        "type": "custom",
+        "cmd": "python -c \"import os; assert os.path.exists('docs/RUSTKIT-CSS.md'), 'RUSTKIT-CSS.md missing'\"",
+        "timeout_seconds": 10
+      },
+      {
+        "id": "crate-builds",
+        "type": "build",
+        "cmd": "cargo build -p rustkit-css",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "steps": [
+    "Create rustkit-css crate with cssparser dependency",
+    "Implement property value types (Color, Length, Display, etc.)",
+    "Implement stylesheet parsing",
+    "Implement cascade and specificity",
+    "Implement style inheritance",
+    "Compute styles for DOM elements",
+    "Document CSS system"
+  ],
+  "rollback": {
+    "strategy": "Delete crate directory if implementation is fundamentally flawed"
+  },
+  "owners": {
+    "coordinator": "ai-orchestrator",
+    "architect": "claude",
+    "implementers": ["claude"],
+    "verifier": "ai-orchestrator"
+  },
+  "created_at": "2026-01-02T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}
+
