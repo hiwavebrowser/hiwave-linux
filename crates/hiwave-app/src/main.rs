@@ -29,7 +29,7 @@ use tao::{
 #[cfg(not(feature = "native-linux"))]
 use webview::{engine_name, HiWaveWebView, IWebView};
 #[cfg(not(feature = "native-linux"))]
-use wry::{Rect, WebViewBuilder};
+use wry::{Rect, WebViewBuilder, WebViewBuilderExtUnix};
 
 // Always need logging
 #[cfg(feature = "native-linux")]
@@ -737,6 +737,24 @@ fn main() {
 
     info!("Window created successfully");
 
+    // Linux: the three webviews (chrome/content/shelf) embed into a shared
+    // gtk::Fixed. wry's build_gtk honors each webview's with_bounds — (x,y) via
+    // Fixed::put and (w,h) via size_request — and set_bounds repositions within
+    // the Fixed on resize. build_as_child (Windows HWND / macOS NSView child)
+    // panics on GTK with UnsupportedWindowHandle, so we must use the Unix path.
+    let gtk_fixed = {
+        use gtk::prelude::*;
+        use tao::platform::unix::WindowExtUnix;
+        let fixed = gtk::Fixed::new();
+        if let Some(vbox) = window.default_vbox() {
+            vbox.pack_start(&fixed, true, true, 0);
+        } else {
+            window.gtk_window().add(&fixed);
+        }
+        fixed.show_all();
+        fixed
+    };
+
     // Get initial window size for WebView bounds
     let window_size = window.inner_size();
     let scale_factor = window.scale_factor();
@@ -785,6 +803,7 @@ fn main() {
         .with_html(CHROME_HTML)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
+        .with_focused(true)
         .with_initialization_script(JS_BRIDGE)
         .with_bounds(chrome_bounds)
         .with_ipc_handler(move |message| {
@@ -1203,7 +1222,7 @@ fn main() {
                 }
             }
         })
-        .build_as_child(&window)
+        .build_gtk(&gtk_fixed)
         .expect("Failed to create Chrome WebView");
 
     // Chrome always uses WRY (WebView2)
@@ -1256,6 +1275,7 @@ fn main() {
         .with_html(ABOUT_HTML)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
+        .with_focused(true)
         .with_bounds(content_bounds)
         .with_navigation_handler(move |url| {
             info!("Content navigating to: {}", url);
@@ -1642,7 +1662,7 @@ fn main() {
                 }
             }
         })
-        .build_as_child(&window)
+        .build_gtk(&gtk_fixed)
         .expect("Failed to create Content WebView");
 
     // WRY initial URL loading
@@ -1750,7 +1770,7 @@ fn main() {
                     let _ = content_proxy5.send_event(UserEvent::FindInPageResult(result));
                 }
             })
-            .build_as_child(&window)
+            .build_gtk(&gtk_fixed)
             .expect("Failed to create Shelf WebView");
 
         info!("Shelf WebView created (bottom, starts hidden)");
@@ -2485,6 +2505,7 @@ fn main() {
                                 .with_html(SETTINGS_HTML)
                                 .with_devtools(cfg!(debug_assertions))
                                 .with_clipboard(true)
+                                .with_focused(true)
                                 .with_initialization_script(JS_BRIDGE)
                                 .with_ipc_handler(move |msg: wry::http::Request<String>| {
                                     let body = msg.body();
