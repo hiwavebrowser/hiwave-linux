@@ -66,7 +66,10 @@ jobs:
             pkg-config \
             build-essential \
             fonts-dejavu-core \
-            fonts-liberation
+            fonts-liberation \
+            mesa-vulkan-drivers \
+            libvulkan1 \
+            vulkan-tools
 
       - name: Collect metrics
         shell: bash
