@@ -2600,7 +2600,16 @@ fn main() {
                                         }
                                     }
                                 })
-                                .build(&settings_win)
+                                // Linux/Wayland: .build(&window) uses the X11-only window-handle
+                                // path and renders a white screen on Wayland. Build into the
+                                // settings window's gtk vbox instead (pack_start fills the window)
+                                // — same Unix path as the main webviews.
+                                .build_gtk({
+                                    use tao::platform::unix::WindowExtUnix;
+                                    settings_win
+                                        .default_vbox()
+                                        .expect("settings window has no gtk vbox")
+                                })
                                 .expect("Failed to create settings WebView");
 
                             *settings_guard = Some((settings_win, settings_webview));
