@@ -61,6 +61,7 @@ jobs:
             libfreetype6-dev \
             libglib2.0-dev \
             libssl-dev \
+            libasound2-dev \
             libxdo-dev \
             pkg-config \
             build-essential
