@@ -1169,9 +1169,115 @@ pub fn parse_display(value: &str) -> Option<Display> {
     }
 }
 
+// ==================== Shadow / Filter Types ====================
+
+/// A CSS box-shadow value.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BoxShadow {
+    /// Horizontal offset (positive = right).
+    pub offset_x: f32,
+    /// Vertical offset (positive = down).
+    pub offset_y: f32,
+    /// Blur radius (0 = sharp edge).
+    pub blur_radius: f32,
+    /// Spread radius (positive = larger shadow).
+    pub spread_radius: f32,
+    /// Shadow color.
+    pub color: Color,
+    /// Whether this is an inset shadow.
+    pub inset: bool,
+}
+
+impl BoxShadow {
+    /// Create a new box shadow with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a simple drop shadow.
+    pub fn drop_shadow(offset_x: f32, offset_y: f32, blur: f32, color: Color) -> Self {
+        Self {
+            offset_x,
+            offset_y,
+            blur_radius: blur,
+            spread_radius: 0.0,
+            color,
+            inset: false,
+        }
+    }
+
+    /// Check if this shadow is visible (non-zero offset, blur, or spread with non-transparent color).
+    pub fn is_visible(&self) -> bool {
+        self.color.a > 0.0
+            && (self.offset_x != 0.0 || self.offset_y != 0.0 || self.blur_radius > 0.0 || self.spread_radius != 0.0)
+    }
+}
+
+/// A filter function that can be applied to the backdrop.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum BackdropFilter {
+    /// No backdrop filter.
+    #[default]
+    None,
+    /// Gaussian blur with the specified radius in pixels.
+    Blur(f32),
+    /// Grayscale filter (0.0 = no effect, 1.0 = fully grayscale).
+    Grayscale(f32),
+    /// Brightness adjustment (1.0 = no change).
+    Brightness(f32),
+    /// Contrast adjustment (1.0 = no change).
+    Contrast(f32),
+    /// Saturate adjustment (1.0 = no change, 0.0 = grayscale, >1 = oversaturated).
+    Saturate(f32),
+    /// Sepia filter (0.0 = no effect, 1.0 = fully sepia).
+    Sepia(f32),
+}
+
+impl BackdropFilter {
+    /// Check if this filter has any effect.
+    pub fn is_none(&self) -> bool {
+        matches!(self, BackdropFilter::None)
+    }
+
+    /// Check if this filter requires blur (most expensive operation).
+    pub fn needs_blur(&self) -> bool {
+        matches!(self, BackdropFilter::Blur(r) if *r > 0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Shadow/Filter family (inert type port from hiwave-macos). Pure-method
+    // execute tests — parser and ComputedStyle are untouched by this port.
+    #[test]
+    fn test_box_shadow_default_invisible() {
+        let s = BoxShadow::new();
+        // Default shadow: zero offsets/blur/spread and default (black opaque)
+        // color, but no geometry -> not visible.
+        assert!(!s.is_visible());
+    }
+
+    #[test]
+    fn test_box_shadow_drop_visible() {
+        let s = BoxShadow::drop_shadow(2.0, 2.0, 4.0, Color::new(0, 0, 0, 0.5));
+        assert_eq!((s.offset_x, s.offset_y, s.blur_radius), (2.0, 2.0, 4.0));
+        assert!(!s.inset);
+        assert!(s.is_visible());
+        // Transparent color -> not visible even with geometry.
+        let clear = BoxShadow::drop_shadow(2.0, 2.0, 4.0, Color::new(0, 0, 0, 0.0));
+        assert!(!clear.is_visible());
+    }
+
+    #[test]
+    fn test_backdrop_filter() {
+        assert!(BackdropFilter::default().is_none());
+        assert!(BackdropFilter::None.is_none());
+        assert!(BackdropFilter::Blur(3.0).needs_blur());
+        assert!(!BackdropFilter::Blur(0.0).needs_blur());
+        assert!(!BackdropFilter::Grayscale(1.0).needs_blur());
+    }
 
     #[test]
     fn test_parse_color_hex() {
