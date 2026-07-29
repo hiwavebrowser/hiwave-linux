@@ -51,6 +51,14 @@ def collect(commit: str, branch: str) -> dict:
     build_code, build_out = run(["cargo", "build", "--workspace"])
     build_warnings = len(re.findall(r"^warning:", build_out, re.M))
 
+    # On a failed build, echo the tail to stderr so CI shows WHY. The metrics
+    # JSON only records exit_code; without this, a red build (often a missing
+    # system -sys lib on a bare runner) is invisible in the step log.
+    if build_code != 0:
+        tail = "\n".join(build_out.splitlines()[-60:])
+        print(f"\n=== cargo build --workspace FAILED (exit {build_code}) ===\n{tail}",
+              file=sys.stderr)
+
     test_code, test_out = run(["cargo", "test", "--workspace"])
 
     # Attribute each "test result:" block to the binary that produced it.
