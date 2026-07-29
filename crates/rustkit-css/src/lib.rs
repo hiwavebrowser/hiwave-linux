@@ -77,6 +77,194 @@ impl Default for Color {
     }
 }
 
+/// High-precision color for internal rendering calculations.
+/// RGB components are stored as f32 in 0.0-1.0 range.
+/// Use for gradient interpolation and internal processing.
+/// Convert to Color only at final display/storage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorF32 {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl ColorF32 {
+    pub const TRANSPARENT: ColorF32 = ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    pub const BLACK: ColorF32 = ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+    pub const WHITE: ColorF32 = ColorF32 { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+
+    #[inline]
+    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+
+    #[inline]
+    pub fn from_rgb(r: f32, g: f32, b: f32) -> Self {
+        Self { r, g, b, a: 1.0 }
+    }
+
+    /// Convert from 8-bit Color to high-precision ColorF32.
+    #[inline]
+    pub fn from_color(c: Color) -> Self {
+        Self {
+            r: c.r as f32 / 255.0,
+            g: c.g as f32 / 255.0,
+            b: c.b as f32 / 255.0,
+            a: c.a,
+        }
+    }
+
+    /// Convert to 8-bit Color for final display.
+    /// Uses rounding for best accuracy.
+    #[inline]
+    pub fn to_color(&self) -> Color {
+        Color {
+            r: (self.r * 255.0).round().clamp(0.0, 255.0) as u8,
+            g: (self.g * 255.0).round().clamp(0.0, 255.0) as u8,
+            b: (self.b * 255.0).round().clamp(0.0, 255.0) as u8,
+            a: self.a,
+        }
+    }
+
+    /// Convert to 8-bit Color with ordered dithering to reduce banding.
+    /// `pixel_x` and `pixel_y` are the screen coordinates for dither pattern.
+    #[inline]
+    pub fn to_color_dithered(&self, pixel_x: u32, pixel_y: u32) -> Color {
+        // 4x4 Bayer ordered dithering matrix (normalized to 0.0-1.0 range)
+        const BAYER_4X4: [[f32; 4]; 4] = [
+            [0.0/16.0, 8.0/16.0, 2.0/16.0, 10.0/16.0],
+            [12.0/16.0, 4.0/16.0, 14.0/16.0, 6.0/16.0],
+            [3.0/16.0, 11.0/16.0, 1.0/16.0, 9.0/16.0],
+            [15.0/16.0, 7.0/16.0, 13.0/16.0, 5.0/16.0],
+        ];
+
+        let dither = BAYER_4X4[(pixel_y & 3) as usize][(pixel_x & 3) as usize];
+        let dither_offset = (dither - 0.5) / 255.0;
+
+        Color {
+            r: ((self.r + dither_offset) * 255.0).round().clamp(0.0, 255.0) as u8,
+            g: ((self.g + dither_offset) * 255.0).round().clamp(0.0, 255.0) as u8,
+            b: ((self.b + dither_offset) * 255.0).round().clamp(0.0, 255.0) as u8,
+            a: self.a,
+        }
+    }
+
+    /// Linear interpolation between two colors using premultiplied alpha.
+    /// Chrome/Skia uses premultiplied alpha interpolation for gradients, which
+    /// prevents color bleeding from transparent color stops.
+    #[inline]
+    pub fn lerp(&self, other: &ColorF32, t: f32) -> ColorF32 {
+        // Convert to premultiplied alpha
+        let pre1_r = self.r * self.a;
+        let pre1_g = self.g * self.a;
+        let pre1_b = self.b * self.a;
+
+        let pre2_r = other.r * other.a;
+        let pre2_g = other.g * other.a;
+        let pre2_b = other.b * other.a;
+
+        // Interpolate in premultiplied space
+        let pre_r = pre1_r + (pre2_r - pre1_r) * t;
+        let pre_g = pre1_g + (pre2_g - pre1_g) * t;
+        let pre_b = pre1_b + (pre2_b - pre1_b) * t;
+        let a = self.a + (other.a - self.a) * t;
+
+        // Convert back from premultiplied (avoid division by zero)
+        if a > 0.0001 {
+            ColorF32 {
+                r: pre_r / a,
+                g: pre_g / a,
+                b: pre_b / a,
+                a,
+            }
+        } else {
+            // Fully transparent - color doesn't matter
+            ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+        }
+    }
+
+    /// Linear interpolation using straight (unpremultiplied) alpha.
+    /// Use this when premultiplied interpolation is not desired.
+    #[inline]
+    pub fn lerp_straight(&self, other: &ColorF32, t: f32) -> ColorF32 {
+        ColorF32 {
+            r: self.r + (other.r - self.r) * t,
+            g: self.g + (other.g - self.g) * t,
+            b: self.b + (other.b - self.b) * t,
+            a: self.a + (other.a - self.a) * t,
+        }
+    }
+
+    /// Gamma-correct interpolation for CSS gradients.
+    /// Converts sRGB to linear space, interpolates in premultiplied linear,
+    /// then converts back to sRGB. This matches Chrome's gradient rendering.
+    #[inline]
+    pub fn lerp_gamma_correct(&self, other: &ColorF32, t: f32) -> ColorF32 {
+        // Convert sRGB to linear
+        let l1_r = Self::srgb_to_linear(self.r);
+        let l1_g = Self::srgb_to_linear(self.g);
+        let l1_b = Self::srgb_to_linear(self.b);
+
+        let l2_r = Self::srgb_to_linear(other.r);
+        let l2_g = Self::srgb_to_linear(other.g);
+        let l2_b = Self::srgb_to_linear(other.b);
+
+        // Premultiply by alpha in linear space
+        let pre1_r = l1_r * self.a;
+        let pre1_g = l1_g * self.a;
+        let pre1_b = l1_b * self.a;
+
+        let pre2_r = l2_r * other.a;
+        let pre2_g = l2_g * other.a;
+        let pre2_b = l2_b * other.a;
+
+        // Interpolate in linear premultiplied space
+        let pre_r = pre1_r + (pre2_r - pre1_r) * t;
+        let pre_g = pre1_g + (pre2_g - pre1_g) * t;
+        let pre_b = pre1_b + (pre2_b - pre1_b) * t;
+        let a = self.a + (other.a - self.a) * t;
+
+        // Convert back from premultiplied and to sRGB
+        if a > 0.0001 {
+            ColorF32 {
+                r: Self::linear_to_srgb(pre_r / a),
+                g: Self::linear_to_srgb(pre_g / a),
+                b: Self::linear_to_srgb(pre_b / a),
+                a,
+            }
+        } else {
+            ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+        }
+    }
+
+    /// Convert sRGB to linear space.
+    #[inline]
+    fn srgb_to_linear(c: f32) -> f32 {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// Convert linear to sRGB space.
+    #[inline]
+    fn linear_to_srgb(c: f32) -> f32 {
+        if c <= 0.0031308 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    /// Convert to array for GPU vertex buffers.
+    #[inline]
+    pub fn to_array(&self) -> [f32; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
+}
+
 /// A CSS length value.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Length {
@@ -1172,6 +1360,51 @@ pub fn parse_display(value: &str) -> Option<Display> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ColorF32 (inert type port from hiwave-macos). Pure-method execute tests —
+    // parser and ComputedStyle are untouched by this port.
+    #[test]
+    fn test_colorf32_color_roundtrip() {
+        let c = Color::new(128, 64, 200, 1.0);
+        let f = ColorF32::from_color(c);
+        // 128/255 ≈ 0.502
+        assert!((f.r - 0.502).abs() < 0.01);
+        let back = f.to_color();
+        assert_eq!(back.r, 128);
+        assert_eq!(back.g, 64);
+        assert_eq!(back.b, 200);
+    }
+
+    #[test]
+    fn test_colorf32_consts_and_array() {
+        assert_eq!(ColorF32::WHITE.to_array(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(ColorF32::TRANSPARENT.a, 0.0);
+        assert_eq!(ColorF32::BLACK.to_array(), [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_colorf32_lerp_midpoint() {
+        let a = ColorF32::new(0.0, 0.0, 0.0, 1.0);
+        let b = ColorF32::new(1.0, 1.0, 1.0, 1.0);
+        // Opaque endpoints: premultiplied lerp midpoint is 0.5 grey.
+        let mid = a.lerp(&b, 0.5);
+        assert!((mid.r - 0.5).abs() < 1e-6);
+        assert!((mid.a - 1.0).abs() < 1e-6);
+        // Straight lerp agrees for opaque colors.
+        let mid_s = a.lerp_straight(&b, 0.5);
+        assert!((mid_s.g - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_colorf32_gamma_correct_endpoints() {
+        let a = ColorF32::new(0.2, 0.4, 0.6, 1.0);
+        let b = ColorF32::new(0.8, 0.6, 0.4, 1.0);
+        // t=0 and t=1 must return the endpoints (round-trip through linear space).
+        let at0 = a.lerp_gamma_correct(&b, 0.0);
+        assert!((at0.r - 0.2).abs() < 1e-4 && (at0.b - 0.6).abs() < 1e-4);
+        let at1 = a.lerp_gamma_correct(&b, 1.0);
+        assert!((at1.r - 0.8).abs() < 1e-4 && (at1.b - 0.4).abs() < 1e-4);
+    }
 
     #[test]
     fn test_parse_color_hex() {
