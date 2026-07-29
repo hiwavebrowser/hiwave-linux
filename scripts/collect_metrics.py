@@ -59,7 +59,23 @@ def collect(commit: str, branch: str) -> dict:
         print(f"\n=== cargo build --workspace FAILED (exit {build_code}) ===\n{tail}",
               file=sys.stderr)
 
-    test_code, test_out = run(["cargo", "test", "--workspace"])
+    # --no-fail-fast so a failing crate does not stop the run: a metrics
+    # collector must see EVERY crate's result, not a truncated prefix ending at
+    # the first failure (that is the same "green incomplete detector" blind
+    # spot the zero-test detector exists to avoid).
+    test_code, test_out = run(["cargo", "test", "--workspace", "--no-fail-fast"])
+
+    # Echo failing-test context to stderr so CI names WHICH tests failed and
+    # why, instead of only a count. Mirrors the build-failure surfacing above.
+    if test_code != 0:
+        fail_lines = [ln for ln in test_out.splitlines()
+                      if ("FAILED" in ln or "panicked at" in ln
+                          or ln.strip().startswith("assertion")
+                          or ln.strip().startswith("left:")
+                          or ln.strip().startswith("right:"))]
+        if fail_lines:
+            print("\n=== FAILING TESTS ===\n" + "\n".join(fail_lines[:80]),
+                  file=sys.stderr)
 
     # Attribute each "test result:" block to the binary that produced it.
     current = None
