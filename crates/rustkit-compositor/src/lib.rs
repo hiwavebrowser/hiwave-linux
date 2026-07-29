@@ -93,6 +93,14 @@ impl SurfaceState {
     }
 }
 
+/// Headless texture state for offscreen rendering (used in testing/headless mode).
+pub struct HeadlessState {
+    view_id: ViewId,
+    texture: wgpu::Texture,
+    width: u32,
+    height: u32,
+}
+
 /// The main compositor that manages GPU resources and surfaces.
 pub struct Compositor {
     instance: wgpu::Instance,
@@ -100,6 +108,7 @@ pub struct Compositor {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     surfaces: RwLock<HashMap<ViewId, SurfaceState>>,
+    headless_textures: RwLock<HashMap<ViewId, HeadlessState>>,
     config: CompositorConfig,
 }
 
@@ -155,6 +164,7 @@ impl Compositor {
             device: Arc::new(device),
             queue: Arc::new(queue),
             surfaces: RwLock::new(HashMap::new()),
+            headless_textures: RwLock::new(HashMap::new()),
             config,
         })
     }
@@ -316,6 +326,96 @@ impl Compositor {
         Ok(())
     }
 
+    /// Create an offscreen headless texture for a view (testing/headless mode).
+    ///
+    /// Mirrors hiwave-macos: a `RENDER_ATTACHMENT | COPY_SRC` texture with no
+    /// surface, so it works on a headless adapter with no window. This is the
+    /// foundation the parity-capture harness needs on Linux.
+    pub fn create_headless_texture(
+        &self,
+        view_id: ViewId,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CompositorError> {
+        debug!(?view_id, width, height, "Creating headless texture");
+
+        if width == 0 || height == 0 {
+            return Err(CompositorError::SurfaceCreation(
+                "Headless texture dimensions must be non-zero".into(),
+            ));
+        }
+
+        // Create offscreen texture
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Headless Render Target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let state = HeadlessState {
+            view_id,
+            texture,
+            width,
+            height,
+        };
+
+        self.headless_textures.write().unwrap().insert(view_id, state);
+
+        info!(?view_id, width, height, "Headless texture created");
+        Ok(())
+    }
+
+    /// Get a texture view for a headless texture (the render target to draw into).
+    pub fn get_headless_texture_view(
+        &self,
+        view_id: ViewId,
+    ) -> Result<wgpu::TextureView, CompositorError> {
+        let headless = self.headless_textures.read().unwrap();
+        let state = headless
+            .get(&view_id)
+            .ok_or(CompositorError::SurfaceNotFound(view_id))?;
+
+        let view = state.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Ok(view)
+    }
+
+    /// Destroy a headless texture.
+    pub fn destroy_headless_texture(&self, view_id: ViewId) -> Result<(), CompositorError> {
+        let removed = self.headless_textures.write().unwrap().remove(&view_id);
+        if removed.is_some() {
+            info!(?view_id, "Headless texture destroyed");
+            Ok(())
+        } else {
+            Err(CompositorError::SurfaceNotFound(view_id))
+        }
+    }
+
+    /// Get the (width, height) of a view — headless textures first, then surfaces.
+    pub fn get_surface_size(&self, view_id: ViewId) -> Result<(u32, u32), CompositorError> {
+        // Check headless textures first
+        let headless = self.headless_textures.read().unwrap();
+        if let Some(state) = headless.get(&view_id) {
+            return Ok((state.width, state.height));
+        }
+        drop(headless);
+
+        // Fall back to surfaces
+        let surfaces = self.surfaces.read().unwrap();
+        let state = surfaces
+            .get(&view_id)
+            .ok_or(CompositorError::SurfaceNotFound(view_id))?;
+        Ok((state.width, state.height))
+    }
+
     /// Destroy a surface.
     pub fn destroy_surface(&self, view_id: ViewId) -> Result<(), CompositorError> {
         let removed = self.surfaces.write().unwrap().remove(&view_id);
@@ -406,6 +506,135 @@ mod tests {
         assert_eq!(config.format, wgpu::TextureFormat::Bgra8UnormSrgb);
     }
 
-    // Note: GPU tests require a display and are typically run manually
-    // or in integration test environments with GPU access.
+    // Headless-texture tests (mirrored from hiwave-macos). Each skips cleanly
+    // when no GPU adapter is available, so they are safe in headless CI and
+    // exercise the real wgpu path where a GPU exists.
+
+    #[test]
+    fn test_headless_texture_lifecycle() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+        compositor
+            .create_headless_texture(view_id, 800, 600)
+            .expect("Failed to create headless texture");
+
+        let size = compositor
+            .get_surface_size(view_id)
+            .expect("Failed to get surface size");
+        assert_eq!(size, (800, 600));
+
+        compositor
+            .destroy_headless_texture(view_id)
+            .expect("Failed to destroy headless texture");
+
+        assert!(compositor.get_surface_size(view_id).is_err());
+    }
+
+    #[test]
+    fn test_headless_texture_recreate_different_size() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+        compositor
+            .create_headless_texture(view_id, 800, 600)
+            .expect("Failed to create headless texture");
+
+        compositor
+            .destroy_headless_texture(view_id)
+            .expect("Failed to destroy");
+
+        compositor
+            .create_headless_texture(view_id, 1024, 768)
+            .expect("Failed to recreate with new size");
+
+        let size = compositor
+            .get_surface_size(view_id)
+            .expect("Failed to get surface size");
+        assert_eq!(size, (1024, 768));
+
+        compositor
+            .destroy_headless_texture(view_id)
+            .expect("Failed to destroy");
+    }
+
+    #[test]
+    fn test_headless_texture_zero_size() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+        let result = compositor.create_headless_texture(view_id, 0, 0);
+        assert!(result.is_err(), "Zero-size texture should fail");
+    }
+
+    #[test]
+    fn test_multiple_headless_textures() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view1 = ViewId::new();
+        let view2 = ViewId::new();
+        let view3 = ViewId::new();
+
+        compositor
+            .create_headless_texture(view1, 800, 600)
+            .expect("Failed to create texture 1");
+        compositor
+            .create_headless_texture(view2, 1024, 768)
+            .expect("Failed to create texture 2");
+        compositor
+            .create_headless_texture(view3, 640, 480)
+            .expect("Failed to create texture 3");
+
+        assert_eq!(compositor.get_surface_size(view1).unwrap(), (800, 600));
+        assert_eq!(compositor.get_surface_size(view2).unwrap(), (1024, 768));
+        assert_eq!(compositor.get_surface_size(view3).unwrap(), (640, 480));
+
+        compositor.destroy_headless_texture(view1).expect("Failed to destroy 1");
+        compositor.destroy_headless_texture(view2).expect("Failed to destroy 2");
+        compositor.destroy_headless_texture(view3).expect("Failed to destroy 3");
+    }
+
+    #[test]
+    fn test_get_headless_texture_view() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+        compositor
+            .create_headless_texture(view_id, 800, 600)
+            .expect("Failed to create texture");
+
+        let _view = compositor
+            .get_headless_texture_view(view_id)
+            .expect("Failed to get texture view");
+
+        let bad_view_id = ViewId::new();
+        assert!(compositor.get_headless_texture_view(bad_view_id).is_err());
+
+        compositor.destroy_headless_texture(view_id).expect("Failed to destroy");
+    }
 }
