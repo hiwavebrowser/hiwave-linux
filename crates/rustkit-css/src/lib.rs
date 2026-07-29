@@ -133,6 +133,24 @@ impl Display {
     pub fn is_grid(self) -> bool {
         matches!(self, Display::Grid | Display::InlineGrid)
     }
+
+    /// Check if this is an inline-level display (inline, inline-block, inline-flex, inline-grid).
+    pub fn is_inline_level(self) -> bool {
+        matches!(self, Display::Inline | Display::InlineBlock | Display::InlineFlex | Display::InlineGrid)
+    }
+
+    /// Check if this is inline-block.
+    pub fn is_inline_block(self) -> bool {
+        matches!(self, Display::InlineBlock)
+    }
+
+    /// Check if this is an atomic inline-level box (inline-block, inline-flex,
+    /// inline-grid): participates in inline flow as a single opaque box while
+    /// laying out its own contents with its inner display type (CSS Display 3
+    /// §2.4).
+    pub fn is_atomic_inline(self) -> bool {
+        matches!(self, Display::InlineBlock | Display::InlineFlex | Display::InlineGrid)
+    }
 }
 
 // ==================== Flexbox Types ====================
@@ -946,6 +964,16 @@ impl ComputedStyle {
             text_decoration_thickness: Length::Auto,
             // Flexbox item defaults
             flex_shrink: 1.0, // Default is 1, not 0
+            // Width/height default to auto (fill available space), matching
+            // hiwave-macos ComputedStyle::new. Deriving these from
+            // Length::default() (Zero) makes every unstyled element 0x0 and
+            // suppresses parent/last-child margin collapsing (height != auto).
+            width: Length::Auto,
+            height: Length::Auto,
+            min_width: Length::Zero,
+            min_height: Length::Zero,
+            max_width: Length::Auto, // No max constraint
+            max_height: Length::Auto,
             ..Default::default()
         }
     }
