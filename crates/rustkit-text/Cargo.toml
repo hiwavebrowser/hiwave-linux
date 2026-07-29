@@ -9,6 +9,10 @@ license = "MIT"
 [dependencies]
 thiserror = "1.0"
 tracing = "0.1"
+# Unicode text algorithms (platform-agnostic, parity with hiwave-macos)
+unicode-bidi = "0.3"
+unicode-linebreak = "0.1"
+unicode-segmentation = "1.10"
 
 # Windows (DirectWrite)
 [target.'cfg(windows)'.dependencies]
