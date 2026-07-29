@@ -1169,9 +1169,177 @@ pub fn parse_display(value: &str) -> Option<Display> {
     }
 }
 
+// ==================== Transform Types ====================
+
+/// A single 2D transform operation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransformOp {
+    /// translate(x, y)
+    Translate(Length, Length),
+    /// translateX(x)
+    TranslateX(Length),
+    /// translateY(y)
+    TranslateY(Length),
+    /// scale(x, y) or scale(s)
+    Scale(f32, f32),
+    /// scaleX(s)
+    ScaleX(f32),
+    /// scaleY(s)
+    ScaleY(f32),
+    /// rotate(angle) - angle in degrees
+    Rotate(f32),
+    /// skewX(angle) - angle in degrees
+    SkewX(f32),
+    /// skewY(angle) - angle in degrees
+    SkewY(f32),
+    /// skew(x, y) - angles in degrees
+    Skew(f32, f32),
+    /// matrix(a, b, c, d, e, f) - 2D affine transform
+    Matrix(f32, f32, f32, f32, f32, f32),
+}
+
+/// A list of transform operations (applied in order).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TransformList {
+    pub ops: Vec<TransformOp>,
+}
+
+impl TransformList {
+    /// Create an empty (identity) transform list.
+    pub fn none() -> Self {
+        Self { ops: Vec::new() }
+    }
+
+    /// Check if this is the identity transform.
+    pub fn is_identity(&self) -> bool {
+        self.ops.is_empty()
+    }
+
+    /// Compute the 3x3 affine transform matrix.
+    /// Returns [a, b, c, d, e, f] where the matrix is:
+    /// | a c e |
+    /// | b d f |
+    /// | 0 0 1 |
+    pub fn to_matrix(&self, container_width: f32, container_height: f32) -> [f32; 6] {
+        let mut result = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]; // Identity
+
+        for op in &self.ops {
+            let m = match op {
+                TransformOp::Translate(x, y) => {
+                    let tx = x.to_px(16.0, 16.0, container_width);
+                    let ty = y.to_px(16.0, 16.0, container_height);
+                    [1.0, 0.0, 0.0, 1.0, tx, ty]
+                }
+                TransformOp::TranslateX(x) => {
+                    let tx = x.to_px(16.0, 16.0, container_width);
+                    [1.0, 0.0, 0.0, 1.0, tx, 0.0]
+                }
+                TransformOp::TranslateY(y) => {
+                    let ty = y.to_px(16.0, 16.0, container_height);
+                    [1.0, 0.0, 0.0, 1.0, 0.0, ty]
+                }
+                TransformOp::Scale(sx, sy) => [*sx, 0.0, 0.0, *sy, 0.0, 0.0],
+                TransformOp::ScaleX(s) => [*s, 0.0, 0.0, 1.0, 0.0, 0.0],
+                TransformOp::ScaleY(s) => [1.0, 0.0, 0.0, *s, 0.0, 0.0],
+                TransformOp::Rotate(deg) => {
+                    let rad = deg.to_radians();
+                    let cos = rad.cos();
+                    let sin = rad.sin();
+                    [cos, sin, -sin, cos, 0.0, 0.0]
+                }
+                TransformOp::SkewX(deg) => {
+                    let tan = deg.to_radians().tan();
+                    [1.0, 0.0, tan, 1.0, 0.0, 0.0]
+                }
+                TransformOp::SkewY(deg) => {
+                    let tan = deg.to_radians().tan();
+                    [1.0, tan, 0.0, 1.0, 0.0, 0.0]
+                }
+                TransformOp::Skew(dx, dy) => {
+                    let tan_x = dx.to_radians().tan();
+                    let tan_y = dy.to_radians().tan();
+                    [1.0, tan_y, tan_x, 1.0, 0.0, 0.0]
+                }
+                TransformOp::Matrix(a, b, c, d, e, f) => [*a, *b, *c, *d, *e, *f],
+            };
+
+            // Multiply: result = result * m
+            result = multiply_matrices(result, m);
+        }
+
+        result
+    }
+}
+
+/// Multiply two 2D affine matrices.
+fn multiply_matrices(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
+    [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+        a[0] * b[4] + a[2] * b[5] + a[4],
+        a[1] * b[4] + a[3] * b[5] + a[5],
+    ]
+}
+
+/// Transform origin (default: 50% 50%).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransformOrigin {
+    pub x: Length,
+    pub y: Length,
+}
+
+impl Default for TransformOrigin {
+    fn default() -> Self {
+        Self {
+            x: Length::Percent(50.0),
+            y: Length::Percent(50.0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Transform family (inert type port from hiwave-macos). Pure-method execute
+    // tests — parser and ComputedStyle are untouched by this port.
+    #[test]
+    fn test_transform_identity() {
+        let t = TransformList::none();
+        assert!(t.is_identity());
+        assert_eq!(t.to_matrix(100.0, 100.0), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_transform_translate_px() {
+        let t = TransformList {
+            ops: vec![TransformOp::Translate(Length::Px(10.0), Length::Px(20.0))],
+        };
+        let m = t.to_matrix(100.0, 100.0);
+        assert_eq!((m[4], m[5]), (10.0, 20.0));
+        assert!(!t.is_identity());
+    }
+
+    #[test]
+    fn test_transform_scale_and_rotate() {
+        let s = TransformList { ops: vec![TransformOp::Scale(2.0, 3.0)] };
+        let m = s.to_matrix(0.0, 0.0);
+        assert_eq!((m[0], m[3]), (2.0, 3.0));
+
+        // rotate(90deg): cos≈0, sin≈1 -> [0, 1, -1, 0, 0, 0]
+        let r = TransformList { ops: vec![TransformOp::Rotate(90.0)] };
+        let rm = r.to_matrix(0.0, 0.0);
+        assert!(rm[0].abs() < 1e-6 && (rm[1] - 1.0).abs() < 1e-6 && (rm[2] + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_transform_origin_default() {
+        let o = TransformOrigin::default();
+        assert_eq!(o.x, Length::Percent(50.0));
+        assert_eq!(o.y, Length::Percent(50.0));
+    }
 
     #[test]
     fn test_parse_color_hex() {
