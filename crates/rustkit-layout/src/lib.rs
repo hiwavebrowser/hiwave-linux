@@ -18,8 +18,11 @@ pub mod flex;
 pub mod forms;
 pub mod grid;
 pub mod images;
+pub mod intrinsic_cache;
 pub mod scroll;
 pub mod text;
+
+pub use intrinsic_cache::IntrinsicSizingMode;
 
 pub use grid::{layout_grid_container, GridItem, GridLayout, GridTrack};
 pub use forms::{
