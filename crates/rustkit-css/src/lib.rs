@@ -1136,13 +1136,16 @@ pub fn parse_length(value: &str) -> Option<Length> {
         let num = value.trim_end_matches("px").parse::<f32>().ok()?;
         return Some(Length::Px(num));
     }
-    if value.ends_with("em") {
-        let num = value.trim_end_matches("em").parse::<f32>().ok()?;
-        return Some(Length::Em(num));
-    }
+    // rem MUST be checked before em: "2rem".ends_with("em") is true, so an
+    // em-first order trims "em" -> "2r", fails to parse, and the ? drops the
+    // whole declaration silently. (Matches macOS rustkit-css.)
     if value.ends_with("rem") {
         let num = value.trim_end_matches("rem").parse::<f32>().ok()?;
         return Some(Length::Rem(num));
+    }
+    if value.ends_with("em") {
+        let num = value.trim_end_matches("em").parse::<f32>().ok()?;
+        return Some(Length::Em(num));
     }
     if value.ends_with('%') {
         let num = value.trim_end_matches('%').parse::<f32>().ok()?;
@@ -1193,6 +1196,17 @@ mod tests {
         assert_eq!(parse_length("1.5em"), Some(Length::Em(1.5)));
         assert_eq!(parse_length("50%"), Some(Length::Percent(50.0)));
         assert_eq!(parse_length("auto"), Some(Length::Auto));
+    }
+
+    #[test]
+    fn test_rem_parsed_before_em() {
+        // rem MUST be checked before em: "2rem".ends_with("em") is true, so a
+        // naive em-first order trims "em" -> "2r", fails to parse, and the ?
+        // drops the whole declaration -> every rem length silently vanished.
+        assert_eq!(parse_length("2rem"), Some(Length::Rem(2.0)));
+        assert_eq!(parse_length("1.25rem"), Some(Length::Rem(1.25)));
+        // Guard against the naive reorder swallowing em.
+        assert_eq!(parse_length("2em"), Some(Length::Em(2.0)));
     }
 
     #[test]
