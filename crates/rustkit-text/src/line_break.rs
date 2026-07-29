@@ -239,9 +239,24 @@ pub fn has_mandatory_breaks(text: &str) -> bool {
 pub fn split_at_mandatory_breaks(text: &str) -> impl Iterator<Item = &str> {
     // Split on various line endings, keeping track of positions
     let mut last_end = 0;
-    let mut segments = Vec::new();
+    let mut segments: Vec<&str> = Vec::new();
 
+    // UAX #14 LB5: CRLF is ONE mandatory break — same pairing as
+    // break_into_lines (this was the identical second call site of the bug).
+    let mut prev_was_cr = false;
     for (i, c) in text.char_indices() {
+        if c == '\n' && prev_was_cr {
+            // Break already emitted at the CR; extend that segment over the LF.
+            let end = i + c.len_utf8();
+            if let Some(last) = segments.last_mut() {
+                let seg_start = i - last.len(); // last currently ends at the CR (index i)
+                *last = &text[seg_start..end];
+            }
+            last_end = end;
+            prev_was_cr = false;
+            continue;
+        }
+        prev_was_cr = c == '\r';
         if is_mandatory_break(c) {
             // Include the break character in the segment
             let end = i + c.len_utf8();
@@ -594,5 +609,24 @@ mod crlf_regression {
         let segs = break_into_lines("ab\r\ncd");
         assert_eq!((segs[0].start, segs[0].end), (0, 4));
         assert_eq!((segs[1].start, segs[1].end), (4, 6));
+    }
+}
+
+#[cfg(test)]
+mod crlf_split_regression {
+    use super::*;
+
+    #[test]
+    fn split_treats_crlf_as_one_break() {
+        // Same LB5 defect as break_into_lines, second call site.
+        let parts: Vec<&str> = split_at_mandatory_breaks("a\r\nb").collect();
+        assert_eq!(parts.len(), 2, "got {parts:?}");
+        assert_eq!(parts[0], "a\r\n");
+        assert_eq!(parts[1], "b");
+    }
+
+    #[test]
+    fn split_lf_cr_reversed_is_two_breaks() {
+        assert_eq!(split_at_mandatory_breaks("a\n\rb").count(), 3);
     }
 }
