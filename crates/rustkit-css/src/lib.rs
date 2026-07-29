@@ -1169,9 +1169,170 @@ pub fn parse_display(value: &str) -> Option<Display> {
     }
 }
 
+// ==================== Background Types (gradient-free) ====================
+// Mirrors Athena's ratified Windows #41 boundary: the background-layer types
+// that do NOT name Gradient. BackgroundImage / BackgroundLayer are DEFERRED
+// (they name the Gradient type) and land with the renderer gradient migration.
+
+/// Background size specification.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundSize {
+    /// Stretch to cover the entire area.
+    Cover,
+    /// Scale to fit within the area.
+    Contain,
+    /// Explicit width and height (None = auto for that dimension).
+    Explicit { width: Option<f32>, height: Option<f32> },
+    /// Auto sizing (use intrinsic dimensions).
+    Auto,
+}
+
+impl Default for BackgroundSize {
+    fn default() -> Self {
+        BackgroundSize::Auto
+    }
+}
+
+/// Background repeat specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundRepeat {
+    /// Repeat in both directions.
+    Repeat,
+    /// Repeat horizontally only.
+    RepeatX,
+    /// Repeat vertically only.
+    RepeatY,
+    /// No repeat.
+    NoRepeat,
+    /// Space evenly to fill.
+    Space,
+    /// Round to fill without clipping.
+    Round,
+}
+
+impl Default for BackgroundRepeat {
+    fn default() -> Self {
+        BackgroundRepeat::Repeat
+    }
+}
+
+/// Background position specification.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundPosition {
+    /// Horizontal position (0.0 = left, 0.5 = center, 1.0 = right, or pixel offset).
+    pub x: BackgroundPositionValue,
+    /// Vertical position (0.0 = top, 0.5 = center, 1.0 = bottom, or pixel offset).
+    pub y: BackgroundPositionValue,
+}
+
+impl Default for BackgroundPosition {
+    fn default() -> Self {
+        BackgroundPosition {
+            x: BackgroundPositionValue::Percent(0.0),
+            y: BackgroundPositionValue::Percent(0.0),
+        }
+    }
+}
+
+/// A single dimension of background position.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundPositionValue {
+    /// Percentage (0.0 = start, 1.0 = end).
+    Percent(f32),
+    /// Pixel offset from the start.
+    Px(f32),
+}
+
+impl Default for BackgroundPositionValue {
+    fn default() -> Self {
+        BackgroundPositionValue::Percent(0.0)
+    }
+}
+
+impl BackgroundPositionValue {
+    /// Convert to a pixel offset given the container size and image size.
+    pub fn to_px(&self, container_size: f32, image_size: f32) -> f32 {
+        match self {
+            BackgroundPositionValue::Percent(pct) => {
+                // CSS background-position: percentage positions the image such that
+                // X% of the image aligns with X% of the container
+                (container_size - image_size) * pct
+            }
+            BackgroundPositionValue::Px(px) => *px,
+        }
+    }
+}
+
+/// Background origin - where the background positioning area starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundOrigin {
+    /// Position relative to the border box.
+    #[default]
+    PaddingBox,
+    /// Position relative to the border box.
+    BorderBox,
+    /// Position relative to the content box.
+    ContentBox,
+}
+
+/// Box sizing model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoxSizing {
+    #[default]
+    ContentBox,
+    BorderBox,
+}
+
+/// Background clip mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundClip {
+    #[default]
+    BorderBox,
+    PaddingBox,
+    ContentBox,
+    /// Clip to text (for gradient text effects).
+    Text,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Background (gradient-free) family (inert type port from hiwave-macos).
+    // Default + pure-method execute tests — parser and ComputedStyle untouched.
+    #[test]
+    fn test_background_defaults() {
+        assert_eq!(BackgroundSize::default(), BackgroundSize::Auto);
+        assert_eq!(BackgroundRepeat::default(), BackgroundRepeat::Repeat);
+        assert_eq!(BackgroundOrigin::default(), BackgroundOrigin::PaddingBox);
+        assert_eq!(BoxSizing::default(), BoxSizing::ContentBox);
+        assert_eq!(BackgroundClip::default(), BackgroundClip::BorderBox);
+        let p = BackgroundPosition::default();
+        assert_eq!(p.x, BackgroundPositionValue::Percent(0.0));
+        assert_eq!(p.y, BackgroundPositionValue::Percent(0.0));
+    }
+
+    #[test]
+    fn test_background_position_value_to_px() {
+        // Percent: (container - image) * pct. Center of a 100px image in a 300px
+        // container -> (300-100)*0.5 = 100.
+        let center = BackgroundPositionValue::Percent(0.5);
+        assert_eq!(center.to_px(300.0, 100.0), 100.0);
+        // Pixel offset passes through unchanged.
+        assert_eq!(BackgroundPositionValue::Px(42.0).to_px(300.0, 100.0), 42.0);
+    }
+
+    #[test]
+    fn test_background_size_explicit() {
+        let s = BackgroundSize::Explicit { width: Some(200.0), height: None };
+        match s {
+            BackgroundSize::Explicit { width, height } => {
+                assert_eq!(width, Some(200.0));
+                assert_eq!(height, None);
+            }
+            _ => panic!("expected Explicit"),
+        }
+    }
 
     #[test]
     fn test_parse_color_hex() {
