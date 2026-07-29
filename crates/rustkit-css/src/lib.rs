@@ -88,6 +88,14 @@ pub enum Length {
     Rem(f32),
     /// Percentage.
     Percent(f32),
+    /// Viewport width (1vw = 1% of viewport width).
+    Vw(f32),
+    /// Viewport height (1vh = 1% of viewport height).
+    Vh(f32),
+    /// Viewport min (1vmin = 1% of smaller viewport dimension).
+    Vmin(f32),
+    /// Viewport max (1vmax = 1% of larger viewport dimension).
+    Vmax(f32),
     /// Auto.
     Auto,
     /// Zero.
@@ -97,12 +105,33 @@ pub enum Length {
 
 impl Length {
     /// Compute the absolute pixel value.
+    ///
+    /// vw/vh/vmin/vmax resolve to 0.0 through this entry point (no viewport
+    /// context); use [`Length::to_px_with_viewport`] when viewport dimensions
+    /// are known. Signature preserved so existing call sites are unaffected.
     pub fn to_px(&self, font_size: f32, root_font_size: f32, container_size: f32) -> f32 {
+        self.to_px_with_viewport(font_size, root_font_size, container_size, 0.0, 0.0)
+    }
+
+    /// Compute the absolute pixel value with viewport dimensions for
+    /// vw/vh/vmin/vmax units.
+    pub fn to_px_with_viewport(
+        &self,
+        font_size: f32,
+        root_font_size: f32,
+        container_size: f32,
+        viewport_width: f32,
+        viewport_height: f32,
+    ) -> f32 {
         match self {
             Length::Px(px) => *px,
             Length::Em(em) => em * font_size,
             Length::Rem(rem) => rem * root_font_size,
             Length::Percent(pct) => pct / 100.0 * container_size,
+            Length::Vw(vw) => vw / 100.0 * viewport_width,
+            Length::Vh(vh) => vh / 100.0 * viewport_height,
+            Length::Vmin(vmin) => vmin / 100.0 * viewport_width.min(viewport_height),
+            Length::Vmax(vmax) => vmax / 100.0 * viewport_width.max(viewport_height),
             Length::Auto => 0.0, // Context-dependent
             Length::Zero => 0.0,
         }
@@ -1172,6 +1201,42 @@ pub fn parse_display(value: &str) -> Option<Display> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Length viewport units (vw/vh/vmin/vmax) — mirrors Athena's Windows #39.
+    // Type-only promotion: parse_length does not yet produce these, so there is
+    // no CSS input path and parity numbers do not move. Copy is preserved.
+    #[test]
+    fn test_length_viewport_resolves_with_viewport() {
+        // 50vw of a 1000px-wide viewport = 500px; 10vh of 800px tall = 80px.
+        assert_eq!(Length::Vw(50.0).to_px_with_viewport(16.0, 16.0, 0.0, 1000.0, 800.0), 500.0);
+        assert_eq!(Length::Vh(10.0).to_px_with_viewport(16.0, 16.0, 0.0, 1000.0, 800.0), 80.0);
+    }
+
+    #[test]
+    fn test_length_vmin_vmax_axis_pick() {
+        // viewport 1000x800: vmin picks 800 (smaller), vmax picks 1000 (larger).
+        assert_eq!(Length::Vmin(100.0).to_px_with_viewport(16.0, 16.0, 0.0, 1000.0, 800.0), 800.0);
+        assert_eq!(Length::Vmax(100.0).to_px_with_viewport(16.0, 16.0, 0.0, 1000.0, 800.0), 1000.0);
+    }
+
+    #[test]
+    fn test_length_viewport_zero_without_context() {
+        // Through to_px (no viewport in scope) viewport units resolve to 0.0 —
+        // the deferred behaviour, identical to the flex resolve_length arm.
+        assert_eq!(Length::Vw(50.0).to_px(16.0, 16.0, 1000.0), 0.0);
+        assert_eq!(Length::Vmax(100.0).to_px(16.0, 16.0, 1000.0), 0.0);
+        // Non-viewport units are unaffected by the delegation.
+        assert_eq!(Length::Percent(50.0).to_px(16.0, 16.0, 200.0), 100.0);
+        assert_eq!(Length::Px(42.0).to_px(16.0, 16.0, 0.0), 42.0);
+    }
+
+    #[test]
+    fn test_length_still_copy() {
+        // vw/vh/vmin/vmax are f32 payloads — Length must remain Copy.
+        let a = Length::Vw(25.0);
+        let b = a; // copy, not move
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn test_parse_color_hex() {
