@@ -709,23 +709,18 @@ fn apply_positions(
 }
 
 /// Resolve a Length to pixels.
+///
+/// CONSOLIDATED into `Length::to_px` (= Windows #42): this was a hand-written
+/// duplicate that had already drifted (hardcoded 16px font, no viewport), and
+/// `Min`/`Max`/`Clamp` made it untenable — resolving them requires recursively
+/// resolving operands with the same context, i.e. re-implementing the
+/// resolver. Behaviour is identical for every pre-existing variant:
+/// `to_px(16.0, 16.0, container)` yields Em*16, Rem*16, Percent of container,
+/// viewport units → 0.0 (no viewport in scope), Auto/Zero → 0.0. The
+/// equivalence is PROVEN by `test_resolve_length_pins_previous_behaviour`
+/// below, which keeps the previous arms verbatim.
 fn resolve_length(length: &Length, container_size: f32) -> f32 {
-    match length {
-        Length::Px(px) => *px,
-        Length::Em(em) => em * 16.0, // Default font size
-        Length::Rem(rem) => rem * 16.0,
-        Length::Percent(pct) => pct / 100.0 * container_size,
-        // This resolver has no viewport in scope, so viewport units cannot be
-        // resolved here and compute to 0.0 — the same result `Length::to_px`
-        // gives without viewport dimensions, and the same as the macOS tree.
-        // DEFER: when flex layout is threaded with viewport dimensions, these
-        // four arms should delegate to `to_px_with_viewport` instead. Written
-        // as explicit arms rather than a catch-all so that adding a future
-        // Length variant still breaks this match loudly.
-        Length::Vw(_) | Length::Vh(_) | Length::Vmin(_) | Length::Vmax(_) => 0.0,
-        Length::Auto => 0.0,
-        Length::Zero => 0.0,
-    }
+    length.to_px(16.0, 16.0, container_size)
 }
 
 /// Resolve a max Length (returns f32::INFINITY for Auto).
@@ -741,6 +736,51 @@ mod tests {
     use super::*;
     use rustkit_css::{ComputedStyle, FlexDirection, JustifyContent, AlignItems, Length};
     use crate::BoxType;
+
+    /// PINS the consolidation of `resolve_length` into `Length::to_px`.
+    /// The match below is the PREVIOUS hand-written implementation, kept
+    /// verbatim; the test asserts the delegation agrees with it for every
+    /// pre-existing variant, converting the "behaviour-identical" claim in
+    /// the doc comment from a promise into a checked fact. (= Windows #42.)
+    #[test]
+    fn test_resolve_length_pins_previous_behaviour() {
+        fn previous_resolve_length(length: &Length, container_size: f32) -> f32 {
+            match length {
+                Length::Px(px) => *px,
+                Length::Em(em) => em * 16.0, // Default font size
+                Length::Rem(rem) => rem * 16.0,
+                Length::Percent(pct) => pct / 100.0 * container_size,
+                Length::Vw(_) | Length::Vh(_) | Length::Vmin(_) | Length::Vmax(_) => 0.0,
+                Length::Auto => 0.0,
+                Length::Zero => 0.0,
+                // Not pre-existing: math variants did not exist before the
+                // consolidation, so they are outside the pin.
+                Length::Min(_) | Length::Max(_) | Length::Clamp(_) => unreachable!(),
+            }
+        }
+
+        let cases = [
+            Length::Px(13.5),
+            Length::Em(1.25),
+            Length::Rem(2.0),
+            Length::Percent(37.5),
+            Length::Vw(50.0),
+            Length::Vh(25.0),
+            Length::Vmin(100.0),
+            Length::Vmax(100.0),
+            Length::Auto,
+            Length::Zero,
+        ];
+        for container in [0.0, 320.0, 1024.0] {
+            for len in &cases {
+                assert_eq!(
+                    resolve_length(len, container),
+                    previous_resolve_length(len, container),
+                    "consolidation changed behaviour for {len:?} @ container {container}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_axis_cross() {

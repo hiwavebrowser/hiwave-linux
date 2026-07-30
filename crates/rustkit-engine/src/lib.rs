@@ -972,17 +972,19 @@ impl Engine {
                     }
                     "margin" => {
                         if let Some(length) = parse_length(value) {
-                            style.margin_top = length;
-                            style.margin_right = length;
-                            style.margin_bottom = length;
+                            // Length is not Copy: clone for all but the last
+                            // assignment, which still moves (= Windows #42).
+                            style.margin_top = length.clone();
+                            style.margin_right = length.clone();
+                            style.margin_bottom = length.clone();
                             style.margin_left = length;
                         }
                     }
                     "padding" => {
                         if let Some(length) = parse_length(value) {
-                            style.padding_top = length;
-                            style.padding_right = length;
-                            style.padding_bottom = length;
+                            style.padding_top = length.clone();
+                            style.padding_right = length.clone();
+                            style.padding_bottom = length.clone();
                             style.padding_left = length;
                         }
                     }

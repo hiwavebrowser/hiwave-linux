@@ -266,7 +266,11 @@ impl ColorF32 {
 }
 
 /// A CSS length value.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+///
+/// NOTE: `Length` is deliberately NOT `Copy` — the `Min`/`Max`/`Clamp` math
+/// variants hold `Box`ed operands (mirrors hiwave-macos / Windows #42). Every
+/// former implicit copy is now an explicit `.clone()` or a borrow.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Length {
     /// Pixels.
     Px(f32),
@@ -289,6 +293,12 @@ pub enum Length {
     /// Zero.
     #[default]
     Zero,
+    /// min(a, b) - returns the smaller of two lengths.
+    Min(Box<(Length, Length)>),
+    /// max(a, b) - returns the larger of two lengths.
+    Max(Box<(Length, Length)>),
+    /// clamp(min, preferred, max) - clamps preferred between min and max.
+    Clamp(Box<(Length, Length, Length)>),
 }
 
 impl Length {
@@ -322,6 +332,24 @@ impl Length {
             Length::Vmax(vmax) => vmax / 100.0 * viewport_width.max(viewport_height),
             Length::Auto => 0.0, // Context-dependent
             Length::Zero => 0.0,
+            // Math functions resolve their operands recursively with the SAME
+            // context (font/root/container/viewport) before combining.
+            Length::Min(b) => {
+                let a = b.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let c = b.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                a.min(c)
+            }
+            Length::Max(b) => {
+                let a = b.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let c = b.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                a.max(c)
+            }
+            Length::Clamp(b) => {
+                let mn = b.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let pref = b.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let mx = b.2.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                pref.clamp(mn, mx)
+            }
         }
     }
 }
@@ -1200,16 +1228,18 @@ impl ComputedStyle {
         Self {
             // Inherited properties
             color: parent.color,
-            font_size: parent.font_size,
+            // Length is no longer Copy: clone the Length-typed inherited
+            // fields, matching the font_family precedent below.
+            font_size: parent.font_size.clone(),
             font_weight: parent.font_weight,
             font_style: parent.font_style,
             font_stretch: parent.font_stretch,
             font_family: parent.font_family.clone(),
             line_height: parent.line_height,
             text_align: parent.text_align,
-            letter_spacing: parent.letter_spacing,
-            word_spacing: parent.word_spacing,
-            text_indent: parent.text_indent,
+            letter_spacing: parent.letter_spacing.clone(),
+            word_spacing: parent.word_spacing.clone(),
+            text_indent: parent.text_indent.clone(),
             text_transform: parent.text_transform,
             white_space: parent.white_space,
             word_break: parent.word_break,
@@ -2006,11 +2036,58 @@ mod tests {
     }
 
     #[test]
-    fn test_length_still_copy() {
-        // vw/vh/vmin/vmax are f32 payloads — Length must remain Copy.
+    fn test_length_clone_not_copy() {
+        // Length is deliberately NOT Copy since the math variants hold Box.
+        // Clone must remain cheap-correct for both simple and boxed variants.
         let a = Length::Vw(25.0);
-        let b = a; // copy, not move
+        let b = a.clone();
         assert_eq!(a, b);
+        let m = Length::Min(Box::new((Length::Px(10.0), Length::Percent(50.0))));
+        assert_eq!(m.clone(), m);
+    }
+
+    // Length math functions min()/max()/clamp() — mirrors Windows #42 receipts.
+    #[test]
+    fn test_length_min_max() {
+        // min(10px, 50%) of a 100px container: min(10, 50) = 10.
+        let mn = Length::Min(Box::new((Length::Px(10.0), Length::Percent(50.0))));
+        assert_eq!(mn.to_px(16.0, 16.0, 100.0), 10.0);
+        // max of the same: 50.
+        let mx = Length::Max(Box::new((Length::Px(10.0), Length::Percent(50.0))));
+        assert_eq!(mx.to_px(16.0, 16.0, 100.0), 50.0);
+    }
+
+    #[test]
+    fn test_length_clamp_bounds() {
+        // clamp(20px, 50%, 40px) of 100px container: pref=50 clamped to [20,40] = 40.
+        let c = Length::Clamp(Box::new((Length::Px(20.0), Length::Percent(50.0), Length::Px(40.0))));
+        assert_eq!(c.to_px(16.0, 16.0, 100.0), 40.0);
+        // pref below min -> min. clamp(20px, 10%, 40px) of 100px: pref=10 -> 20.
+        let c2 = Length::Clamp(Box::new((Length::Px(20.0), Length::Percent(10.0), Length::Px(40.0))));
+        assert_eq!(c2.to_px(16.0, 16.0, 100.0), 20.0);
+    }
+
+    #[test]
+    fn test_length_math_operand_resolution_and_nesting() {
+        // Operands resolve with the SAME context: min(2em, 1000px) @ font 16 = 32.
+        let m = Length::Min(Box::new((Length::Em(2.0), Length::Px(1000.0))));
+        assert_eq!(m.to_px(16.0, 16.0, 0.0), 32.0);
+        // Viewport operands thread viewport dims: min(50vw, 600px) @ 1000px vw = 500.
+        let v = Length::Min(Box::new((Length::Vw(50.0), Length::Px(600.0))));
+        assert_eq!(v.to_px_with_viewport(16.0, 16.0, 0.0, 1000.0, 800.0), 500.0);
+        // Nesting: max(min(10px, 20px), 15px) = 15.
+        let inner = Length::Min(Box::new((Length::Px(10.0), Length::Px(20.0))));
+        let outer = Length::Max(Box::new((inner, Length::Px(15.0))));
+        assert_eq!(outer.to_px(16.0, 16.0, 0.0), 15.0);
+    }
+
+    #[test]
+    fn test_length_math_parse_invariance() {
+        // parse_length does not yet produce Min/Max/Clamp — no CSS input path,
+        // so parity numbers do not move (same state as Windows #42 / macOS).
+        assert_eq!(parse_length("min(10px, 50%)"), None);
+        assert_eq!(parse_length("max(10px, 50%)"), None);
+        assert_eq!(parse_length("clamp(1px, 2px, 3px)"), None);
     }
 
     #[test]
