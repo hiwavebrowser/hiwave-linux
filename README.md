@@ -18,7 +18,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-Linux-orange" alt="Platform: Linux" />
-  <img src="https://img.shields.io/badge/engine-GTK_WebKit-green" alt="Engine: GTK WebKit" />
+  <a href="https://github.com/hiwavebrowser/hiwave-linux/actions/workflows/metrics.yml"><img src="https://github.com/hiwavebrowser/hiwave-linux/actions/workflows/metrics.yml/badge.svg?branch=master" alt="Linux CI" /></a>
+  <img src="https://img.shields.io/badge/engine-RustKit_(original)-orange" alt="Engine: RustKit" />
   <img src="https://img.shields.io/badge/status-alpha-blueviolet" alt="Status: Alpha" />
   <img src="https://img.shields.io/badge/license-MPL--2.0-blue" alt="License: MPL-2.0" />
 </p>
@@ -37,6 +38,75 @@ Modern browsers are designed to keep you browsing. More tabs, more tracking, mor
 - **Workspaces** — Separate contexts (work, personal, research) that don't bleed into each other
 - **Built-in Privacy** — Ad and tracker blocking with no extensions needed
 - **Three Modes** — Choose your level of automation: do it yourself, get suggestions, or let Flow handle it
+
+---
+
+## Engine Status — Linux
+
+*Measured on `master` at `4f0ba80c`, 2026-07-30. Numbers come from CI, not from
+hand-editing this file — see
+[How these numbers are produced](#how-these-numbers-are-produced).*
+
+| | |
+|---|---|
+| Build | **passing** (`cargo build --workspace`, 0 errors) |
+| Tests | **742 passing**, 0 failing, 5 ignored |
+| App shell | **launches** — chrome + content WebViews create under GTK, verified live |
+| Rust source | ~70,400 lines across 37 crates |
+| Visual parity vs Chrome | **not measured on Linux** — see below |
+
+### What landed recently
+
+Late July 2026 brought the Linux tree from a non-launching shell to a running
+browser with a substantially larger engine, ported from the macOS tree as
+contract ports rather than line-diff copies:
+
+- **The app shell launches.** WebView embedding was rebuilt on the GTK path
+  (`build_gtk` into a shared `gtk::Fixed`); previously the app panicked with
+  `UnsupportedWindowHandle` before any window existed. Text input and the
+  settings window (native Wayland) were fixed with it.
+- **Unicode text algorithms** — bidi (UAX #9), line breaking (UAX #14), grapheme
+  and word segmentation. CRLF is honoured as a single mandatory break (LB5).
+- **CSS type coverage** — transforms, box-shadow and backdrop-filter types,
+  animation timing functions, background layer properties, and high-precision
+  `ColorF32` with premultiplied and gamma-correct interpolation.
+- **Length units** — viewport units (`vw`/`vh`/`vmin`/`vmax`) and the CSS math
+  functions `min()`, `max()`, `clamp()`.
+- **Layout** — CSS 2.1 §8.3.1 margin collapsing, an epoch-based intrinsic-size
+  cache, and a fix for a default that sized every unstyled element 0×0.
+- **Renderer groundwork** — headless compositor render targets, ordered-dither
+  tables, and the CPU half of the visual-parity pipeline (PPM save +
+  image-compare primitives).
+- **A `rem` parsing bug** that silently dropped *every* `rem` length is fixed.
+
+### Known gaps — stated, not hidden
+
+- **No visual-parity number for Linux.** The parity harness needs a real GPU
+  capture path; run without one it defaults each case to a confident-looking
+  100% diff that measures the runner rather than the renderer. This row stays
+  empty until a real capture exists.
+- **Gradients** still use a Linux-local representation; unifying with the macOS
+  tree is deferred until the renderer work so representation and consumers move
+  together.
+- Ported modules are registered and tested but **not all are wired into the
+  render path yet** — a passing test count is not a claim about what you see on
+  screen.
+- Two crates currently compile without executing any tests (`hiwave_core`,
+  `hiwave_smoke`); CI flags them on every run rather than letting them read as
+  covered.
+
+### How these numbers are produced
+
+Every push runs [`.github/workflows/metrics.yml`](.github/workflows/metrics.yml),
+which builds the workspace, runs the full test suite, attributes results per
+crate, and flags any crate compiling green while executing **zero** tests. Each
+run on `master` appends a row to `metrics/history.csv` on the
+[`metrics-history`](https://github.com/hiwavebrowser/hiwave-linux/tree/metrics-history)
+branch, so the figures above are auditable rather than asserted.
+
+Deliberately **not** collected: the visual-parity diff, for the reason above.
+The metrics JSON records that omission explicitly instead of defaulting it to a
+number.
 
 ---
 
