@@ -1086,6 +1086,10 @@ pub enum Direction {
 /// Computed style for an element.
 #[derive(Debug, Clone, Default)]
 pub struct ComputedStyle {
+    // Transform (wire PR: the TransformList/TransformOrigin types landed
+    // INERT in Linux #10; these fields are what make the properties COMPUTE).
+    pub transform: TransformList,
+    pub transform_origin: TransformOrigin,
     // Box model
     pub display: Display,
     pub position: Position,
