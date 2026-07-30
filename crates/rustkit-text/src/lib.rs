@@ -17,6 +17,10 @@
 //! - Map Unicode codepoints -> glyph indices
 //! - Read design glyph metrics (advance widths)
 
+pub mod bidi;
+pub mod line_break;
+pub mod segmentation;
+
 use thiserror::Error;
 
 /// Errors for rustkit-text operations.
