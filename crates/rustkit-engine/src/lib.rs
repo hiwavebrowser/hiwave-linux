@@ -1747,6 +1747,23 @@ fn parse_transform_origin(value: &str) -> Option<rustkit_css::TransformOrigin> {
 }
 
 
+/// Serialise GPU device construction across tests.
+///
+/// Concurrent `Compositor::new()` SIGSEGVs on this box — Argos's parallel R1
+/// on #21 found it, and Prometheus's follow-up made the sharper point: a green
+/// run at low collision density is NOT a guard. The cascade wire suites no
+/// longer need a Compositor at all (see `apply_inline_style_decls`); this
+/// exists for the tests that genuinely need a real Engine.
+///
+/// Poison-tolerant: one panicking test must not brick every later one.
+/// (= Athena's Windows #52 `test_compositor`.)
+#[cfg(test)]
+fn test_compositor() -> Compositor {
+    static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
+    Compositor::new().expect("failed to create compositor for test")
+}
+
 /// Apply the declarations in an inline `style="..."` attribute to a
 /// ComputedStyle.
 ///
@@ -2134,7 +2151,7 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             viewhost: ViewHost::new(),
-            compositor: Compositor::new().expect("Failed to create compositor"),
+            compositor: test_compositor(),
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
             image_manager: Arc::new(ImageManager::new()),
@@ -2186,7 +2203,7 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             viewhost: ViewHost::new(),
-            compositor: Compositor::new().expect("Failed to create compositor"),
+            compositor: test_compositor(),
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
             image_manager: Arc::new(ImageManager::new()),
