@@ -939,162 +939,11 @@ impl Engine {
     }
 
     /// Apply inline style attribute to computed style.
+    ///
+    /// Delegates to `apply_inline_style_decls` - see that function for why the
+    /// implementation is free-standing.
     fn apply_inline_style(&self, style: &mut ComputedStyle, style_attr: &str) {
-        for declaration in style_attr.split(';') {
-            let declaration = declaration.trim();
-            if declaration.is_empty() {
-                continue;
-            }
-            if let Some((property, value)) = declaration.split_once(':') {
-                let property = property.trim().to_lowercase();
-                let value = value.trim();
-
-                match property.as_str() {
-                    // Transform family WIRE (engine Slice-1 / Cluster A,
-                    // = Windows #48). The types landed INERT in Linux #10;
-                    // these arms are what make the properties compute. The
-                    // renderer does not consume style.transform yet.
-                    "transform" => {
-                        if let Some(list) = parse_transform(value) {
-                            style.transform = list;
-                        }
-                    }
-                    "transform-origin" => {
-                        if let Some(origin) = parse_transform_origin(value) {
-                            style.transform_origin = origin;
-                        }
-                    }
-                    // Shadow/Filter family WIRE (Cluster A2, = Windows #49).
-                    // BoxShadow landed INERT in Linux #11.
-                    //
-                    // `none` CLEARS the list rather than pushing nothing, so a
-                    // later rule can cancel an earlier shadow. This is a
-                    // deliberate divergence from the macOS reference, which
-                    // only pushes on successful parse and therefore leaks the
-                    // earlier value; Athena flagged it on Windows #49 and Atlas
-                    // confirmed the reference defect. If Prometheus rules for
-                    // bug-compatibility, this branch and its test revert on
-                    // BOTH destination trees together.
-                    "box-shadow" => {
-                        if value.trim() == "none" {
-                            style.box_shadows.clear();
-                        } else if let Some(shadow) = parse_box_shadow(value) {
-                            style.box_shadows.push(shadow);
-                        }
-                    }
-                    // Animation/transition family WIRE (Cluster A3, = Windows
-                    // #50). Enums landed INERT in Linux #12. PARSED, NOT
-                    // EXECUTED - nothing animates as a result; the values
-                    // simply survive the cascade for a future driver.
-                    "transition-property" => {
-                        style.transition_property = value.trim().to_string();
-                    }
-                    "transition-duration" => {
-                        if let Some(dur) = parse_time(value) {
-                            style.transition_duration = dur;
-                        }
-                    }
-                    "transition-timing-function" => {
-                        style.transition_timing_function = parse_timing_function(value);
-                    }
-                    "transition-delay" => {
-                        if let Some(delay) = parse_time(value) {
-                            style.transition_delay = delay;
-                        }
-                    }
-                    "animation-name" => {
-                        style.animation_name = value.trim().to_string();
-                    }
-                    "animation-duration" => {
-                        if let Some(dur) = parse_time(value) {
-                            style.animation_duration = dur;
-                        }
-                    }
-                    "animation-timing-function" => {
-                        style.animation_timing_function = parse_timing_function(value);
-                    }
-                    "animation-delay" => {
-                        if let Some(delay) = parse_time(value) {
-                            style.animation_delay = delay;
-                        }
-                    }
-                    "animation-iteration-count" => {
-                        let v = value.trim();
-                        if v == "infinite" {
-                            style.animation_iteration_count =
-                                rustkit_css::AnimationIterationCount::Infinite;
-                        } else if let Ok(n) = v.parse::<f32>() {
-                            style.animation_iteration_count =
-                                rustkit_css::AnimationIterationCount::Count(n);
-                        }
-                    }
-                    "animation-direction" => {
-                        style.animation_direction = match value.trim() {
-                            "normal" => rustkit_css::AnimationDirection::Normal,
-                            "reverse" => rustkit_css::AnimationDirection::Reverse,
-                            "alternate" => rustkit_css::AnimationDirection::Alternate,
-                            "alternate-reverse" => rustkit_css::AnimationDirection::AlternateReverse,
-                            _ => rustkit_css::AnimationDirection::Normal,
-                        };
-                    }
-                    "animation-fill-mode" => {
-                        style.animation_fill_mode = match value.trim() {
-                            "none" => rustkit_css::AnimationFillMode::None,
-                            "forwards" => rustkit_css::AnimationFillMode::Forwards,
-                            "backwards" => rustkit_css::AnimationFillMode::Backwards,
-                            "both" => rustkit_css::AnimationFillMode::Both,
-                            _ => rustkit_css::AnimationFillMode::None,
-                        };
-                    }
-                    "animation-play-state" => {
-                        style.animation_play_state = match value.trim() {
-                            "running" => rustkit_css::AnimationPlayState::Running,
-                            "paused" => rustkit_css::AnimationPlayState::Paused,
-                            _ => rustkit_css::AnimationPlayState::Running,
-                        };
-                    }
-                    "color" => {
-                        if let Some(color) = parse_color(value) {
-                            style.color = color;
-                        }
-                    }
-                    "background-color" | "background" => {
-                        if let Some(color) = parse_color(value) {
-                            style.background_color = color;
-                        }
-                    }
-                    "font-size" => {
-                        if let Some(length) = parse_length(value) {
-                            style.font_size = length;
-                        }
-                    }
-                    "font-weight" => {
-                        if value == "bold" || value == "700" || value == "800" || value == "900" {
-                            style.font_weight = rustkit_css::FontWeight::BOLD;
-                        }
-                    }
-                    "margin" => {
-                        if let Some(length) = parse_length(value) {
-                            // Length is not Copy: clone for all but the last
-                            // assignment, which still moves (= Windows #42).
-                            style.margin_top = length.clone();
-                            style.margin_right = length.clone();
-                            style.margin_bottom = length.clone();
-                            style.margin_left = length;
-                        }
-                    }
-                    "padding" => {
-                        if let Some(length) = parse_length(value) {
-                            style.padding_top = length.clone();
-                            style.padding_right = length.clone();
-                            style.padding_bottom = length.clone();
-                            style.padding_left = length;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        apply_inline_style_decls(style, style_attr)
     }
 
     /// Render a view (public API for continuous rendering).
@@ -1897,6 +1746,173 @@ fn parse_transform_origin(value: &str) -> Option<rustkit_css::TransformOrigin> {
     }
 }
 
+
+/// Apply the declarations in an inline `style="..."` attribute to a
+/// ComputedStyle.
+///
+/// FREE FUNCTION BY DESIGN: this path needs no engine state - no compositor,
+/// no loader, no renderer - so the wire tests can exercise the real cascade
+/// without allocating a GPU device per test. Concurrent Compositor::new()
+/// under default-parallel `cargo test` SIGSEGVs on this box (found by Argos
+/// R1 on PR #21). Engine::apply_inline_style delegates here.
+fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
+    for declaration in style_attr.split(';') {
+        let declaration = declaration.trim();
+        if declaration.is_empty() {
+            continue;
+        }
+        if let Some((property, value)) = declaration.split_once(':') {
+            let property = property.trim().to_lowercase();
+            let value = value.trim();
+
+            match property.as_str() {
+                // Transform family WIRE (engine Slice-1 / Cluster A,
+                // = Windows #48). The types landed INERT in Linux #10;
+                // these arms are what make the properties compute. The
+                // renderer does not consume style.transform yet.
+                "transform" => {
+                    if let Some(list) = parse_transform(value) {
+                        style.transform = list;
+                    }
+                }
+                "transform-origin" => {
+                    if let Some(origin) = parse_transform_origin(value) {
+                        style.transform_origin = origin;
+                    }
+                }
+                // Shadow/Filter family WIRE (Cluster A2, = Windows #49).
+                // BoxShadow landed INERT in Linux #11.
+                //
+                // `none` CLEARS the list rather than pushing nothing, so a
+                // later rule can cancel an earlier shadow. This is a
+                // deliberate divergence from the macOS reference, which
+                // only pushes on successful parse and therefore leaks the
+                // earlier value; Athena flagged it on Windows #49 and Atlas
+                // confirmed the reference defect. If Prometheus rules for
+                // bug-compatibility, this branch and its test revert on
+                // BOTH destination trees together.
+                "box-shadow" => {
+                    if value.trim() == "none" {
+                        style.box_shadows.clear();
+                    } else if let Some(shadow) = parse_box_shadow(value) {
+                        style.box_shadows.push(shadow);
+                    }
+                }
+                // Animation/transition family WIRE (Cluster A3, = Windows
+                // #50). Enums landed INERT in Linux #12. PARSED, NOT
+                // EXECUTED - nothing animates as a result; the values
+                // simply survive the cascade for a future driver.
+                "transition-property" => {
+                    style.transition_property = value.trim().to_string();
+                }
+                "transition-duration" => {
+                    if let Some(dur) = parse_time(value) {
+                        style.transition_duration = dur;
+                    }
+                }
+                "transition-timing-function" => {
+                    style.transition_timing_function = parse_timing_function(value);
+                }
+                "transition-delay" => {
+                    if let Some(delay) = parse_time(value) {
+                        style.transition_delay = delay;
+                    }
+                }
+                "animation-name" => {
+                    style.animation_name = value.trim().to_string();
+                }
+                "animation-duration" => {
+                    if let Some(dur) = parse_time(value) {
+                        style.animation_duration = dur;
+                    }
+                }
+                "animation-timing-function" => {
+                    style.animation_timing_function = parse_timing_function(value);
+                }
+                "animation-delay" => {
+                    if let Some(delay) = parse_time(value) {
+                        style.animation_delay = delay;
+                    }
+                }
+                "animation-iteration-count" => {
+                    let v = value.trim();
+                    if v == "infinite" {
+                        style.animation_iteration_count =
+                            rustkit_css::AnimationIterationCount::Infinite;
+                    } else if let Ok(n) = v.parse::<f32>() {
+                        style.animation_iteration_count =
+                            rustkit_css::AnimationIterationCount::Count(n);
+                    }
+                }
+                "animation-direction" => {
+                    style.animation_direction = match value.trim() {
+                        "normal" => rustkit_css::AnimationDirection::Normal,
+                        "reverse" => rustkit_css::AnimationDirection::Reverse,
+                        "alternate" => rustkit_css::AnimationDirection::Alternate,
+                        "alternate-reverse" => rustkit_css::AnimationDirection::AlternateReverse,
+                        _ => rustkit_css::AnimationDirection::Normal,
+                    };
+                }
+                "animation-fill-mode" => {
+                    style.animation_fill_mode = match value.trim() {
+                        "none" => rustkit_css::AnimationFillMode::None,
+                        "forwards" => rustkit_css::AnimationFillMode::Forwards,
+                        "backwards" => rustkit_css::AnimationFillMode::Backwards,
+                        "both" => rustkit_css::AnimationFillMode::Both,
+                        _ => rustkit_css::AnimationFillMode::None,
+                    };
+                }
+                "animation-play-state" => {
+                    style.animation_play_state = match value.trim() {
+                        "running" => rustkit_css::AnimationPlayState::Running,
+                        "paused" => rustkit_css::AnimationPlayState::Paused,
+                        _ => rustkit_css::AnimationPlayState::Running,
+                    };
+                }
+                "color" => {
+                    if let Some(color) = parse_color(value) {
+                        style.color = color;
+                    }
+                }
+                "background-color" | "background" => {
+                    if let Some(color) = parse_color(value) {
+                        style.background_color = color;
+                    }
+                }
+                "font-size" => {
+                    if let Some(length) = parse_length(value) {
+                        style.font_size = length;
+                    }
+                }
+                "font-weight" => {
+                    if value == "bold" || value == "700" || value == "800" || value == "900" {
+                        style.font_weight = rustkit_css::FontWeight::BOLD;
+                    }
+                }
+                "margin" => {
+                    if let Some(length) = parse_length(value) {
+                        // Length is not Copy: clone for all but the last
+                        // assignment, which still moves (= Windows #42).
+                        style.margin_top = length.clone();
+                        style.margin_right = length.clone();
+                        style.margin_bottom = length.clone();
+                        style.margin_left = length;
+                    }
+                }
+                "padding" => {
+                    if let Some(length) = parse_length(value) {
+                        style.padding_top = length.clone();
+                        style.padding_right = length.clone();
+                        style.padding_bottom = length.clone();
+                        style.padding_left = length;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Parse a CSS time value (e.g. "0.3s", "300ms") into SECONDS.
 fn parse_time(value: &str) -> Option<f32> {
     let value = value.trim();
@@ -2229,22 +2245,6 @@ mod transform_wire_tests {
     /// do - struct literal, real Compositor (works headless on this box, and
     /// under lavapipe in CI). No lighter constructor exists; the wire path
     /// under test is apply_inline_style, which needs `self`.
-    fn headless_engine() -> Engine {
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        Engine {
-            config: EngineConfig::default(),
-            views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: Compositor::new().expect("Failed to create compositor"),
-            renderer: None,
-            loader: Arc::new(
-                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
-            ),
-            image_manager: Arc::new(ImageManager::new()),
-            event_tx,
-            event_rx: Some(event_rx),
-        }
-    }
 
     // ---- parser correctness -------------------------------------------------
 
@@ -2337,11 +2337,10 @@ mod transform_wire_tests {
     fn transform_declaration_computes_into_style() {
         // THIS is the wire receipt. Before this PR the declaration was dropped
         // on the floor: no "transform" arm, no ComputedStyle field.
-        let engine = headless_engine();
         let mut style = ComputedStyle::default();
         assert!(style.transform.is_identity(), "default must be identity");
 
-        engine.apply_inline_style(&mut style, "transform: scale(2)");
+        apply_inline_style_decls(&mut style, "transform: scale(2)");
         assert!(
             !style.transform.is_identity(),
             "transform: scale(2) must compute into ComputedStyle"
@@ -2351,9 +2350,8 @@ mod transform_wire_tests {
 
     #[test]
     fn transform_origin_declaration_computes_into_style() {
-        let engine = headless_engine();
         let mut style = ComputedStyle::default();
-        engine.apply_inline_style(&mut style, "transform-origin: left top");
+        apply_inline_style_decls(&mut style, "transform-origin: left top");
         assert_eq!(style.transform_origin.x, Length::Percent(0.0));
         assert_eq!(style.transform_origin.y, Length::Percent(0.0));
     }
@@ -2361,11 +2359,10 @@ mod transform_wire_tests {
     #[test]
     fn an_invalid_transform_leaves_the_previous_value_untouched() {
         // CSS: an invalid declaration is ignored, not reset to initial.
-        let engine = headless_engine();
         let mut style = ComputedStyle::default();
-        engine.apply_inline_style(&mut style, "transform: scale(2)");
+        apply_inline_style_decls(&mut style, "transform: scale(2)");
         let before = style.transform.ops.len();
-        engine.apply_inline_style(&mut style, "transform: !!!garbage!!!");
+        apply_inline_style_decls(&mut style, "transform: !!!garbage!!!");
         assert_eq!(
             style.transform.ops.len(), before,
             "invalid value must not clobber the computed transform"
@@ -2378,22 +2375,6 @@ mod shadow_wire_tests {
     use super::*;
 
     /// Same headless Engine literal the transform wire tests use.
-    fn engine() -> Engine {
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        Engine {
-            config: EngineConfig::default(),
-            views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: Compositor::new().expect("Failed to create compositor"),
-            renderer: None,
-            loader: Arc::new(
-                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
-            ),
-            image_manager: Arc::new(ImageManager::new()),
-            event_tx,
-            event_rx: Some(event_rx),
-        }
-    }
 
     #[test]
     fn parses_offsets_blur_and_colour() {
@@ -2429,10 +2410,9 @@ mod shadow_wire_tests {
 
     #[test]
     fn box_shadow_declaration_computes_into_style() {
-        let e = engine();
         let mut style = ComputedStyle::default();
         assert!(style.box_shadows.is_empty(), "default has no shadows");
-        e.apply_inline_style(&mut style, "box-shadow: 2px 4px 6px #000");
+        apply_inline_style_decls(&mut style, "box-shadow: 2px 4px 6px #000");
         assert_eq!(style.box_shadows.len(), 1, "box-shadow must compute");
         assert_eq!(style.box_shadows[0].offset_x, 2.0);
     }
@@ -2446,25 +2426,23 @@ mod shadow_wire_tests {
         // DELIBERATE DIVERGENCE from the macOS reference (which has that
         // defect — confirmed by Atlas from source). Reverts on both trees
         // together if Prometheus rules for bug-compatibility.
-        let e = engine();
         let mut style = ComputedStyle::default();
-        e.apply_inline_style(&mut style, "box-shadow: 2px 4px 6px #000");
+        apply_inline_style_decls(&mut style, "box-shadow: 2px 4px 6px #000");
         assert_eq!(style.box_shadows.len(), 1);
-        e.apply_inline_style(&mut style, "box-shadow: none");
+        apply_inline_style_decls(&mut style, "box-shadow: none");
         assert!(style.box_shadows.is_empty(), "none must clear the list");
     }
 
     #[test]
     fn shadow_is_visible_predicate_agrees_with_the_parsed_value() {
         // Ties the wire back to the INERT type's own logic from Linux #11.
-        let e = engine();
         let mut style = ComputedStyle::default();
-        e.apply_inline_style(&mut style, "box-shadow: 0 0 0 rgba(0,0,0,0)");
+        apply_inline_style_decls(&mut style, "box-shadow: 0 0 0 rgba(0,0,0,0)");
         if let Some(s) = style.box_shadows.first() {
             assert!(!s.is_visible(), "fully transparent, zero geometry: not visible");
         }
         let mut style2 = ComputedStyle::default();
-        e.apply_inline_style(&mut style2, "box-shadow: 3px 3px 5px #000");
+        apply_inline_style_decls(&mut style2, "box-shadow: 3px 3px 5px #000");
         assert!(style2.box_shadows[0].is_visible());
     }
 }
@@ -2475,22 +2453,6 @@ mod animation_wire_tests {
     use rustkit_css::{AnimationDirection, AnimationFillMode, AnimationIterationCount,
                       AnimationPlayState, TimingFunction};
 
-    fn engine() -> Engine {
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        Engine {
-            config: EngineConfig::default(),
-            views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: Compositor::new().expect("Failed to create compositor"),
-            renderer: None,
-            loader: Arc::new(
-                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
-            ),
-            image_manager: Arc::new(ImageManager::new()),
-            event_tx,
-            event_rx: Some(event_rx),
-        }
-    }
 
     #[test]
     fn ms_suffix_is_tested_before_s() {
@@ -2509,11 +2471,10 @@ mod animation_wire_tests {
     fn durations_are_stored_in_seconds_regardless_of_authoring() {
         // Same duration written two ways must land on the same number, or
         // downstream code silently sees a 1000x difference.
-        let e = engine();
         let mut a = ComputedStyle::default();
         let mut b = ComputedStyle::default();
-        e.apply_inline_style(&mut a, "animation-duration: 250ms");
-        e.apply_inline_style(&mut b, "animation-duration: 0.25s");
+        apply_inline_style_decls(&mut a, "animation-duration: 250ms");
+        apply_inline_style_decls(&mut b, "animation-duration: 0.25s");
         assert_eq!(a.animation_duration, b.animation_duration);
         assert_eq!(a.animation_duration, 0.25);
     }
@@ -2521,11 +2482,10 @@ mod animation_wire_tests {
     #[test]
     fn fractional_iteration_counts_survive() {
         // 2.5 is legal CSS. An integer-typed wire truncates it silently.
-        let e = engine();
         let mut style = ComputedStyle::default();
-        e.apply_inline_style(&mut style, "animation-iteration-count: 2.5");
+        apply_inline_style_decls(&mut style, "animation-iteration-count: 2.5");
         assert_eq!(style.animation_iteration_count, AnimationIterationCount::Count(2.5));
-        e.apply_inline_style(&mut style, "animation-iteration-count: infinite");
+        apply_inline_style_decls(&mut style, "animation-iteration-count: infinite");
         assert_eq!(style.animation_iteration_count, AnimationIterationCount::Infinite);
     }
 
@@ -2533,9 +2493,8 @@ mod animation_wire_tests {
     fn transition_and_animation_timing_compute_independently() {
         // Both share TimingFunction, so a crossed wire is INVISIBLE unless
         // both are asserted in one test with different values.
-        let e = engine();
         let mut style = ComputedStyle::default();
-        e.apply_inline_style(
+        apply_inline_style_decls(
             &mut style,
             "transition-timing-function: linear; animation-timing-function: ease-in",
         );
@@ -2545,9 +2504,8 @@ mod animation_wire_tests {
 
     #[test]
     fn transition_and_animation_durations_do_not_cross() {
-        let e = engine();
         let mut style = ComputedStyle::default();
-        e.apply_inline_style(
+        apply_inline_style_decls(
             &mut style,
             "transition-duration: 100ms; animation-duration: 900ms",
         );
@@ -2569,9 +2527,8 @@ mod animation_wire_tests {
 
     #[test]
     fn animation_keywords_compute() {
-        let e = engine();
         let mut style = ComputedStyle::default();
-        e.apply_inline_style(
+        apply_inline_style_decls(
             &mut style,
             "animation-direction: alternate-reverse; animation-fill-mode: both; \
              animation-play-state: paused; animation-name: slide",
@@ -2586,10 +2543,9 @@ mod animation_wire_tests {
     fn the_whole_family_computes_from_defaults() {
         // THE WIRE RECEIPT: before this PR every one of these declarations was
         // dropped on the floor - no arms, no fields.
-        let e = engine();
         let mut style = ComputedStyle::default();
         assert_eq!(style.animation_duration, 0.0, "default is zero");
-        e.apply_inline_style(
+        apply_inline_style_decls(
             &mut style,
             "transition-property: opacity; transition-delay: 50ms; \
              animation-delay: 2s; animation-duration: 1s",
