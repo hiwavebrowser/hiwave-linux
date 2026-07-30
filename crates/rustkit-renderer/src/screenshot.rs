@@ -154,9 +154,76 @@ impl GpuReadbackBuffer {
         
         drop(data);
         self.buffer.unmap();
-        
+
         Ok(result)
     }
+
+    /// Get the (width, height) of the readback buffer.
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+}
+
+/// Save BGRA pixel data as PPM (converts to RGB).
+pub fn save_ppm(
+    path: impl AsRef<Path>,
+    width: u32,
+    height: u32,
+    bgra_data: &[u8],
+) -> Result<(), ScreenshotError> {
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+
+    // PPM header
+    writeln!(writer, "P6")?;
+    writeln!(writer, "{} {}", width, height)?;
+    writeln!(writer, "255")?;
+
+    // Convert BGRA to RGB
+    let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
+    for chunk in bgra_data.chunks_exact(4) {
+        rgb_data.push(chunk[2]); // R (from B position in BGRA)
+        rgb_data.push(chunk[1]); // G
+        rgb_data.push(chunk[0]); // B (from R position in BGRA)
+    }
+
+    writer.write_all(&rgb_data)?;
+
+    Ok(())
+}
+
+/// Save RGBA pixel data as PPM (converts to RGB).
+pub fn save_rgba_as_ppm(
+    path: impl AsRef<Path>,
+    width: u32,
+    height: u32,
+    rgba_data: &[u8],
+) -> Result<(), ScreenshotError> {
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+
+    // PPM header
+    writeln!(writer, "P6")?;
+    writeln!(writer, "{} {}", width, height)?;
+    writeln!(writer, "255")?;
+
+    // Convert RGBA to RGB (just drop alpha)
+    let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
+    for chunk in rgba_data.chunks_exact(4) {
+        rgb_data.push(chunk[0]); // R
+        rgb_data.push(chunk[1]); // G
+        rgb_data.push(chunk[2]); // B
+    }
+
+    writer.write_all(&rgb_data)?;
+
+    Ok(())
 }
 
 /// Save RGBA pixel data as PNG.
@@ -221,14 +288,97 @@ pub fn create_offscreen_target(
     });
     
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    
+
     (texture, view)
+}
+
+/// Count pixels that differ beyond `tolerance` between two RGBA buffers.
+///
+/// Pure-CPU parity primitive mirrored from hiwave-macos: the comparison side
+/// of the parity-capture harness (no GPU).
+pub fn compare_images(expected: &[u8], actual: &[u8], tolerance: u8) -> usize {
+    if expected.len() != actual.len() {
+        return expected.len().max(actual.len()) / 4;
+    }
+
+    let mut diff_count = 0;
+
+    // Compare RGBA pixels (4 bytes each)
+    for (e_chunk, a_chunk) in expected.chunks(4).zip(actual.chunks(4)) {
+        let r_diff = (e_chunk[0] as i16 - a_chunk[0] as i16).unsigned_abs() as u8;
+        let g_diff = (e_chunk[1] as i16 - a_chunk[1] as i16).unsigned_abs() as u8;
+        let b_diff = (e_chunk[2] as i16 - a_chunk[2] as i16).unsigned_abs() as u8;
+
+        // If any channel differs beyond tolerance, count the pixel
+        if r_diff > tolerance || g_diff > tolerance || b_diff > tolerance {
+            diff_count += 1;
+        }
+    }
+
+    diff_count
+}
+
+/// Generate a diff image highlighting differences (differing pixels in red,
+/// matching pixels dimmed). Pure-CPU, mirrored from hiwave-macos.
+pub fn generate_diff_image(
+    expected: &[u8],
+    actual: &[u8],
+    _width: u32,
+    _height: u32,
+    tolerance: u8,
+) -> Vec<u8> {
+    let mut diff = Vec::with_capacity(expected.len());
+
+    // Process as RGBA
+    for (e_chunk, a_chunk) in expected.chunks(4).zip(actual.chunks(4)) {
+        let r_diff = (e_chunk.get(0).unwrap_or(&0).wrapping_sub(*a_chunk.get(0).unwrap_or(&0))) as i16;
+        let g_diff = (e_chunk.get(1).unwrap_or(&0).wrapping_sub(*a_chunk.get(1).unwrap_or(&0))) as i16;
+        let b_diff = (e_chunk.get(2).unwrap_or(&0).wrapping_sub(*a_chunk.get(2).unwrap_or(&0))) as i16;
+
+        let max_diff = r_diff.abs().max(g_diff.abs()).max(b_diff.abs()) as u8;
+
+        if max_diff > tolerance {
+            // Highlight differences in red
+            diff.push(255); // R
+            diff.push(0);   // G
+            diff.push(0);   // B
+            diff.push(255); // A
+        } else {
+            // Show original (dimmed)
+            diff.push(a_chunk.get(0).unwrap_or(&0) / 2);
+            diff.push(a_chunk.get(1).unwrap_or(&0) / 2);
+            diff.push(a_chunk.get(2).unwrap_or(&0) / 2);
+            diff.push(255);
+        }
+    }
+
+    diff
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
+    #[test]
+    fn test_compare_identical_images() {
+        let img = vec![255, 0, 0, 255, 0, 255, 0, 255]; // 2 RGBA pixels
+        assert_eq!(compare_images(&img, &img, 0), 0);
+    }
+
+    #[test]
+    fn test_compare_different_images() {
+        let img1 = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        let img2 = vec![0, 0, 0, 255, 0, 0, 0, 255];
+        assert!(compare_images(&img1, &img2, 0) > 0);
+    }
+
+    #[test]
+    fn test_compare_within_tolerance() {
+        let img1 = vec![100, 100, 100, 255];
+        let img2 = vec![105, 105, 105, 255];
+        assert_eq!(compare_images(&img1, &img2, 10), 0);
+    }
+
     #[test]
     fn test_metadata_serialization() {
         let metadata = ScreenshotMetadata {
