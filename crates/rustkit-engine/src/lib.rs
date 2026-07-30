@@ -982,6 +982,77 @@ impl Engine {
                             style.box_shadows.push(shadow);
                         }
                     }
+                    // Animation/transition family WIRE (Cluster A3, = Windows
+                    // #50). Enums landed INERT in Linux #12. PARSED, NOT
+                    // EXECUTED - nothing animates as a result; the values
+                    // simply survive the cascade for a future driver.
+                    "transition-property" => {
+                        style.transition_property = value.trim().to_string();
+                    }
+                    "transition-duration" => {
+                        if let Some(dur) = parse_time(value) {
+                            style.transition_duration = dur;
+                        }
+                    }
+                    "transition-timing-function" => {
+                        style.transition_timing_function = parse_timing_function(value);
+                    }
+                    "transition-delay" => {
+                        if let Some(delay) = parse_time(value) {
+                            style.transition_delay = delay;
+                        }
+                    }
+                    "animation-name" => {
+                        style.animation_name = value.trim().to_string();
+                    }
+                    "animation-duration" => {
+                        if let Some(dur) = parse_time(value) {
+                            style.animation_duration = dur;
+                        }
+                    }
+                    "animation-timing-function" => {
+                        style.animation_timing_function = parse_timing_function(value);
+                    }
+                    "animation-delay" => {
+                        if let Some(delay) = parse_time(value) {
+                            style.animation_delay = delay;
+                        }
+                    }
+                    "animation-iteration-count" => {
+                        let v = value.trim();
+                        if v == "infinite" {
+                            style.animation_iteration_count =
+                                rustkit_css::AnimationIterationCount::Infinite;
+                        } else if let Ok(n) = v.parse::<f32>() {
+                            style.animation_iteration_count =
+                                rustkit_css::AnimationIterationCount::Count(n);
+                        }
+                    }
+                    "animation-direction" => {
+                        style.animation_direction = match value.trim() {
+                            "normal" => rustkit_css::AnimationDirection::Normal,
+                            "reverse" => rustkit_css::AnimationDirection::Reverse,
+                            "alternate" => rustkit_css::AnimationDirection::Alternate,
+                            "alternate-reverse" => rustkit_css::AnimationDirection::AlternateReverse,
+                            _ => rustkit_css::AnimationDirection::Normal,
+                        };
+                    }
+                    "animation-fill-mode" => {
+                        style.animation_fill_mode = match value.trim() {
+                            "none" => rustkit_css::AnimationFillMode::None,
+                            "forwards" => rustkit_css::AnimationFillMode::Forwards,
+                            "backwards" => rustkit_css::AnimationFillMode::Backwards,
+                            "both" => rustkit_css::AnimationFillMode::Both,
+                            _ => rustkit_css::AnimationFillMode::None,
+                        };
+                    }
+                    "animation-play-state" => {
+                        style.animation_play_state = match value.trim() {
+                            "running" => rustkit_css::AnimationPlayState::Running,
+                            "paused" => rustkit_css::AnimationPlayState::Paused,
+                            _ => rustkit_css::AnimationPlayState::Running,
+                        };
+                    }
                     "color" => {
                         if let Some(color) = parse_color(value) {
                             style.color = color;
@@ -1826,6 +1897,68 @@ fn parse_transform_origin(value: &str) -> Option<rustkit_css::TransformOrigin> {
     }
 }
 
+/// Parse a CSS time value (e.g. "0.3s", "300ms") into SECONDS.
+fn parse_time(value: &str) -> Option<f32> {
+    let value = value.trim();
+    // "ms" BEFORE "s": "300ms".ends_with('s') is true, so an s-first chain
+    // would strip one char, leave "300m", and fail - the overlapping-suffix
+    // class (rem/em Linux #3, grad/rad Linux #18). parse_time was already
+    // correct on the reference; this ordering is PINNED by a test below so a
+    // future edit cannot silently reverse it.
+    if value.ends_with("ms") {
+        value[..value.len() - 2]
+            .parse::<f32>()
+            .ok()
+            .map(|v| v / 1000.0)
+    } else if value.ends_with('s') {
+        value[..value.len() - 1].parse::<f32>().ok()
+    } else {
+        None
+    }
+}
+
+/// Parse a CSS timing function. Unknown values fall back to Ease, per macOS.
+fn parse_timing_function(value: &str) -> rustkit_css::TimingFunction {
+    let value = value.trim();
+    match value {
+        "ease" => rustkit_css::TimingFunction::Ease,
+        "linear" => rustkit_css::TimingFunction::Linear,
+        "ease-in" => rustkit_css::TimingFunction::EaseIn,
+        "ease-out" => rustkit_css::TimingFunction::EaseOut,
+        "ease-in-out" => rustkit_css::TimingFunction::EaseInOut,
+        "step-start" => rustkit_css::TimingFunction::StepStart,
+        "step-end" => rustkit_css::TimingFunction::StepEnd,
+        _ if value.starts_with("cubic-bezier(") => {
+            let inner = value
+                .trim_start_matches("cubic-bezier(")
+                .trim_end_matches(')');
+            let parts: Vec<f32> = inner
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            if parts.len() == 4 {
+                rustkit_css::TimingFunction::CubicBezier(parts[0], parts[1], parts[2], parts[3])
+            } else {
+                rustkit_css::TimingFunction::Ease
+            }
+        }
+        _ if value.starts_with("steps(") => {
+            let inner = value.trim_start_matches("steps(").trim_end_matches(')');
+            let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if let Some(count) = parts.first().and_then(|s| s.parse::<u32>().ok()) {
+                let jump_start = parts
+                    .get(1)
+                    .map(|s| *s == "jump-start" || *s == "start")
+                    .unwrap_or(false);
+                rustkit_css::TimingFunction::Steps(count, jump_start)
+            } else {
+                rustkit_css::TimingFunction::StepEnd
+            }
+        }
+        _ => rustkit_css::TimingFunction::Ease,
+    }
+}
+
 /// Parse a CSS box-shadow value.
 /// Supports: offset-x offset-y [blur [spread]] color [inset]
 fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
@@ -2333,5 +2466,137 @@ mod shadow_wire_tests {
         let mut style2 = ComputedStyle::default();
         e.apply_inline_style(&mut style2, "box-shadow: 3px 3px 5px #000");
         assert!(style2.box_shadows[0].is_visible());
+    }
+}
+
+#[cfg(test)]
+mod animation_wire_tests {
+    use super::*;
+    use rustkit_css::{AnimationDirection, AnimationFillMode, AnimationIterationCount,
+                      AnimationPlayState, TimingFunction};
+
+    fn engine() -> Engine {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor: Compositor::new().expect("Failed to create compositor"),
+            renderer: None,
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        }
+    }
+
+    #[test]
+    fn ms_suffix_is_tested_before_s() {
+        // PIN, not a fix: parse_time is already correct. "300ms".ends_with('s')
+        // is TRUE, so an s-first chain would strip one char, leave "300m", and
+        // return None - the same overlapping-suffix class as rem/em (#3) and
+        // grad/rad (#18). Athena's fleet sweep confirmed ms/s was clean; this
+        // pins it so a future edit cannot silently reverse the order.
+        assert_eq!(parse_time("300ms"), Some(0.3));
+        assert_eq!(parse_time("0.3s"), Some(0.3));
+        assert_eq!(parse_time("1s"), Some(1.0));
+        assert_eq!(parse_time("bogus"), None);
+    }
+
+    #[test]
+    fn durations_are_stored_in_seconds_regardless_of_authoring() {
+        // Same duration written two ways must land on the same number, or
+        // downstream code silently sees a 1000x difference.
+        let e = engine();
+        let mut a = ComputedStyle::default();
+        let mut b = ComputedStyle::default();
+        e.apply_inline_style(&mut a, "animation-duration: 250ms");
+        e.apply_inline_style(&mut b, "animation-duration: 0.25s");
+        assert_eq!(a.animation_duration, b.animation_duration);
+        assert_eq!(a.animation_duration, 0.25);
+    }
+
+    #[test]
+    fn fractional_iteration_counts_survive() {
+        // 2.5 is legal CSS. An integer-typed wire truncates it silently.
+        let e = engine();
+        let mut style = ComputedStyle::default();
+        e.apply_inline_style(&mut style, "animation-iteration-count: 2.5");
+        assert_eq!(style.animation_iteration_count, AnimationIterationCount::Count(2.5));
+        e.apply_inline_style(&mut style, "animation-iteration-count: infinite");
+        assert_eq!(style.animation_iteration_count, AnimationIterationCount::Infinite);
+    }
+
+    #[test]
+    fn transition_and_animation_timing_compute_independently() {
+        // Both share TimingFunction, so a crossed wire is INVISIBLE unless
+        // both are asserted in one test with different values.
+        let e = engine();
+        let mut style = ComputedStyle::default();
+        e.apply_inline_style(
+            &mut style,
+            "transition-timing-function: linear; animation-timing-function: ease-in",
+        );
+        assert_eq!(style.transition_timing_function, TimingFunction::Linear);
+        assert_eq!(style.animation_timing_function, TimingFunction::EaseIn);
+    }
+
+    #[test]
+    fn transition_and_animation_durations_do_not_cross() {
+        let e = engine();
+        let mut style = ComputedStyle::default();
+        e.apply_inline_style(
+            &mut style,
+            "transition-duration: 100ms; animation-duration: 900ms",
+        );
+        assert_eq!(style.transition_duration, 0.1);
+        assert_eq!(style.animation_duration, 0.9);
+    }
+
+    #[test]
+    fn parametric_timing_functions_parse() {
+        assert_eq!(
+            parse_timing_function("cubic-bezier(0.25, 0.1, 0.25, 1.0)"),
+            TimingFunction::CubicBezier(0.25, 0.1, 0.25, 1.0)
+        );
+        assert_eq!(parse_timing_function("steps(4, jump-start)"), TimingFunction::Steps(4, true));
+        assert_eq!(parse_timing_function("steps(4)"), TimingFunction::Steps(4, false));
+        // Unknown falls back to Ease, matching the reference.
+        assert_eq!(parse_timing_function("nonsense"), TimingFunction::Ease);
+    }
+
+    #[test]
+    fn animation_keywords_compute() {
+        let e = engine();
+        let mut style = ComputedStyle::default();
+        e.apply_inline_style(
+            &mut style,
+            "animation-direction: alternate-reverse; animation-fill-mode: both; \
+             animation-play-state: paused; animation-name: slide",
+        );
+        assert_eq!(style.animation_direction, AnimationDirection::AlternateReverse);
+        assert_eq!(style.animation_fill_mode, AnimationFillMode::Both);
+        assert_eq!(style.animation_play_state, AnimationPlayState::Paused);
+        assert_eq!(style.animation_name, "slide");
+    }
+
+    #[test]
+    fn the_whole_family_computes_from_defaults() {
+        // THE WIRE RECEIPT: before this PR every one of these declarations was
+        // dropped on the floor - no arms, no fields.
+        let e = engine();
+        let mut style = ComputedStyle::default();
+        assert_eq!(style.animation_duration, 0.0, "default is zero");
+        e.apply_inline_style(
+            &mut style,
+            "transition-property: opacity; transition-delay: 50ms; \
+             animation-delay: 2s; animation-duration: 1s",
+        );
+        assert_eq!(style.transition_property, "opacity");
+        assert_eq!(style.transition_delay, 0.05);
+        assert_eq!(style.animation_delay, 2.0);
+        assert_eq!(style.animation_duration, 1.0);
     }
 }
