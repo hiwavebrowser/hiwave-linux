@@ -1593,6 +1593,60 @@ impl BackdropFilter {
     }
 }
 
+// ==================== Animation/Transition Types ====================
+
+/// Animation timing function.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum TimingFunction {
+    #[default]
+    Ease,
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    StepStart,
+    StepEnd,
+    Steps(u32, bool), // (count, jump_start)
+    CubicBezier(f32, f32, f32, f32),
+}
+
+/// Animation fill mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimationFillMode {
+    #[default]
+    None,
+    Forwards,
+    Backwards,
+    Both,
+}
+
+/// Animation play state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimationPlayState {
+    #[default]
+    Running,
+    Paused,
+}
+
+/// Animation direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimationDirection {
+    #[default]
+    Normal,
+    Reverse,
+    Alternate,
+    AlternateReverse,
+}
+
+/// Animation iteration count.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum AnimationIterationCount {
+    #[default]
+    One,
+    Infinite,
+    Count(f32),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1708,6 +1762,29 @@ mod tests {
         assert!(BackdropFilter::Blur(3.0).needs_blur());
         assert!(!BackdropFilter::Blur(0.0).needs_blur());
         assert!(!BackdropFilter::Grayscale(1.0).needs_blur());
+    }
+
+    // Animation family (inert type port from hiwave-macos). Default + variant
+    // execute tests — parser and ComputedStyle are untouched by this port.
+    #[test]
+    fn test_animation_defaults() {
+        assert_eq!(TimingFunction::default(), TimingFunction::Ease);
+        assert_eq!(AnimationFillMode::default(), AnimationFillMode::None);
+        assert_eq!(AnimationPlayState::default(), AnimationPlayState::Running);
+        assert_eq!(AnimationDirection::default(), AnimationDirection::Normal);
+        assert_eq!(AnimationIterationCount::default(), AnimationIterationCount::One);
+    }
+
+    #[test]
+    fn test_animation_parametric_variants() {
+        // TimingFunction carries parameters that must round-trip by value.
+        assert_eq!(TimingFunction::Steps(4, true), TimingFunction::Steps(4, true));
+        assert_ne!(TimingFunction::Steps(4, true), TimingFunction::Steps(4, false));
+        let cb = TimingFunction::CubicBezier(0.25, 0.1, 0.25, 1.0);
+        assert_eq!(cb, TimingFunction::CubicBezier(0.25, 0.1, 0.25, 1.0));
+        // IterationCount::Count holds an f32.
+        assert_eq!(AnimationIterationCount::Count(2.5), AnimationIterationCount::Count(2.5));
+        assert_ne!(AnimationIterationCount::Count(2.5), AnimationIterationCount::Infinite);
     }
 
     #[test]
