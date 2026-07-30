@@ -2160,6 +2160,25 @@ mod transform_wire_tests {
     }
 
     #[test]
+    fn every_angle_unit_expressing_the_same_angle_converges() {
+        // THE GENERALISING GUARD (Prometheus, macOS #72 review): per-unit
+        // assertions cannot see suffix-eating, which is exactly why the
+        // grad/rad bug survived per-unit tests on the reference tree. Asserting
+        // that every spelling of ~90 degrees CONVERGES catches the class - any
+        // future unit added to parse_angle whose suffix overlaps an existing
+        // one fails here without anyone having to predict the collision.
+        let ninety = ["90deg", "100grad", "0.25turn", "1.5708rad", "90"];
+        for spelling in ninety {
+            let got = parse_angle(spelling)
+                .unwrap_or_else(|| panic!("{spelling} must parse, got None (suffix eaten?)"));
+            assert!(
+                (got - 90.0).abs() < 0.01,
+                "{spelling} should be ~90 degrees, got {got}"
+            );
+        }
+    }
+
+    #[test]
     fn transform_origin_keywords_map_to_percentages() {
         let o = parse_transform_origin("left top").expect("parse");
         assert_eq!(o.x, Length::Percent(0.0));
