@@ -196,6 +196,20 @@ pub struct Engine {
 /// Minimal identity of an ancestor element, captured while walking the DOM so
 /// descendant selectors (`.card p`) can verify the ancestor chain instead of
 /// matching on the subject alone. (= Windows/macOS `ElementCtx`.)
+/// How one compound selector is joined to the compound on its right.
+///
+/// Sibling combinators (`+`, `~`) are deliberately absent: they need the
+/// element's previous siblings, which the style walk does not carry yet.
+/// Adding the variant without the context would be a promise the matcher
+/// cannot keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Combinator {
+    /// `a b` - some ancestor matches.
+    Descendant,
+    /// `a > b` - the immediate parent matches.
+    Child,
+}
+
 #[derive(Clone)]
 struct ElementCtx {
     tag: String,
@@ -934,6 +948,52 @@ impl Engine {
     /// deliberately, and left to the B1 selector campaign: pseudo-classes,
     /// attribute selectors, and sibling combinators. A selector using those
     /// simply does not match rather than matching wrongly.
+    /// Split one complex selector into compounds, recording for each the
+    /// combinator that joins it to the compound on its RIGHT.
+    ///
+    /// `>` is recognised with OR WITHOUT surrounding whitespace, because
+    /// authors write all four of `a>b`, `a> b`, `a >b` and `a > b` and they
+    /// are the same selector. That detail is not cosmetic here: the previous
+    /// tokenizer split on whitespace alone, so `a>b` arrived as a single
+    /// compound whose type part was the literal string "a>b", matched no tag,
+    /// and the whole rule was silently dead.
+    ///
+    /// Returns None for shapes this matcher cannot honour (`> p`, `div >`,
+    /// `a > > b`). Refusing to match is the safe read of a selector we do not
+    /// understand - applying it on a guess would style the wrong elements.
+    fn tokenize_selector(group: &str) -> Option<Vec<(String, Combinator)>> {
+        let spaced = group.replace('>', " > ");
+        let mut out: Vec<(String, Combinator)> = Vec::new();
+        let mut next_is_child = false;
+
+        for tok in spaced.split_whitespace() {
+            if tok == ">" {
+                if out.is_empty() || next_is_child {
+                    return None;
+                }
+                next_is_child = true;
+                continue;
+            }
+            if let Some(last) = out.last_mut() {
+                last.1 = if next_is_child {
+                    Combinator::Child
+                } else {
+                    Combinator::Descendant
+                };
+            }
+            next_is_child = false;
+            // The combinator recorded here is a placeholder; it is overwritten
+            // when (and only if) another compound follows. The subject's own
+            // value is never read.
+            out.push((tok.to_string(), Combinator::Descendant));
+        }
+
+        if next_is_child || out.is_empty() {
+            return None;
+        }
+        Some(out)
+    }
+
     fn selector_matches(
         selector: &str,
         tag: &str,
@@ -947,28 +1007,65 @@ impl Engine {
             if group.is_empty() {
                 continue;
             }
-            let compounds: Vec<&str> = group.split_whitespace().filter(|t| *t != ">").collect();
+            let Some(compounds) = Self::tokenize_selector(group) else {
+                continue;
+            };
             let Some((subject, ancestor_sels)) = compounds.split_last() else {
                 continue;
             };
-            let Some(subject_spec) = Self::simple_selector_match(subject, tag, classes, id) else {
+            let Some(subject_spec) = Self::simple_selector_match(&subject.0, tag, classes, id)
+            else {
                 continue;
             };
             let mut spec = subject_spec;
             let mut idx = ancestors.len();
             let mut matched_all = true;
-            for sel in ancestor_sels.iter().rev() {
+            // Walk the ancestor compounds RIGHT to LEFT. Each carries the
+            // combinator joining it to the compound on its right, which is
+            // exactly the relation to test when walking in this direction.
+            for (sel, comb) in ancestor_sels.iter().rev() {
                 let mut found = false;
-                while idx > 0 {
-                    idx -= 1;
-                    let a = &ancestors[idx];
-                    let a_classes: Vec<&str> = a.classes.iter().map(|s| s.as_str()).collect();
-                    if let Some(s) =
-                        Self::simple_selector_match(sel, &a.tag, &a_classes, a.id.as_deref())
-                    {
-                        spec += s;
-                        found = true;
-                        break;
+                match comb {
+                    // `a > b`: ONE candidate, the immediate parent. Before
+                    // this, `>` was stripped from the token list and the
+                    // relation silently relaxed to descendant, so
+                    // `.nav > li` also styled every li nested any depth below.
+                    Combinator::Child => {
+                        if idx > 0 {
+                            idx -= 1;
+                            let a = &ancestors[idx];
+                            let a_classes: Vec<&str> =
+                                a.classes.iter().map(|s| s.as_str()).collect();
+                            if let Some(s) = Self::simple_selector_match(
+                                sel,
+                                &a.tag,
+                                &a_classes,
+                                a.id.as_deref(),
+                            ) {
+                                spec += s;
+                                found = true;
+                            }
+                        }
+                    }
+                    // `a b`: the nearest matching ancestor wins, and the
+                    // cursor stays there for the compounds further left.
+                    Combinator::Descendant => {
+                        while idx > 0 {
+                            idx -= 1;
+                            let a = &ancestors[idx];
+                            let a_classes: Vec<&str> =
+                                a.classes.iter().map(|s| s.as_str()).collect();
+                            if let Some(s) = Self::simple_selector_match(
+                                sel,
+                                &a.tag,
+                                &a_classes,
+                                a.id.as_deref(),
+                            ) {
+                                spec += s;
+                                found = true;
+                                break;
+                            }
+                        }
                     }
                 }
                 if !found {
@@ -3378,3 +3475,175 @@ mod inheritance_tests {
     }
 }
 
+
+#[cfg(test)]
+mod child_combinator_tests {
+    use super::*;
+
+    fn anc(chain: &[(&str, &str)]) -> Vec<ElementCtx> {
+        // Root-first, so the LAST entry is the immediate parent.
+        chain.iter().map(|(tag, class)| ElementCtx {
+            tag: tag.to_string(),
+            classes: if class.is_empty() { vec![] } else {
+                class.split_whitespace().map(|s| s.to_string()).collect()
+            },
+            id: None,
+        }).collect()
+    }
+    fn m(sel: &str, tag: &str, classes: &[&str], chain: &[(&str, &str)]) -> Option<u32> {
+        Engine::selector_matches(sel, tag, classes, None, &anc(chain))
+    }
+
+    #[test]
+    fn child_combinator_matches_an_immediate_child() {
+        assert!(m("ul > li", "li", &[], &[("body", ""), ("ul", "")]).is_some());
+    }
+
+    #[test]
+    fn child_combinator_rejects_a_deeper_descendant() {
+        // THE BUG. `>` was stripped from the token list, so this relation was
+        // silently relaxed to descendant and `.nav > li` also styled every li
+        // nested any depth below - the exact shape used to style one menu
+        // level without touching its submenus.
+        // NOTE ON THE TREE: a submenu `li` still has a `ul` for a parent, so
+        // `ul > li` correctly matches it. To exercise the combinator the
+        // subject's parent must genuinely not be a `ul` - here a wrapper div.
+        // (My first draft used the submenu tree and failed; the matcher was
+        // right and the test was wrong.)
+        assert!(
+            m("ul > li", "li", &[], &[("ul", ""), ("div", "")]).is_none(),
+            "a li wrapped in a div is not a child of the ul"
+        );
+        assert!(
+            m(".nav > li", "li", &[], &[("ul", "nav"), ("li", ""), ("ul", "")]).is_none(),
+            "submenu items must not inherit the top-level rule"
+        );
+    }
+
+    #[test]
+    fn descendant_combinator_still_matches_at_any_depth() {
+        // The fix must not overshoot: plain descendant is unchanged.
+        assert!(m("ul li", "li", &[], &[("ul", ""), ("li", ""), ("ul", "")]).is_some());
+        assert!(m(".card p", "p", &[], &[("div", "card"), ("div", ""), ("section", "")]).is_some());
+    }
+
+    #[test]
+    fn child_combinator_parses_without_surrounding_whitespace() {
+        // THE SECOND BUG, opposite direction. Whitespace-only splitting left
+        // `ul>li` as one compound whose type part was the literal "ul>li",
+        // which matched no tag, so the rule was silently DEAD rather than
+        // over-applied. Authors write all four spellings.
+        for sel in ["ul>li", "ul> li", "ul >li", "ul > li"] {
+            assert!(
+                m(sel, "li", &[], &[("body", ""), ("ul", "")]).is_some(),
+                "{sel:?} must match an immediate child"
+            );
+            assert!(
+                m(sel, "li", &[], &[("ul", ""), ("div", "")]).is_none(),
+                "{sel:?} must reject a non-child"
+            );
+        }
+    }
+
+    #[test]
+    fn child_at_the_root_has_no_parent_to_match() {
+        assert!(m("body > div", "div", &[], &[]).is_none());
+    }
+
+    #[test]
+    fn mixed_child_and_descendant_chain() {
+        // `.page .card > p`: p's immediate parent is .card, and .card has some
+        // .page ancestor.
+        assert!(m(".page .card > p", "p", &[],
+                  &[("div", "page"), ("section", ""), ("div", "card")]).is_some());
+        // Same tree, but p is a grandchild of .card - the `>` must reject it.
+        assert!(m(".page .card > p", "p", &[],
+                  &[("div", "page"), ("div", "card"), ("span", "")]).is_none());
+    }
+
+    #[test]
+    fn specificity_still_sums_across_the_chain() {
+        // `>` must not change how specific a selector is; only which elements
+        // it reaches. Both forms are one class + one type.
+        assert_eq!(m(".card > p", "p", &[], &[("div", "card")]),
+                   m(".card p", "p", &[], &[("div", "card")]));
+        assert_eq!(m(".card > p", "p", &[], &[("div", "card")]), Some(11));
+    }
+
+    #[test]
+    fn malformed_combinators_match_nothing_rather_than_guessing() {
+        // Refusing is the safe read: applying a selector we cannot parse would
+        // style the wrong elements, which is worse than styling none.
+        for sel in ["> p", "div >", "div > > p", ">"] {
+            assert!(
+                m(sel, "p", &[], &[("div", ""), ("div", "")]).is_none(),
+                "{sel:?} must not match"
+            );
+        }
+    }
+
+    #[test]
+    fn child_combinator_takes_effect_through_the_real_layout_build() {
+        // The unit tests above prove the MATCHER. This proves the matcher is
+        // what the cascade actually consults - a correct matcher nothing calls
+        // would pass every test above and change nothing on screen.
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor: test_compositor(),
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        };
+        // Two elements carry .item. Only the FIRST is an immediate child of
+        // .menu; the second sits under a nested ul. Before the fix both were
+        // 20px. (Targeting `.menu > li` instead would have been a bad fixture:
+        // BOTH top-level li are direct children, so the count could not
+        // distinguish the bug from correct behaviour.)
+        let doc = Document::parse_html(
+            r#"<html><head><style>.menu > .item { width: 20px; }</style></head>
+               <body><ul class="menu">
+                 <li class="item"></li>
+                 <li><ul><li class="item"></li></ul></li>
+               </ul></body></html>"#,
+        ).expect("parse");
+        let layout = e.build_layout_from_document(&doc);
+
+        fn widths(b: &LayoutBox, out: &mut Vec<rustkit_css::Length>) {
+            if !matches!(b.box_type, BoxType::Text(_)) {
+                out.push(b.style.width.clone());
+            }
+            for c in &b.children { widths(c, out); }
+        }
+        let mut w = Vec::new();
+        widths(&layout, &mut w);
+        let styled = w.iter().filter(|l| **l == rustkit_css::Length::Px(20.0)).count();
+        assert_eq!(
+            styled, 1,
+            "only the immediate child may be styled; got {styled} boxes at 20px in {w:?}"
+        );
+    }
+
+    #[test]
+    fn known_limit_greedy_matching_does_not_backtrack() {
+        // DOCUMENTED, NOT ASSERTED-CORRECT. The nearest matching ancestor is
+        // taken and never reconsidered, so a chain that needs backtracking
+        // gives a FALSE NEGATIVE: here .b matches the inner div, and .a is not
+        // its parent, so the walk fails - though matching the OUTER .b would
+        // have succeeded.
+        //
+        // This is inherited from the reference implementation, which uses the
+        // same forward cursor. Kept identical on purpose: an independently
+        // more-correct matcher would be a DIVERGENCE and would make parity
+        // comparisons meaningless. Filed as a cross-tree follow-up instead.
+        assert!(
+            m(".a > .b .c", "span", &["c"],
+              &[("div", "a"), ("div", "b"), ("div", "b")]).is_none(),
+            "if this now MATCHES, backtracking landed - retire this test"
+        );
+    }
+}
