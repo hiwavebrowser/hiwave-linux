@@ -65,7 +65,13 @@ def _applier_body(engine: str) -> tuple[str, bool]:
     docstring and nowhere in the code, which is the same "correct rule,
     incomplete implementation" shape this PR was written to fix.
     """
-    i = engine.find(APPLIER_FN)
+    # TOKEN-BOUNDARY match, not substring. `find()` would still match after a
+    # rename to `apply_inline_style_decls_RENAMED` and silently scope to that
+    # function's body without firing the fallback - Argos's soft note on #37.
+    # A rename that ADDS a suffix is exactly the shape a refactor produces, so
+    # the substring form is loud only for the renames least likely to happen.
+    m = re.search(re.escape(APPLIER_FN) + r"\s*[(<]", engine)
+    i = m.start() if m else -1
     if i < 0:
         print(
             f"WARNING: could not find `{APPLIER_FN}` - reachability is falling "
