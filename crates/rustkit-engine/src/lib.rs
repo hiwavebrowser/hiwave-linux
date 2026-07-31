@@ -994,7 +994,31 @@ impl Engine {
                     // Text nodes inherit from the element that contains them,
                     // so `p { color: red }` colours the words inside the <p>
                     // rather than only the box.
-                    let style = ComputedStyle::inherit_from(parent_style);
+                    let mut style = ComputedStyle::inherit_from(parent_style);
+
+                    // NOT CSS INHERITANCE - FEATURE PLUMBING, and the SECOND
+                    // BREAK behind the text-decoration arms.
+                    //
+                    // text-decoration is correctly NOT inherited. But layout
+                    // emits the decoration commands from the TEXT box's style
+                    // (rustkit-layout lib.rs ~1714), and the text box is built
+                    // by inherit_from, which resets the field. So the arms
+                    // alone make the property writable - enough for the
+                    // reachability metric to drop the name - while the page
+                    // still renders undecorated.
+                    //
+                    // Copy it onto the text run explicitly, GATED on the
+                    // parent actually having a line so an undecorated page
+                    // carries none of this. Same shape as the macOS reference
+                    // (engine lib.rs ~1749) and Athena's Windows #64.
+                    let pl = parent_style.text_decoration_line;
+                    if pl.underline || pl.overline || pl.line_through {
+                        style.text_decoration_line = pl;
+                        style.text_decoration_color = parent_style.text_decoration_color;
+                        style.text_decoration_style = parent_style.text_decoration_style;
+                        style.text_decoration_thickness =
+                            parent_style.text_decoration_thickness.clone();
+                    }
                     LayoutBox::new(BoxType::Text(trimmed.to_string()), style)
                 }
             }
@@ -2598,6 +2622,48 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                             }
                         }
                     }
+                }
+                // TEXT-DECORATION, taken FROM the reachability list rather
+                // than invented: rustkit-layout emits decoration commands and
+                // nothing could set the property.
+                //
+                // A shorthand whose tokens arrive in any order and may mix a
+                // line with a colour: `underline red`, `red underline`,
+                // `underline line-through`. Walk the tokens and take the line
+                // flags; an unrecognised token (a colour) must NOT clear a
+                // line that another token set.
+                "text-decoration" | "text-decoration-line" => {
+                    let mut line = rustkit_css::TextDecorationLine::NONE;
+                    let mut saw_none = false;
+                    for tok in value.split_whitespace() {
+                        match tok {
+                            "underline" => line.underline = true,
+                            "overline" => line.overline = true,
+                            "line-through" => line.line_through = true,
+                            "none" => saw_none = true,
+                            _ => {}
+                        }
+                    }
+                    if saw_none || line != rustkit_css::TextDecorationLine::NONE {
+                        style.text_decoration_line = line;
+                    }
+                }
+                "text-decoration-color" => {
+                    if let Some(c) = rustkit_css::parse_color(value) {
+                        style.text_decoration_color = Some(c);
+                    }
+                }
+                "text-decoration-style" => {
+                    style.text_decoration_style = match value.trim() {
+                        "double" => rustkit_css::TextDecorationStyle::Double,
+                        "dotted" => rustkit_css::TextDecorationStyle::Dotted,
+                        "dashed" => rustkit_css::TextDecorationStyle::Dashed,
+                        "wavy" => rustkit_css::TextDecorationStyle::Wavy,
+                        _ => rustkit_css::TextDecorationStyle::Solid,
+                    };
+                }
+                "text-decoration-thickness" => {
+                    if let Some(l) = parse_length(value) { style.text_decoration_thickness = l; }
                 }
                 "display" => {
                     if let Some(d) = rustkit_css::parse_display(value) { style.display = d; }
@@ -4386,5 +4452,114 @@ mod child_combinator_tests {
               &[("div", "a"), ("div", "b"), ("div", "b")]).is_none(),
             "if this now MATCHES, backtracking landed - retire this test"
         );
+    }
+}
+
+#[cfg(test)]
+mod text_decoration_tests {
+    //! Two-group split (fleet pin). GROUP A = the arms parse. GROUP B = the
+    //! value changes what would be PAINTED.
+    //!
+    //! Group B was written FIRST, on Prometheus's instruction, and run before
+    //! any arm existed. It then stayed RED after the arms were added, which is
+    //! the whole point: text-decoration has a second break behind the arms.
+    //!
+    //! SCOPE NOTE: this unit began as overflow + white-space + text-decoration,
+    //! mirroring Athena's Windows #64. THE OTHER TWO WERE REMOVED BEFORE
+    //! SHIPPING. On this tree `collapse_whitespace` and `is_scroll_container`
+    //! exist and are tested, but nothing in production calls them with the
+    //! style field: layout never consults `style.white_space` when breaking
+    //! lines, and nothing feeds `style.overflow_x` to the scroll code. Adding
+    //! those arms would have made both writable, dropped three names from the
+    //! reachability list, and changed not one pixel - gaming my own metric.
+    //! They wait for their callers.
+    use super::*;
+
+    fn engine() -> Engine {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        }
+    }
+    fn display_list_for(html: &str) -> String {
+        let e = engine();
+        let doc = Document::parse_html(html).expect("parse");
+        format!("{:?}", DisplayList::build(&e.build_layout_from_document(&doc)).commands)
+    }
+    fn st(css: &str) -> ComputedStyle {
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, css);
+        s
+    }
+
+    // ---------------- GROUP A: the arms parse ----------------
+
+    #[test]
+    fn a_shorthand_token_order_does_not_matter() {
+        assert!(st("text-decoration: underline red").text_decoration_line.underline);
+        assert!(st("text-decoration: red underline").text_decoration_line.underline);
+        let multi = st("text-decoration: underline line-through").text_decoration_line;
+        assert!(multi.underline && multi.line_through, "both lines must combine");
+    }
+
+    #[test]
+    fn a_none_clears_but_a_colour_only_value_does_not() {
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, "text-decoration: underline");
+        apply_inline_style_decls(&mut s, "text-decoration: goldenrod");
+        assert!(s.text_decoration_line.underline,
+                "a colour-only value must NOT clear an existing line");
+        apply_inline_style_decls(&mut s, "text-decoration: none");
+        assert!(!s.text_decoration_line.underline, "`none` must clear it");
+    }
+
+    #[test]
+    fn a_longhands_parse() {
+        assert_eq!(st("text-decoration-style: wavy").text_decoration_style,
+                   rustkit_css::TextDecorationStyle::Wavy);
+        assert_eq!(st("text-decoration-thickness: 3px").text_decoration_thickness,
+                   rustkit_css::Length::Px(3.0));
+        assert!(st("text-decoration-color: #ff0000").text_decoration_color.is_some());
+    }
+
+    // -------- GROUP B: the value changes what would be painted --------
+
+    #[test]
+    fn b_underline_reaches_the_display_list() {
+        let with = display_list_for(
+            r#"<html><head><style>p { text-decoration: underline; }</style></head>
+               <body><p>hello</p></body></html>"#,
+        );
+        let without = display_list_for(r#"<html><body><p>hello</p></body></html>"#);
+        assert_ne!(with, without,
+            "underline must change what is painted; if these are equal the \
+             value never reached the text box");
+        assert!(with.contains("TextDecoration"),
+                "expected a decoration command, got: {with}");
+    }
+
+    #[test]
+    fn b_an_undecorated_page_emits_no_decoration_commands() {
+        // The propagation copy is GATED on the parent having a line. Without
+        // the gate every text run would carry decoration it never asked for.
+        // Asserting the negative so the gate is a decision, not a leftover.
+        let plain = display_list_for(r#"<html><body><p>hello</p></body></html>"#);
+        assert!(!plain.contains("TextDecoration"),
+                "an undecorated page must emit no decoration commands, got: {plain}");
+    }
+
+    #[test]
+    fn b_line_through_and_colour_reach_the_display_list_distinctly() {
+        let plain_ul = display_list_for(
+            r#"<html><head><style>p{text-decoration:underline}</style></head>
+               <body><p>hi</p></body></html>"#);
+        let coloured = display_list_for(
+            r#"<html><head><style>p{text-decoration:underline;text-decoration-color:#ff0000}</style></head>
+               <body><p>hi</p></body></html>"#);
+        assert_ne!(plain_ul, coloured,
+                   "text-decoration-color must reach paint, not just the style struct");
     }
 }
