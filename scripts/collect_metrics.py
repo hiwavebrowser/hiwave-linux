@@ -97,6 +97,21 @@ def reachability() -> dict:
             "FALSE POSITIVE - confirm any new entry by grepping the field "
             "individually before reporting it as a gap."
         ),
+        "this_is_a_floor_not_a_proof": (
+            "WRITABLE IS NOT THE SAME AS VISIBLE. A name leaving this list "
+            "proves only that an applier arm exists - NOT that the value "
+            "reaches paint. text-decoration is the worked example: it is not "
+            "inherited, and rustkit-layout emits the decoration commands from "
+            "the TEXT box's style, so wiring the arms alone drops the name "
+            "from this list while the page still renders undecorated. "
+            "Athena hit exactly this on hiwave-windows #64 and only her "
+            "layout-reaching test group caught it. "
+            "So: a falling count is necessary evidence, never sufficient. "
+            "Any wire unit still owes a Group B test that asserts the value "
+            "REACHED the box or the display list. Do not cite this metric as "
+            "end-to-end proof - that would be the same overclaim the metric "
+            "was built to expose."
+        ),
     }
 
 
@@ -263,6 +278,11 @@ def to_markdown(m: dict) -> str:
         lines += [
             "<details><summary>Unreachable from CSS "
             f"({r['unreachable_count']}) - implemented in layout, no applier arm</summary>",
+            "",
+            "**This count is a floor, not a proof.** A name leaving this list "
+            "means an applier arm exists - not that the value reaches paint. "
+            "A wire unit still owes a test that asserts the value reached the "
+            "layout box or the display list.",
             "",
             *(f"- `{f.replace('_', '-')}`" for f in r["unreachable_fields"]),
             "",
