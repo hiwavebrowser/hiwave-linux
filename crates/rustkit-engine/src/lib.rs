@@ -160,6 +160,54 @@ struct ViewState {
     external_css: String,
 }
 
+impl ViewState {
+    /// Attach a newly-loaded document to this view, resetting the state that
+    /// belongs to the document being REPLACED.
+    ///
+    /// This exists because assigning `document` alone was a cross-document
+    /// style leak: `external_css` outlives a single navigation by design (it
+    /// must survive the synchronous relayout a resize triggers), so nothing
+    /// cleared it when the next document had no `<link rel="stylesheet">` of
+    /// its own. Navigating from a styled page to an unstyled one left the old
+    /// page's rules cascading, and nothing logged anything.
+    ///
+    /// The reset lives HERE, at the single point where a document is
+    /// attached, rather than in the stylesheet loader. Putting it in the
+    /// loader would only work for load paths that remember to call the loader
+    /// - and `load_html` does not call it at all, which was the second door
+    /// into the same bug. Any per-document cache added to `ViewState` later
+    /// should be cleared in this method and nowhere else.
+    fn attach_document(&mut self, document: Rc<Document>) {
+        self.document = Some(document);
+        self.external_css = String::new();
+    }
+
+    /// A view with no window and no compositor surface, for tests that
+    /// exercise per-view STATE rather than presentation. `create_view` needs a
+    /// real window handle and a GPU surface; requiring those to test a String
+    /// field is what put GPU init on the test path and produced the parallel
+    /// SIGSEGV earlier in this port.
+    #[cfg(test)]
+    fn headless_for_test() -> Self {
+        let (nav_tx, nav_rx) = mpsc::unbounded_channel();
+        ViewState {
+            id: EngineViewId::new(),
+            viewhost_id: ViewId::new(),
+            url: None,
+            title: None,
+            document: None,
+            layout: None,
+            display_list: None,
+            bindings: None,
+            navigation: NavigationStateMachine::new(nav_tx),
+            nav_event_rx: nav_rx,
+            focused_node: None,
+            view_focused: false,
+            external_css: String::new(),
+        }
+    }
+}
+
 /// Engine configuration.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -486,7 +534,7 @@ impl Engine {
         // Store in view
         let view = self.views.get_mut(&id).unwrap();
         view.url = Some(url.clone());
-        view.document = Some(document.clone());
+        view.attach_document(document.clone());
         view.title = title.clone();
 
         // Initialize JavaScript if enabled
@@ -591,7 +639,7 @@ impl Engine {
         // Store in view
         let view = self.views.get_mut(&id).unwrap();
         view.url = Some(url.clone());
-        view.document = Some(document.clone());
+        view.attach_document(document.clone());
         view.title = title.clone();
 
         // Initialize JavaScript if enabled
@@ -1003,9 +1051,11 @@ impl Engine {
         base_url: &Url,
     ) -> usize {
         let urls = Self::discover_external_stylesheets(document, Some(base_url));
-        if urls.is_empty() {
-            return 0;
-        }
+        // NO EARLY RETURN on an empty list. Returning here would leave
+        // whatever `external_css` already held, which for a reused view is the
+        // PREVIOUS document's stylesheets. The empty case must ASSIGN an empty
+        // string. (attach_document already clears it; this is the second lock
+        // on the same door, because this function is also reachable directly.)
         let mut css = String::new();
         let mut loaded = 0usize;
         for url in urls {
@@ -3634,6 +3684,67 @@ mod external_stylesheet_tests {
             width_of_any_box(&both), Some(Length::Px(10.0)),
             "inline <style> must win at equal specificity"
         );
+    }
+
+    fn engine_for_test() -> Engine {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor: test_compositor(),
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_document_without_stylesheets_does_not_inherit_the_previous_one(
+    ) {
+        // THE SECOND-CALL TEST. Every other test in this module loads exactly
+        // ONE document, and a per-view cache cannot be validated by exercising
+        // the operation that FILLS it while never exercising the one that must
+        // CLEAR it. Found by Argos's R1 HOLD and independently by Athena on
+        // Windows (#59) - both from the review question I wrote about a
+        // different hazard.
+        let mut e = engine_for_test();
+        let mut view = ViewState::headless_for_test();
+        let id = view.id;
+        // Page 1 left external CSS on the view.
+        view.external_css = "p { width: 999px; }".to_string();
+        e.views.insert(id, view);
+
+        // Page 2 has no <link rel="stylesheet"> at all.
+        let d = doc(r#"<html><head></head><body><p>x</p></body></html>"#);
+        let loaded = e.load_external_stylesheets(id, &d, &base()).await;
+
+        assert_eq!(loaded, 0);
+        assert_eq!(
+            e.views[&id].external_css, "",
+            "a document with zero stylesheet links must CLEAR the previous \
+             document's CSS, not keep it"
+        );
+    }
+
+    #[test]
+    fn attaching_a_document_clears_the_previous_documents_external_css() {
+        // The robust door: the reset lives at the point a document is
+        // attached, so a load path that never calls the stylesheet loader at
+        // all - load_html does not - still gets it. Testing the loader alone
+        // would have missed that route entirely.
+        let mut view = ViewState::headless_for_test();
+        view.external_css = "p { width: 999px; }".to_string();
+
+        view.attach_document(Rc::new(doc(r#"<html><body><p>x</p></body></html>"#)));
+
+        assert_eq!(
+            view.external_css, "",
+            "attaching a document must reset per-document cached CSS"
+        );
+        assert!(view.document.is_some(), "and must still attach the document");
     }
 
     #[test]
