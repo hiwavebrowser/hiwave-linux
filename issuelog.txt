@@ -1,0 +1,4 @@
+Settings page only loads white screen.
+Url bar is not allowing input.
+Cannot input new workspace name, seems like text boxes arent working.
+Yes unable to rename the default workspace.
