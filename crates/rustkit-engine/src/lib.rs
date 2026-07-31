@@ -2270,6 +2270,189 @@ fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp
 /// width/height, `content` sizes to content regardless of them. Collapsing
 /// the two would silently change layout for any item that sets both a width
 /// and `flex-basis: content`.
+// ---------------------------------------------------------------------------
+// GRID VALUE PARSERS - ported verbatim from the macOS reference
+// (rustkit-engine/src/lib.rs). Linux had none of these: the ComputedStyle
+// grid fields existed and rustkit-layout's grid.rs consumed them, but nothing
+// could parse a track list, so `grid-template-columns` was unreachable.
+//
+// Kept byte-faithful to the reference rather than rewritten. A port that
+// "improves" the grammar while porting cannot be diffed against its source,
+// and any behavioural difference would be an undeclared divergence.
+// ---------------------------------------------------------------------------
+
+/// Parse a single track size (e.g., "1fr", "100px", "auto", "minmax(...)").
+fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
+    let value = value.trim();
+
+    if value == "auto" {
+        return Some(rustkit_css::TrackSize::Auto);
+    }
+
+    if value == "min-content" {
+        return Some(rustkit_css::TrackSize::MinContent);
+    }
+
+    if value == "max-content" {
+        return Some(rustkit_css::TrackSize::MaxContent);
+    }
+
+    // Check for fr unit
+    if let Some(fr_str) = value.strip_suffix("fr") {
+        if let Ok(fr) = fr_str.trim().parse::<f32>() {
+            return Some(rustkit_css::TrackSize::Fr(fr));
+        }
+    }
+
+    // Check for px unit
+    if let Some(px_str) = value.strip_suffix("px") {
+        if let Ok(px) = px_str.trim().parse::<f32>() {
+            return Some(rustkit_css::TrackSize::Px(px));
+        }
+    }
+
+    // Check for percent
+    if let Some(pct_str) = value.strip_suffix('%') {
+        if let Ok(pct) = pct_str.trim().parse::<f32>() {
+            return Some(rustkit_css::TrackSize::Percent(pct));
+        }
+    }
+
+    // Check for minmax()
+    if value.starts_with("minmax(") {
+        if let Some(close) = find_matching_paren(&value[7..]) {
+            let content = &value[7..7 + close];
+            if let Some(comma) = content.find(',') {
+                let min_str = content[..comma].trim();
+                let max_str = content[comma + 1..].trim();
+                if let (Some(min), Some(max)) =
+                    (parse_track_size(min_str), parse_track_size(max_str))
+                {
+                    return Some(rustkit_css::TrackSize::MinMax(Box::new(min), Box::new(max)));
+                }
+            }
+        }
+    }
+
+    // Check for fit-content()
+    if value.starts_with("fit-content(") {
+        if let Some(close) = find_matching_paren(&value[12..]) {
+            let content = &value[12..12 + close];
+            if let Some(length) = parse_length(content) {
+                return Some(rustkit_css::TrackSize::FitContent(
+                    length.to_px(16.0, 16.0, 0.0),
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse a grid-template-columns or grid-template-rows value.
+/// Supports: repeat(N, 1fr), explicit track sizes, and combinations.
+fn parse_grid_template(value: &str) -> Option<rustkit_css::GridTemplate> {
+    let value = value.trim();
+
+    if value == "none" || value.is_empty() {
+        return Some(rustkit_css::GridTemplate::none());
+    }
+
+    let mut tracks = Vec::new();
+
+    // Check for repeat() function
+    if let Some(repeat_start) = value.find("repeat(") {
+        let after_repeat = &value[repeat_start + 7..];
+        if let Some(close_paren) = find_matching_paren(after_repeat) {
+            let repeat_content = &after_repeat[..close_paren];
+
+            // Parse repeat(count, track-size)
+            if let Some(comma_pos) = repeat_content.find(',') {
+                let count_str = repeat_content[..comma_pos].trim();
+                let track_str = repeat_content[comma_pos + 1..].trim();
+
+                // Parse count (could be number, auto-fill, auto-fit)
+                let count: Option<u32> = if count_str == "auto-fill" || count_str == "auto-fit" {
+                    // For now, default to a reasonable number
+                    Some(4)
+                } else {
+                    count_str.parse().ok()
+                };
+
+                if let (Some(count), Some(track_size)) = (count, parse_track_size(track_str)) {
+                    for _ in 0..count {
+                        tracks.push(rustkit_css::TrackDefinition::simple(track_size.clone()));
+                    }
+                }
+            }
+        }
+    } else {
+        // Parse space-separated track sizes
+        for part in value.split_whitespace() {
+            if let Some(track_size) = parse_track_size(part) {
+                tracks.push(rustkit_css::TrackDefinition::simple(track_size));
+            }
+        }
+    }
+
+    if tracks.is_empty() {
+        return None;
+    }
+
+    Some(rustkit_css::GridTemplate {
+        tracks,
+        repeats: Vec::new(),
+        final_line_names: Vec::new(),
+    })
+}
+
+/// Parse a grid line value (e.g., "1", "span 2", "auto").
+fn parse_grid_line(value: &str) -> Option<rustkit_css::GridLine> {
+    let value = value.trim();
+
+    if value == "auto" {
+        return Some(rustkit_css::GridLine::Auto);
+    }
+
+    // Check for "span N"
+    if let Some(span_str) = value.strip_prefix("span") {
+        let span_str = span_str.trim();
+        if let Ok(span) = span_str.parse::<u32>() {
+            return Some(rustkit_css::GridLine::Span(span));
+        }
+    }
+
+    // Try as a number
+    if let Ok(num) = value.parse::<i32>() {
+        return Some(rustkit_css::GridLine::Number(num));
+    }
+
+    // Could be a named line (just use auto for now)
+    Some(rustkit_css::GridLine::Auto)
+}
+
+/// Parse a grid-column or grid-row shorthand (e.g., "1 / 3", "span 2").
+fn parse_grid_line_shorthand(
+    value: &str,
+) -> Option<(rustkit_css::GridLine, rustkit_css::GridLine)> {
+    let value = value.trim();
+
+    // Check for "start / end" format
+    if let Some(slash_pos) = value.find('/') {
+        let start_str = value[..slash_pos].trim();
+        let end_str = value[slash_pos + 1..].trim();
+
+        let start = parse_grid_line(start_str)?;
+        let end = parse_grid_line(end_str)?;
+
+        return Some((start, end));
+    }
+
+    // Single value - applies to start, end is auto
+    let start = parse_grid_line(value)?;
+    Some((start, rustkit_css::GridLine::Auto))
+}
+
 fn parse_flex_basis(value: &str) -> Option<rustkit_css::FlexBasis> {
     let v = value.trim();
     match v {
@@ -2772,6 +2955,70 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                 // run: inert while nothing can set it, and it keeps the copy
                 // one coherent block for whenever the fleet wires thickness
                 // together.
+                // GRID (11 arms / 9 fields). Taken FROM the reachability
+                // list and verified against BOTH peers before writing:
+                // hiwave-windows master and hiwave-macos each implement all
+                // eleven. rustkit-layout's layout_grid_container already
+                // consumed these fields and is dispatched from
+                // display.is_grid(), so the consumer was live and only the
+                // producer was missing - the same shape as flex in #30.
+                //
+                // NOT WIRED, deliberately: justify-items, justify-self and
+                // grid-template-areas. My wireability tool calls them
+                // WIREABLE - layout reads them and the reader is live - and
+                // that is correct and insufficient. NEITHER peer implements
+                // them, so they are SHARED LIMITS and wiring them here alone
+                // would be a divergence dressed as progress.
+                "grid-template-columns" => {
+                    if let Some(t) = parse_grid_template(value) { style.grid_template_columns = t; }
+                }
+                "grid-template-rows" => {
+                    if let Some(t) = parse_grid_template(value) { style.grid_template_rows = t; }
+                }
+                "grid-auto-columns" => {
+                    if let Some(t) = parse_track_size(value) { style.grid_auto_columns = t; }
+                }
+                "grid-auto-rows" => {
+                    if let Some(t) = parse_track_size(value) { style.grid_auto_rows = t; }
+                }
+                "grid-auto-flow" => {
+                    style.grid_auto_flow = match value.trim() {
+                        "column" => rustkit_css::GridAutoFlow::Column,
+                        "row dense" | "dense row" => rustkit_css::GridAutoFlow::RowDense,
+                        "column dense" | "dense column" => rustkit_css::GridAutoFlow::ColumnDense,
+                        "dense" => rustkit_css::GridAutoFlow::RowDense,
+                        _ => rustkit_css::GridAutoFlow::Row,
+                    };
+                }
+                // Shorthands first in source order is irrelevant to matching,
+                // but they matter to authors: `grid-column: 1 / 3` is far more
+                // common than the longhand pair, and omitting them would leave
+                // the common spelling silently dead - the same under-match the
+                // child combinator had for `.nav>li`.
+                "grid-column" => {
+                    if let Some((a, b)) = parse_grid_line_shorthand(value) {
+                        style.grid_column_start = a;
+                        style.grid_column_end = b;
+                    }
+                }
+                "grid-row" => {
+                    if let Some((a, b)) = parse_grid_line_shorthand(value) {
+                        style.grid_row_start = a;
+                        style.grid_row_end = b;
+                    }
+                }
+                "grid-column-start" => {
+                    if let Some(l) = parse_grid_line(value) { style.grid_column_start = l; }
+                }
+                "grid-column-end" => {
+                    if let Some(l) = parse_grid_line(value) { style.grid_column_end = l; }
+                }
+                "grid-row-start" => {
+                    if let Some(l) = parse_grid_line(value) { style.grid_row_start = l; }
+                }
+                "grid-row-end" => {
+                    if let Some(l) = parse_grid_line(value) { style.grid_row_end = l; }
+                }
                 "display" => {
                     if let Some(d) = rustkit_css::parse_display(value) { style.display = d; }
                 }
@@ -4845,5 +5092,117 @@ mod text_decoration_tests {
                <body><p>hi</p></body></html>"#);
         assert_ne!(plain_ul, coloured,
                    "text-decoration-color must reach paint, not just the style struct");
+    }
+}
+
+#[cfg(test)]
+mod grid_arm_tests {
+    //! Two-group split (fleet pin). GROUP A = the arms parse. GROUP B =
+    //! GEOMETRY through layout_grid_container, per Prometheus's endorsement of
+    //! the #30 flex recipe: a computed-value assertion cannot tell a wired
+    //! grid from a dead one.
+    //!
+    //! Group B written FIRST and run before any arm or parser existed.
+    use super::*;
+    use rustkit_layout::{layout_grid_container, LayoutBox as LB};
+
+    fn st(css: &str) -> ComputedStyle {
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, css);
+        s
+    }
+
+    /// Build a grid container of `width` with `n` children and lay it out.
+    fn grid_widths(container_css: &str, n: usize, child_css: &[&str], w: f32) -> Vec<f32> {
+        let mut c = LB::new(BoxType::Block, st(container_css));
+        for i in 0..n {
+            c.children.push(LB::new(
+                BoxType::Block,
+                st(child_css.get(i).copied().unwrap_or("")),
+            ));
+        }
+        layout_grid_container(&mut c, w, 200.0);
+        c.children.iter().map(|k| k.dimensions.content.width).collect()
+    }
+
+    // ---------------- GROUP A: the arms parse ----------------
+
+    #[test]
+    fn a_display_grid_now_parses_at_all() {
+        // THE ROOT FIX. Display::Grid existed, is_grid() existed, and
+        // layout_grid_container was dispatched from it - but parse_display had
+        // no "grid" arm, so the entire grid engine was unreachable behind one
+        // missing match arm. inline-flex and inline-grid were missing too.
+        assert!(st("display: grid").display.is_grid(), "display:grid must parse");
+        assert!(st("display: inline-grid").display.is_grid());
+        assert!(st("display: inline-flex").display.is_flex());
+    }
+
+    #[test]
+    fn a_track_templates_parse() {
+        assert_eq!(st("grid-template-columns: 50px 100px 150px").grid_template_columns.tracks.len(), 3);
+        assert_eq!(st("grid-template-rows: 1fr 2fr").grid_template_rows.tracks.len(), 2);
+    }
+
+    #[test]
+    fn a_auto_flow_keywords_including_dense_spellings() {
+        use rustkit_css::GridAutoFlow;
+        assert_eq!(st("grid-auto-flow: column").grid_auto_flow, GridAutoFlow::Column);
+        assert_eq!(st("grid-auto-flow: row dense").grid_auto_flow, GridAutoFlow::RowDense);
+        assert_eq!(st("grid-auto-flow: dense row").grid_auto_flow, GridAutoFlow::RowDense);
+        assert_eq!(st("grid-auto-flow: dense").grid_auto_flow, GridAutoFlow::RowDense);
+        assert_eq!(st("grid-auto-flow: row").grid_auto_flow, GridAutoFlow::Row);
+    }
+
+    #[test]
+    fn a_line_placement_longhands_and_shorthand_agree() {
+        use rustkit_css::GridLine;
+        assert_eq!(st("grid-column-start: 2").grid_column_start, GridLine::Number(2));
+        assert_eq!(st("grid-row-end: span 3").grid_row_end, GridLine::Span(3));
+        // `grid-column: 1 / 3` is the spelling authors actually write; omitting
+        // the shorthand would leave it silently dead, the same under-match the
+        // child combinator had for `.nav>li`.
+        let sh = st("grid-column: 1 / 3");
+        assert_eq!(sh.grid_column_start, GridLine::Number(1));
+        assert_eq!(sh.grid_column_end, GridLine::Number(3));
+    }
+
+    #[test]
+    fn a_shared_limits_are_not_wired() {
+        // justify-items / justify-self / grid-template-areas are WIREABLE on
+        // this tree (layout reads them, the reader is live) and NEITHER peer
+        // implements them. Wiring them here alone would be a divergence.
+        // Asserted so a future contributor sees the omission is a decision.
+        let s = st("justify-items: center; justify-self: end");
+        assert_eq!(s.justify_items, rustkit_css::JustifyItems::default(),
+                   "justify-items is a SHARED LIMIT - not wired on purpose");
+        assert_eq!(s.justify_self, rustkit_css::JustifySelf::default(),
+                   "justify-self is a SHARED LIMIT - not wired on purpose");
+    }
+
+    // ------- GROUP B: geometry through layout_grid_container -------
+
+    #[test]
+    fn b_explicit_track_template_sizes_the_columns() {
+        // THE GEOMETRY RECEIPT. Three fixed columns in a 300px grid must land
+        // at their declared widths, not at an even split or at zero.
+        let w = grid_widths("display: grid; grid-template-columns: 50px 100px 150px", 3, &[], 300.0);
+        assert_eq!(w.len(), 3);
+        assert!(
+            (w[0] - 50.0).abs() < 1.0 && (w[1] - 100.0).abs() < 1.0 && (w[2] - 150.0).abs() < 1.0,
+            "grid-template-columns must size the tracks; got {w:?}"
+        );
+    }
+
+    #[test]
+    fn b_fr_units_split_the_free_space_proportionally() {
+        // 1fr 3fr in 400px must be 100/300. If the template never reached
+        // layout both boxes would be equal or zero.
+        let w = grid_widths("display: grid; grid-template-columns: 1fr 3fr", 2, &[], 400.0);
+        assert_eq!(w.len(), 2);
+        assert!(
+            (w[0] - 100.0).abs() < 2.0 && (w[1] - 300.0).abs() < 2.0,
+            "1fr 3fr in 400px must split 100/300; got {w:?}"
+        );
     }
 }

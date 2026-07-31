@@ -1507,6 +1507,19 @@ pub fn parse_display(value: &str) -> Option<Display> {
         "inline" => Some(Display::Inline),
         "inline-block" => Some(Display::InlineBlock),
         "flex" => Some(Display::Flex),
+        // THE ROOT BREAK for grid on this tree. The Display enum has carried
+        // InlineFlex, Grid and InlineGrid since the port began, `is_grid()`
+        // has existed, and rustkit-layout's layout_grid_container is
+        // dispatched from it - but `display: grid` could not be PARSED, so
+        // every grid page on Linux laid out as a plain block and the whole
+        // grid engine was unreachable behind one missing match arm.
+        //
+        // Not caught by the reachability metric: that measures whether a
+        // FIELD is writable, and `display` was writable. A field can be
+        // reachable while a VALUE of it is not.
+        "inline-flex" => Some(Display::InlineFlex),
+        "grid" => Some(Display::Grid),
+        "inline-grid" => Some(Display::InlineGrid),
         "none" => Some(Display::None),
         _ => None,
     }
