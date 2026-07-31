@@ -2086,6 +2086,32 @@ fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp
 }
 
 /// Parse a CSS angle value (e.g., "45deg", "1rad", "0.5turn") into degrees.
+/// Parse a `flex-basis` value.
+///
+/// `content` and `auto` are distinct: `auto` defers to the item's own
+/// width/height, `content` sizes to content regardless of them. Collapsing
+/// the two would silently change layout for any item that sets both a width
+/// and `flex-basis: content`.
+fn parse_flex_basis(value: &str) -> Option<rustkit_css::FlexBasis> {
+    let v = value.trim();
+    match v {
+        "auto" => Some(rustkit_css::FlexBasis::Auto),
+        "content" => Some(rustkit_css::FlexBasis::Content),
+        _ => {
+            if let Some(pct) = v.strip_suffix('%') {
+                return pct.trim().parse::<f32>().ok().map(rustkit_css::FlexBasis::Percent);
+            }
+            match parse_length(v)? {
+                rustkit_css::Length::Px(px) => Some(rustkit_css::FlexBasis::Length(px)),
+                // Other units reach FlexBasis only as a raw f32, which has no
+                // room for the unit. Refusing beats silently treating `2em`
+                // as 2 pixels.
+                _ => None,
+            }
+        }
+    }
+}
+
 fn parse_angle(value: &str) -> Option<f32> {
     let value = value.trim();
     // Suffixes are tested LONGEST-FIRST because they overlap: "grad" ends with
@@ -2311,6 +2337,170 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                 }
                 "max-height" => {
                     if let Some(l) = parse_length(value) { style.max_height = l; }
+                }
+                // FLEX (tier2). rustkit-layout has had a complete, tested
+                // flex container since the port began - layout_flex_container,
+                // dispatched from Display::Flex - and `display: flex` already
+                // reached it. But not one flex PROPERTY did, so every flex
+                // container on Linux rendered at its defaults: row direction,
+                // flex-start on both axes, no gap, no grow. The engine was
+                // there; nothing could steer it.
+                "flex-direction" => {
+                    style.flex_direction = match value.trim() {
+                        "row-reverse" => rustkit_css::FlexDirection::RowReverse,
+                        "column" => rustkit_css::FlexDirection::Column,
+                        "column-reverse" => rustkit_css::FlexDirection::ColumnReverse,
+                        _ => rustkit_css::FlexDirection::Row,
+                    };
+                }
+                "flex-wrap" => {
+                    style.flex_wrap = match value.trim() {
+                        "wrap" => rustkit_css::FlexWrap::Wrap,
+                        "wrap-reverse" => rustkit_css::FlexWrap::WrapReverse,
+                        _ => rustkit_css::FlexWrap::NoWrap,
+                    };
+                }
+                "justify-content" => {
+                    style.justify_content = match value.trim() {
+                        "flex-end" | "end" | "right" => rustkit_css::JustifyContent::FlexEnd,
+                        "center" => rustkit_css::JustifyContent::Center,
+                        "space-between" => rustkit_css::JustifyContent::SpaceBetween,
+                        "space-around" => rustkit_css::JustifyContent::SpaceAround,
+                        "space-evenly" => rustkit_css::JustifyContent::SpaceEvenly,
+                        _ => rustkit_css::JustifyContent::FlexStart,
+                    };
+                }
+                "align-items" => {
+                    style.align_items = match value.trim() {
+                        "flex-start" | "start" => rustkit_css::AlignItems::FlexStart,
+                        "flex-end" | "end" => rustkit_css::AlignItems::FlexEnd,
+                        "center" => rustkit_css::AlignItems::Center,
+                        "baseline" => rustkit_css::AlignItems::Baseline,
+                        _ => rustkit_css::AlignItems::Stretch,
+                    };
+                }
+                "align-content" => {
+                    style.align_content = match value.trim() {
+                        "flex-start" | "start" => rustkit_css::AlignContent::FlexStart,
+                        "flex-end" | "end" => rustkit_css::AlignContent::FlexEnd,
+                        "center" => rustkit_css::AlignContent::Center,
+                        "space-between" => rustkit_css::AlignContent::SpaceBetween,
+                        "space-around" => rustkit_css::AlignContent::SpaceAround,
+                        "space-evenly" => rustkit_css::AlignContent::SpaceEvenly,
+                        _ => rustkit_css::AlignContent::Stretch,
+                    };
+                }
+                "align-self" => {
+                    style.align_self = match value.trim() {
+                        "flex-start" | "start" => rustkit_css::AlignSelf::FlexStart,
+                        "flex-end" | "end" => rustkit_css::AlignSelf::FlexEnd,
+                        "center" => rustkit_css::AlignSelf::Center,
+                        "baseline" => rustkit_css::AlignSelf::Baseline,
+                        "stretch" => rustkit_css::AlignSelf::Stretch,
+                        _ => rustkit_css::AlignSelf::Auto,
+                    };
+                }
+                "flex-grow" => {
+                    if let Ok(n) = value.trim().parse::<f32>() {
+                        style.flex_grow = n;
+                    }
+                }
+                "flex-shrink" => {
+                    if let Ok(n) = value.trim().parse::<f32>() {
+                        style.flex_shrink = n;
+                    }
+                }
+                "flex-basis" => {
+                    if let Some(b) = parse_flex_basis(value) {
+                        style.flex_basis = b;
+                    }
+                }
+                "order" => {
+                    if let Ok(n) = value.trim().parse::<i32>() {
+                        style.order = n;
+                    }
+                }
+                // `gap` is a shorthand: one value sets both axes, two set
+                // row then column. Note the ORDER - row-gap comes first,
+                // which is the opposite of the row/column reading order
+                // people expect from `flex-direction`.
+                "gap" | "grid-gap" => {
+                    let parts: Vec<&str> = value.split_whitespace().collect();
+                    match parts.as_slice() {
+                        [one] => {
+                            if let Some(l) = parse_length(one) {
+                                style.row_gap = l.clone();
+                                style.column_gap = l;
+                            }
+                        }
+                        [row, col] => {
+                            if let Some(l) = parse_length(row) { style.row_gap = l; }
+                            if let Some(l) = parse_length(col) { style.column_gap = l; }
+                        }
+                        _ => {}
+                    }
+                }
+                "row-gap" => {
+                    if let Some(l) = parse_length(value) { style.row_gap = l; }
+                }
+                "column-gap" => {
+                    if let Some(l) = parse_length(value) { style.column_gap = l; }
+                }
+                // `flex` shorthand. Per spec a single unitless number is
+                // grow, and basis becomes 0 - NOT auto. Getting that wrong
+                // makes `flex: 1` size to content instead of filling, which
+                // is the single most common flex declaration on the web.
+                "flex" => {
+                    let v = value.trim();
+                    match v {
+                        "none" => {
+                            style.flex_grow = 0.0;
+                            style.flex_shrink = 0.0;
+                            style.flex_basis = rustkit_css::FlexBasis::Auto;
+                        }
+                        "auto" => {
+                            style.flex_grow = 1.0;
+                            style.flex_shrink = 1.0;
+                            style.flex_basis = rustkit_css::FlexBasis::Auto;
+                        }
+                        "initial" => {
+                            style.flex_grow = 0.0;
+                            style.flex_shrink = 1.0;
+                            style.flex_basis = rustkit_css::FlexBasis::Auto;
+                        }
+                        _ => {
+                            let parts: Vec<&str> = v.split_whitespace().collect();
+                            match parts.as_slice() {
+                                [g] => {
+                                    if let Ok(n) = g.parse::<f32>() {
+                                        style.flex_grow = n;
+                                        style.flex_shrink = 1.0;
+                                        style.flex_basis = rustkit_css::FlexBasis::Length(0.0);
+                                    } else if let Some(b) = parse_flex_basis(g) {
+                                        style.flex_grow = 1.0;
+                                        style.flex_shrink = 1.0;
+                                        style.flex_basis = b;
+                                    }
+                                }
+                                [g, s] => {
+                                    if let Ok(n) = g.parse::<f32>() { style.flex_grow = n; }
+                                    if let Ok(n) = s.parse::<f32>() {
+                                        style.flex_shrink = n;
+                                        style.flex_basis = rustkit_css::FlexBasis::Length(0.0);
+                                    } else if let Some(b) = parse_flex_basis(s) {
+                                        style.flex_shrink = 1.0;
+                                        style.flex_basis = b;
+                                    }
+                                }
+                                [g, s, b] => {
+                                    if let Ok(n) = g.parse::<f32>() { style.flex_grow = n; }
+                                    if let Ok(n) = s.parse::<f32>() { style.flex_shrink = n; }
+                                    if let Some(fb) = parse_flex_basis(b) { style.flex_basis = fb; }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
                 "display" => {
                     if let Some(d) = rustkit_css::parse_display(value) { style.display = d; }
@@ -3774,5 +3964,147 @@ mod external_stylesheet_tests {
         e.collect_style_text(&d.root(), &mut css);
         assert!(css.contains("width: 3px"), "collect must find the <style> text");
         assert!(!css.contains("ext.css"), "collect must not pick up the <link> href");
+    }
+}
+
+#[cfg(test)]
+mod flex_property_tests {
+    use super::*;
+    use rustkit_css::{AlignItems, AlignSelf, FlexBasis, FlexDirection, FlexWrap,
+                      JustifyContent, Length};
+
+    fn st(css: &str) -> ComputedStyle {
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, css);
+        s
+    }
+
+    #[test]
+    fn direction_wrap_and_alignment_reach_the_style() {
+        let s = st("flex-direction: column-reverse; flex-wrap: wrap-reverse; \
+                    justify-content: space-evenly; align-items: baseline; \
+                    align-self: center; align-content: space-between");
+        assert_eq!(s.flex_direction, FlexDirection::ColumnReverse);
+        assert_eq!(s.flex_wrap, FlexWrap::WrapReverse);
+        assert_eq!(s.justify_content, JustifyContent::SpaceEvenly);
+        assert_eq!(s.align_items, AlignItems::Baseline);
+        assert_eq!(s.align_self, AlignSelf::Center);
+        assert_eq!(s.align_content, rustkit_css::AlignContent::SpaceBetween);
+    }
+
+    #[test]
+    fn box_alignment_aliases_are_accepted() {
+        // `start`/`end` are the box-alignment spellings; pages use both.
+        assert_eq!(st("align-items: start").align_items, AlignItems::FlexStart);
+        assert_eq!(st("align-items: end").align_items, AlignItems::FlexEnd);
+        assert_eq!(st("justify-content: end").justify_content, JustifyContent::FlexEnd);
+    }
+
+    #[test]
+    fn grow_shrink_basis_and_order() {
+        let s = st("flex-grow: 2.5; flex-shrink: 0; flex-basis: 120px; order: -1");
+        assert_eq!(s.flex_grow, 2.5);
+        assert_eq!(s.flex_shrink, 0.0);
+        assert_eq!(s.flex_basis, FlexBasis::Length(120.0));
+        assert_eq!(s.order, -1);
+        assert_eq!(st("flex-basis: 40%").flex_basis, FlexBasis::Percent(40.0));
+        assert_eq!(st("flex-basis: content").flex_basis, FlexBasis::Content);
+        assert_eq!(st("flex-basis: auto").flex_basis, FlexBasis::Auto);
+    }
+
+    #[test]
+    fn flex_one_sets_basis_to_zero_not_auto() {
+        // THE SPEC TRAP, and the single most common flex declaration on the
+        // web. `flex: 1` means grow 1, shrink 1, basis 0 - the item fills its
+        // share of free space. Defaulting basis to Auto instead makes the item
+        // size to its content and the layout looks almost-but-not-right, which
+        // is far harder to chase than an obvious break.
+        let s = st("flex: 1");
+        assert_eq!(s.flex_grow, 1.0);
+        assert_eq!(s.flex_shrink, 1.0);
+        assert_eq!(s.flex_basis, FlexBasis::Length(0.0), "flex: 1 must set basis 0, not auto");
+    }
+
+    #[test]
+    fn flex_shorthand_keywords_and_arities() {
+        let none = st("flex: none");
+        assert_eq!((none.flex_grow, none.flex_shrink, none.flex_basis),
+                   (0.0, 0.0, FlexBasis::Auto));
+        let auto = st("flex: auto");
+        assert_eq!((auto.flex_grow, auto.flex_shrink, auto.flex_basis),
+                   (1.0, 1.0, FlexBasis::Auto));
+        let initial = st("flex: initial");
+        assert_eq!((initial.flex_grow, initial.flex_shrink, initial.flex_basis),
+                   (0.0, 1.0, FlexBasis::Auto));
+        // two-value forms: <grow> <shrink> and <grow> <basis>
+        let gs = st("flex: 2 3");
+        assert_eq!((gs.flex_grow, gs.flex_shrink), (2.0, 3.0));
+        let gb = st("flex: 2 100px");
+        assert_eq!((gb.flex_grow, gb.flex_basis), (2.0, FlexBasis::Length(100.0)));
+        // three-value form
+        let three = st("flex: 3 4 50px");
+        assert_eq!((three.flex_grow, three.flex_shrink, three.flex_basis),
+                   (3.0, 4.0, FlexBasis::Length(50.0)));
+        // a bare length is a basis, with grow/shrink 1
+        let b = st("flex: 30px");
+        assert_eq!((b.flex_grow, b.flex_basis), (1.0, FlexBasis::Length(30.0)));
+    }
+
+    #[test]
+    fn gap_shorthand_is_row_then_column() {
+        // The order is row-gap THEN column-gap, which is the opposite of the
+        // row/column reading order flex-direction trains people to expect.
+        let one = st("gap: 12px");
+        assert_eq!((one.row_gap.clone(), one.column_gap.clone()),
+                   (Length::Px(12.0), Length::Px(12.0)));
+        let two = st("gap: 4px 9px");
+        assert_eq!(two.row_gap, Length::Px(4.0), "first value is ROW gap");
+        assert_eq!(two.column_gap, Length::Px(9.0), "second value is COLUMN gap");
+        assert_eq!(st("row-gap: 7px").row_gap, Length::Px(7.0));
+        assert_eq!(st("column-gap: 8px").column_gap, Length::Px(8.0));
+    }
+
+    #[test]
+    fn a_malformed_value_leaves_the_previous_one_alone() {
+        // A rule that fails to parse must not silently reset the property to
+        // its default - that turns a typo into a layout change somewhere else.
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, "flex-grow: 3");
+        apply_inline_style_decls(&mut s, "flex-grow: banana");
+        assert_eq!(s.flex_grow, 3.0);
+        apply_inline_style_decls(&mut s, "flex-basis: 2em");
+        assert_eq!(s.flex_basis, FlexBasis::Auto,
+                   "em cannot reach FlexBasis (raw f32, no unit) - must refuse, not treat as 2px");
+    }
+
+    #[test]
+    fn flex_properties_change_actual_layout_geometry() {
+        // THE RECEIPT THAT MATTERS. rustkit-layout has had a complete flex
+        // container all along; nothing could steer it. Two items in a 300px
+        // row: with flex-grow 1 and 3 they must split the space 75/225, not
+        // sit at their content widths.
+        use rustkit_layout::{layout_flex_container, LayoutBox as LB};
+        let mut container = LB::new(
+            BoxType::Block,
+            {
+                let mut s = ComputedStyle::new();
+                apply_inline_style_decls(&mut s, "display: flex; width: 300px; height: 50px");
+                s
+            },
+        );
+        for grow in ["flex: 1", "flex: 3"] {
+            let mut s = ComputedStyle::new();
+            apply_inline_style_decls(&mut s, grow);
+            container.children.push(LB::new(BoxType::Block, s));
+        }
+        let containing = rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 300.0, 50.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+        let w: Vec<f32> = container.children.iter().map(|c| c.dimensions.content.width).collect();
+        assert_eq!(w.len(), 2);
+        assert!((w[0] - 75.0).abs() < 1.0 && (w[1] - 225.0).abs() < 1.0,
+                "flex-grow 1 and 3 must split 300px as 75/225; got {w:?}");
     }
 }
