@@ -53,3 +53,8 @@ deps/wincairo/*
 docs/plans/
 
 docs/unshared/*
+
+# Python bytecode from scripts/collect_metrics.py. Committed by
+# accident twice via `git add -A`; ignored so it cannot happen again.
+__pycache__/
+*.pyc
