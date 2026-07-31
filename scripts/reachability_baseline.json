@@ -1,22 +1,10 @@
 {
   "_comment": "Baseline for the reachability ratchet. A capability may only LEAVE this list. Adding one is a regression and CI fails. When you close one, delete it here in the same PR - that edit is the receipt.",
   "unreachable_fields": [
-    "grid_auto_columns",
-    "grid_auto_flow",
-    "grid_auto_rows",
-    "grid_column_end",
-    "grid_column_start",
-    "grid_row_end",
-    "grid_row_start",
-    "grid_template_columns",
-    "grid_template_rows",
     "justify_items",
     "justify_self",
     "overflow_x",
     "overflow_y",
-    "text_decoration_color",
-    "text_decoration_line",
-    "text_decoration_style",
     "text_decoration_thickness"
   ]
 }

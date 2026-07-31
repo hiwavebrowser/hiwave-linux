@@ -47,6 +47,47 @@ def run(cmd: list[str]) -> tuple[int, str]:
     return proc.returncode, proc.stdout or ""
 
 
+APPLIER_FN = "fn apply_inline_style_decls"
+
+
+def _applier_body(engine: str) -> tuple[str, bool]:
+    """The body of the CSS applier, brace-matched.
+
+    Returns (body, fell_back). If the applier cannot be located - renamed,
+    moved, split - this returns the WHOLE FILE and flags it, loudly, in three
+    places: stderr, a caveat key in the JSON, and the CI markdown summary.
+
+    The loudness is the point and it is not decoration. A silent whole-file
+    fallback reintroduces exactly the false-reachable this scoping removes:
+    internal plumbing would count as writability again and capabilities would
+    silently leave the work-list while still being dead. Argos caught that
+    this function CLAIMED to say so and did not - the claim was in the
+    docstring and nowhere in the code, which is the same "correct rule,
+    incomplete implementation" shape this PR was written to fix.
+    """
+    i = engine.find(APPLIER_FN)
+    if i < 0:
+        print(
+            f"WARNING: could not find `{APPLIER_FN}` - reachability is falling "
+            f"back to a WHOLE-FILE scan. Internal plumbing will count as "
+            f"writability and the unreachable count will be UNDER-reported. "
+            f"Fix the function name in {__file__} before trusting this number.",
+            file=sys.stderr,
+        )
+        return engine, True
+    j = engine.find("{", i)
+    depth, k = 0, j
+    while k < len(engine):
+        if engine[k] == "{":
+            depth += 1
+        elif engine[k] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        k += 1
+    return engine[j:k], False
+
+
 def reachability() -> dict:
     """Count ComputedStyle fields that rustkit-layout READS but no CSS can SET.
 
@@ -80,9 +121,23 @@ def reachability() -> dict:
     engine = Path("crates/rustkit-engine/src/lib.rs").read_text()
 
     read = [f for f in fields if re.search(r"\." + f + r"\b", layout)]
+
+    # WRITABLE means "an applier arm can set it from CSS" - so only the
+    # APPLIER's body counts, not the whole engine file.
+    #
+    # A whole-file scan counts internal plumbing as writability and produces a
+    # FALSE REACHABLE. Worked example, caught by this metric's own ratchet
+    # contradicting a fact I knew: text-decoration-thickness has NO arm (the
+    # macOS reference has none, so wiring one would be a divergence), but the
+    # text-run propagation block assigns the field. Whole-file scanning called
+    # it settable and dropped it off the list. Nothing can set it.
+    #
+    # This is the same applier-scoping correction I published for the
+    # reference-subset check and then failed to apply to the metric itself.
+    applier, applier_fallback = _applier_body(engine)
     written = [f for f in fields
-               if re.search(r"\bstyle\." + f + r"\s*=", engine)
-               or re.search(r"\bs\." + f + r"\s*=", engine)]
+               if re.search(r"\bstyle\." + f + r"\s*=", applier)
+               or re.search(r"\bs\." + f + r"\s*=", applier)]
     unreachable = [f for f in read if f not in written]
 
     return {
@@ -97,6 +152,9 @@ def reachability() -> dict:
             "FALSE POSITIVE - confirm any new entry by grepping the field "
             "individually before reporting it as a gap."
         ),
+        # Loud in the artefact, not only on stderr: whoever reads this JSON
+        # six weeks from now will not have the CI log.
+        "applier_body_fallback": applier_fallback,
         "this_is_a_floor_not_a_proof": (
             "WRITABLE IS NOT THE SAME AS VISIBLE. A name leaving this list "
             "proves only that an applier arm exists - NOT that the value "
@@ -264,6 +322,16 @@ def to_markdown(m: dict) -> str:
         f"| Branch | {m['branch']} |",
     ]
     r = m.get("reachability") or {}
+    if r.get("applier_body_fallback"):
+        # Loudest of the three signals, because this is the one a human reads.
+        # Without it the count below looks like an ordinary improvement.
+        lines += [
+            "",
+            "> **WARNING - reachability fell back to a whole-file scan.** The CSS "
+            "applier function could not be located, so internal plumbing counts "
+            "as writability and the number below is UNDER-reported. Fix the "
+            "function name in `scripts/collect_metrics.py` before trusting it.",
+        ]
     if "unreachable_count" in r:
         lines.append(
             f"| CSS properties layout reads but nothing can set | "
