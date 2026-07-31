@@ -2662,9 +2662,22 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                         _ => rustkit_css::TextDecorationStyle::Solid,
                     };
                 }
-                "text-decoration-thickness" => {
-                    if let Some(l) = parse_length(value) { style.text_decoration_thickness = l; }
-                }
+                // NO `text-decoration-thickness` ARM, deliberately. The macOS
+                // reference has arms for text-decoration/-line/-color/-style
+                // and NONE for thickness - it never assigns the field. Adding
+                // one here would be a DIVERGENCE dressed as progress: the
+                // metric drops a name and this tree renders thicknesses the
+                // reference cannot express.
+                //
+                // I had already written that arm and declared DIVERGENCE:
+                // NONE. My own wireability tool's reference column caught it.
+                // The family-level check passed - macOS HAS text-decoration -
+                // and the per-property check is what failed it.
+                //
+                // The propagation below still copies thickness onto the text
+                // run: inert while nothing can set it, and it keeps the copy
+                // one coherent block for whenever the fleet wires thickness
+                // together.
                 "display" => {
                     if let Some(d) = rustkit_css::parse_display(value) { style.display = d; }
                 }
@@ -4520,8 +4533,6 @@ mod text_decoration_tests {
     fn a_longhands_parse() {
         assert_eq!(st("text-decoration-style: wavy").text_decoration_style,
                    rustkit_css::TextDecorationStyle::Wavy);
-        assert_eq!(st("text-decoration-thickness: 3px").text_decoration_thickness,
-                   rustkit_css::Length::Px(3.0));
         assert!(st("text-decoration-color: #ff0000").text_decoration_color.is_some());
     }
 
