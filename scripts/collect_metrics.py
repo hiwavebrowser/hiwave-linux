@@ -141,9 +141,25 @@ def reachability() -> dict:
     # This is the same applier-scoping correction I published for the
     # reference-subset check and then failed to apply to the metric itself.
     applier, applier_fallback = _applier_body(engine)
+
+    # A field is WRITABLE if the applier assigns it OR MUTATES IT IN PLACE.
+    # Collection-valued properties are set by method, never by assignment:
+    # the `box-shadow` arm does `style.box_shadows.clear()` and
+    # `.push(shadow)`. An assignment-only regex called that field unwritable,
+    # and it stayed invisible until #41 added the first LAYOUT READ of
+    # box_shadows - at which point the ratchet fired a REGRESSION for a
+    # property that had worked since A2.
+    #
+    # An explicit mutator list rather than "any method call": `.to_px()` and
+    # `.is_visible()` are reads, and treating every receiver as a write would
+    # mark fields writable that no arm can set - a FALSE REACHABLE, the
+    # expensive direction.
+    MUTATORS = "push|clear|insert|extend|remove|pop|truncate|retain|append|push_str|set"
     written = [f for f in fields
                if re.search(r"\bstyle\." + f + r"\s*=", applier)
-               or re.search(r"\bs\." + f + r"\s*=", applier)]
+               or re.search(r"\bs\." + f + r"\s*=", applier)
+               or re.search(r"\bstyle\." + f + r"\.(?:" + MUTATORS + r")\s*\(", applier)
+               or re.search(r"\bs\." + f + r"\.(?:" + MUTATORS + r")\s*\(", applier)]
     unreachable = [f for f in read if f not in written]
 
     return {
