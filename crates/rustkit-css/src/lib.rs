@@ -2259,15 +2259,77 @@ mod computed_style_field_guards {
             vertical_align, width,
         } = ComputedStyle::new();
 
-        // The partition is checked, not merely documented.
+        // THE PARTITION IS CHECKED, NOT MERELY DOCUMENTED - and every
+        // inherited field is checked, not a sample of three.
+        //
+        // The destructure above is the STRUCTURAL half: it fails to compile
+        // when a field is added. The assertions below are the BEHAVIOURAL
+        // half, and they are only as strong as what the fixture can express.
+        // Two rules make them able to fail:
+        //
+        //   1. EVERY sentinel is deliberately NON-DEFAULT. If the parent held
+        //      a default, `inherited` and `reset to the same default` would be
+        //      indistinguishable and the assertion could never fire. That is
+        //      exactly the vacuity Athena found in the Windows original
+        //      (#61) - her parent was ComputedStyle::new(), so every one of
+        //      her seventeen assertions compared a value against itself.
+        //   2. EVERY inherited field gets one. Linux did not have Athena's
+        //      vacuity - our sentinels were non-default and a mutation to
+        //      `color` DID fire - but only three of sixteen were asserted, so
+        //      breaking inheritance on any of the other thirteen left the
+        //      guard green. A different defect, same consequence: the guard
+        //      claimed to cover a partition it only sampled.
         let mut parent = ComputedStyle::new();
         parent.color = Color::from_rgb(1, 2, 3);
+        parent.direction = Direction::Rtl;
+        parent.font_family = "Talos Sentinel Serif".to_string();
         parent.font_size = Length::Px(77.0);
+        parent.font_stretch = FontStretch::UltraCondensed;
+        parent.font_style = FontStyle::Oblique;
+        parent.font_weight = FontWeight(825);
+        parent.letter_spacing = Length::Px(3.5);
+        parent.line_height = 2.75;
+        parent.text_align = TextAlign::Justify;
+        parent.text_indent = Length::Px(11.0);
+        parent.text_transform = TextTransform::Uppercase;
+        parent.white_space = WhiteSpace::Pre;
+        parent.word_break = WordBreak::BreakAll;
+        parent.word_spacing = Length::Px(6.25);
+        parent.writing_mode = WritingMode::VerticalRl;
+        // Non-inherited fields, given non-default values so that "was reset"
+        // is distinguishable from "happened to already be the initial".
         parent.width = Length::Px(500.0);
+        parent.background_color = Color::from_rgb(9, 8, 7);
+        parent.opacity = 0.25;
+        parent.flex_shrink = 4.0;
+
         let child = ComputedStyle::inherit_from(&parent);
+
+        // ---- all 16 inherited fields ----
         assert_eq!(child.color, Color::from_rgb(1, 2, 3), "color must inherit");
+        assert_eq!(child.direction, Direction::Rtl, "direction must inherit");
+        assert_eq!(child.font_family, "Talos Sentinel Serif", "font-family must inherit");
         assert_eq!(child.font_size, Length::Px(77.0), "font-size must inherit");
-        assert_eq!(child.width, Length::Auto, "width must NOT inherit");
+        assert_eq!(child.font_stretch, FontStretch::UltraCondensed, "font-stretch must inherit");
+        assert_eq!(child.font_style, FontStyle::Oblique, "font-style must inherit");
+        assert_eq!(child.font_weight, FontWeight(825), "font-weight must inherit");
+        assert_eq!(child.letter_spacing, Length::Px(3.5), "letter-spacing must inherit");
+        assert_eq!(child.line_height, 2.75, "line-height must inherit");
+        assert_eq!(child.text_align, TextAlign::Justify, "text-align must inherit");
+        assert_eq!(child.text_indent, Length::Px(11.0), "text-indent must inherit");
+        assert_eq!(child.text_transform, TextTransform::Uppercase, "text-transform must inherit");
+        assert_eq!(child.white_space, WhiteSpace::Pre, "white-space must inherit");
+        assert_eq!(child.word_break, WordBreak::BreakAll, "word-break must inherit");
+        assert_eq!(child.word_spacing, Length::Px(6.25), "word-spacing must inherit");
+        assert_eq!(child.writing_mode, WritingMode::VerticalRl, "writing-mode must inherit");
+
+        // ---- the four non-inherited fields whose DERIVED default is wrong,
+        //      i.e. the exact ones that produced the blank-page near-miss ----
+        assert_eq!(child.width, Length::Auto, "width must NOT inherit, and resets to Auto");
+        assert_eq!(child.background_color, Color::TRANSPARENT,
+                   "background-color must NOT inherit, and resets to TRANSPARENT not BLACK");
+        assert_eq!(child.opacity, 1.0, "opacity must NOT inherit, and resets to 1.0 not 0.0");
+        assert_eq!(child.flex_shrink, 1.0, "flex-shrink must NOT inherit, and resets to 1.0 not 0.0");
     }
 
     /// GUARD 2 - a new field must get a deliberate INITIAL VALUE.
