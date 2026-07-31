@@ -956,6 +956,7 @@ impl Engine {
                 let style = self.compute_style_for_element(tag_name, attributes, sheet, parent_style, ancestors);
 
                 let mut layout_box = LayoutBox::new(box_type, style);
+                Self::apply_position_to_layout_box(&mut layout_box);
 
                 // Extend the ancestor chain with THIS element so descendant
                 // selectors (`.card p`) can verify the chain when the children
@@ -1330,6 +1331,62 @@ impl Engine {
             i = j;
         }
         Some(spec)
+    }
+
+    /// Carry `position` and the offsets from the computed style onto the
+    /// LayoutBox, so rustkit-layout's positioned-layout code can actually run.
+    ///
+    /// This is the THIRD break in the chain. ComputedStyle gained the fields
+    /// and the applier gained the arms, but until a box carries them, layout
+    /// still sees `Position::Static` everywhere and nothing on screen moves.
+    /// A test that only checked computed values would pass at that point,
+    /// which is why the tests for this unit are split into two groups.
+    ///
+    /// `rustkit_css::Position` and `rustkit_layout::Position` are SEPARATE
+    /// enums with identical variants and no `From` impl. Not merged here -
+    /// that is a wider refactor and this is a wire. The conversion below is an
+    /// EXHAUSTIVE match, so adding a variant to either enum breaks the build
+    /// rather than silently mapping to Static. Duplication flagged for
+    /// whoever does the cleanup.
+    fn apply_position_to_layout_box(layout_box: &mut LayoutBox) {
+        use rustkit_layout::Position as LP;
+        layout_box.position = match layout_box.style.position {
+            rustkit_css::Position::Static => LP::Static,
+            // Relative and Sticky map to Static ON PURPOSE, mirroring the
+            // macOS reference. Entering the positioned paint path for these
+            // wrecks pages whose relative boxes are only z-index anchors,
+            // until the stacking pipeline matures. Deviating here would be a
+            // DIVERGENCE, not an improvement - a relative box with no offsets
+            // is visually identical to a static one either way.
+            rustkit_css::Position::Relative => LP::Static,
+            rustkit_css::Position::Sticky => LP::Static,
+            rustkit_css::Position::Absolute => LP::Absolute,
+            rustkit_css::Position::Fixed => LP::Fixed,
+        };
+        layout_box.z_index = layout_box.style.z_index;
+        if layout_box.position != LP::Static {
+            let font_size_px = match layout_box.style.font_size {
+                rustkit_css::Length::Px(p) => p,
+                _ => 16.0,
+            };
+            // Percentages resolve against the containing block, which is not
+            // known here, so they stay None (auto) rather than becoming an
+            // invented pixel value. Same restriction as the reference.
+            let px = |l: &Option<rustkit_css::Length>| match l {
+                Some(rustkit_css::Length::Px(v)) => Some(*v),
+                Some(rustkit_css::Length::Zero) => Some(0.0),
+                Some(rustkit_css::Length::Rem(r)) => Some(r * 16.0),
+                Some(rustkit_css::Length::Em(e)) => Some(e * font_size_px),
+                _ => None,
+            };
+            let (t, r, b, l) = (
+                px(&layout_box.style.top),
+                px(&layout_box.style.right),
+                px(&layout_box.style.bottom),
+                px(&layout_box.style.left),
+            );
+            layout_box.set_offsets(t, r, b, l);
+        }
     }
 
     fn compute_style_for_element(
@@ -2622,6 +2679,43 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                             }
                         }
                     }
+                }
+                // POSITION + OFFSETS. rustkit-layout implements positioned
+                // layout - 30 Position:: references, Absolute/Fixed branches,
+                // out-of-flow skipping in flex.rs and grid.rs - and until now
+                // nothing could set style.position, so every page on this tree
+                // rendered position:static regardless of what the author wrote
+                // and all of that layout code was unreachable.
+                //
+                // The chain was broken in THREE places: no offset fields on
+                // ComputedStyle, no arms here, and no layout assignment.
+                // Fixing any ONE alone yields a green computed-value test and
+                // no visible change, which is why the tests below are split
+                // into a computed-value group and a layout-reaching group.
+                "position" => {
+                    style.position = match value.trim() {
+                        "relative" => rustkit_css::Position::Relative,
+                        "absolute" => rustkit_css::Position::Absolute,
+                        "fixed" => rustkit_css::Position::Fixed,
+                        "sticky" => rustkit_css::Position::Sticky,
+                        _ => rustkit_css::Position::Static,
+                    };
+                }
+                // A percentage offset resolves against the containing block,
+                // which is not known while the tree is being built. It stays
+                // None (auto) rather than becoming an invented pixel value -
+                // same restriction as the macOS reference. parse_length
+                // returning None for `%` is what enforces that, and there is
+                // a test asserting the REFUSAL rather than only the happy path.
+                "top" => { if let Some(l) = parse_length(value) { style.top = Some(l); } }
+                "right" => { if let Some(l) = parse_length(value) { style.right = Some(l); } }
+                "bottom" => { if let Some(l) = parse_length(value) { style.bottom = Some(l); } }
+                "left" => { if let Some(l) = parse_length(value) { style.left = Some(l); } }
+                // Garbage z-index is IGNORED, not flattened to 0. Flattening
+                // would silently restack the page - a wrong answer wearing the
+                // costume of a decision.
+                "z-index" => {
+                    if let Ok(z) = value.trim().parse::<i32>() { style.z_index = z; }
                 }
                 // TEXT-DECORATION, taken FROM the reachability list rather
                 // than invented: rustkit-layout emits decoration commands and
@@ -4465,6 +4559,185 @@ mod child_combinator_tests {
               &[("div", "a"), ("div", "b"), ("div", "b")]).is_none(),
             "if this now MATCHES, backtracking landed - retire this test"
         );
+    }
+}
+
+#[cfg(test)]
+mod position_wire_tests {
+    //! Split into TWO groups on purpose (= Athena's Windows #62 shape).
+    //!
+    //! GROUP A asserts COMPUTED VALUES - that the applier arms parse. GROUP B
+    //! asserts the value REACHED THE LAYOUT BOX - that it does anything.
+    //!
+    //! The split is the point. This chain was broken in three places, and
+    //! fixing only the arms would leave group A fully green while every page
+    //! still rendered position:static. A suite of computed-value assertions
+    //! alone cannot distinguish "the property parses" from "the property does
+    //! something", and that distinction is the entire defect class.
+    use super::*;
+    use rustkit_css::{Length, Position};
+
+    fn st(css: &str) -> ComputedStyle {
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, css);
+        s
+    }
+    fn boxed(css: &str) -> LayoutBox {
+        let mut b = LayoutBox::new(BoxType::Block, st(css));
+        Engine::apply_position_to_layout_box(&mut b);
+        b
+    }
+
+    // ---------------- GROUP A: computed values (the arms) ----------------
+
+    #[test]
+    fn a_every_position_keyword_parses() {
+        assert_eq!(st("position: relative").position, Position::Relative);
+        assert_eq!(st("position: absolute").position, Position::Absolute);
+        assert_eq!(st("position: fixed").position, Position::Fixed);
+        assert_eq!(st("position: sticky").position, Position::Sticky);
+        assert_eq!(st("position: static").position, Position::Static);
+        assert_eq!(st("position: bogus").position, Position::Static, "unknown falls back to static");
+    }
+
+    #[test]
+    fn a_offsets_parse_and_unset_stays_auto() {
+        let s = st("position: absolute; top: 10px; left: 0");
+        assert_eq!(s.top, Some(Length::Px(10.0)));
+        // `left: 0` is Some(0) - PINNED to the containing block edge.
+        // An unset `right` is None - AUTO, keep the static-flow position.
+        // These are different things; a plain Length could not tell them apart
+        // because Length::default() is Zero.
+        assert!(matches!(s.left, Some(Length::Zero) | Some(Length::Px(0.0))),
+                "left:0 must be Some(0) = pinned, got {:?}", s.left);
+        assert_eq!(s.right, None, "unset offset must stay auto (None), not become 0");
+        assert_eq!(s.bottom, None);
+    }
+
+    #[test]
+    fn a_percentage_offsets_are_kept_as_percentages_not_flattened() {
+        // The COMPUTED value keeps the percentage - that is the honest record
+        // of what the author wrote, and matches the reference. The refusal
+        // happens later, at the layout wire, where pixels are demanded and the
+        // containing block is still unknown (see the group-B twin below).
+        //
+        // My first draft asserted None here and failed. The product was right:
+        // discarding the percentage at parse time would lose information the
+        // engine may later be able to resolve.
+        assert_eq!(st("position: absolute; top: 50%").top, Some(Length::Percent(50.0)));
+    }
+
+    #[test]
+    fn a_z_index_garbage_is_ignored_not_flattened() {
+        assert_eq!(st("z-index: 7").z_index, 7);
+        assert_eq!(st("z-index: -3").z_index, -3);
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, "z-index: 5");
+        apply_inline_style_decls(&mut s, "z-index: banana");
+        assert_eq!(s.z_index, 5, "garbage must be ignored; flattening to 0 silently restacks the page");
+    }
+
+    #[test]
+    fn a_offsets_do_not_inherit() {
+        let mut parent = ComputedStyle::new();
+        parent.top = Some(Length::Px(40.0));
+        parent.z_index = 9;
+        let child = ComputedStyle::inherit_from(&parent);
+        assert_eq!(child.top, None, "a child must not adopt its parent's displacement");
+        assert_eq!(child.z_index, 0);
+    }
+
+    // ------------- GROUP B: reached the layout box (the wire) -------------
+
+    #[test]
+    fn b_position_reaches_the_layout_box() {
+        use rustkit_layout::Position as LP;
+        assert_eq!(boxed("position: absolute").position, LP::Absolute);
+        assert_eq!(boxed("position: fixed").position, LP::Fixed);
+        assert_eq!(boxed("").position, LP::Static);
+    }
+
+    #[test]
+    fn b_offsets_reach_the_layout_box_in_pixels() {
+        let b = boxed("position: absolute; top: 10px; left: 20px");
+        assert_eq!(b.offsets.top, Some(10.0), "top must reach the box");
+        assert_eq!(b.offsets.left, Some(20.0), "left must reach the box");
+        assert_eq!(b.offsets.right, None, "an unset offset must stay auto at the box too");
+    }
+
+    #[test]
+    fn b_relative_units_are_resolved_against_the_element_font_size() {
+        // rem is always 16px; em follows the element's own font-size. If these
+        // arrived unresolved the box would be offset by 2 pixels instead of 64.
+        let b = boxed("position: absolute; font-size: 32px; top: 2em; left: 2rem");
+        assert_eq!(b.offsets.top, Some(64.0), "2em at font-size 32px is 64px");
+        assert_eq!(b.offsets.left, Some(32.0), "2rem is 32px");
+    }
+
+    #[test]
+    fn b_percentage_offsets_are_refused_at_the_wire_not_invented() {
+        // THE TWIN of the group-A test above, and the one that matters. A
+        // percentage resolves against the containing block, which is not known
+        // while the tree is built. The box must get None (auto) rather than an
+        // invented pixel value - treating `top: 50%` as 50px would place the
+        // element somewhere no CSS author asked for, silently.
+        let b = boxed("position: absolute; top: 50%; left: 10px");
+        assert_eq!(b.offsets.top, None, "a % offset must not become an invented px");
+        assert_eq!(b.offsets.left, Some(10.0), "and must not poison its siblings");
+    }
+
+    #[test]
+    fn b_z_index_reaches_the_layout_box() {
+        assert_eq!(boxed("z-index: 4").z_index, 4);
+    }
+
+    #[test]
+    fn b_a_static_box_gets_no_offsets_even_if_they_are_declared() {
+        // Offsets on a static box must not displace it - that is the CSS rule,
+        // and it is also what stops a stray `top:` in a stylesheet from
+        // shifting unpositioned content.
+        let b = boxed("top: 99px; left: 99px");
+        assert_eq!(b.offsets.top, None);
+        assert_eq!(b.offsets.left, None);
+    }
+
+    #[test]
+    fn b_relative_and_sticky_map_to_static_deliberately() {
+        // Mirrors the macOS reference. Entering the positioned paint path for
+        // these wrecks pages whose relative boxes are only z-index anchors,
+        // until the stacking pipeline matures. Pinned so a future change is a
+        // DECISION rather than a drift; deviating here would be a divergence.
+        use rustkit_layout::Position as LP;
+        assert_eq!(boxed("position: relative; top: 5px").position, LP::Static);
+        assert_eq!(boxed("position: sticky; top: 5px").position, LP::Static);
+    }
+
+    #[test]
+    fn b_position_reaches_a_box_through_the_real_document_build() {
+        // Group B above calls the helper directly. This drives the whole path
+        // - author stylesheet, cascade, layout build - so the receipt is not
+        // resting on my own helper being called.
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        };
+        let doc = Document::parse_html(
+            r#"<html><head><style>.pin { position: absolute; top: 12px; left: 34px; }</style></head>
+               <body><div class="pin"></div></body></html>"#,
+        ).expect("parse");
+        let layout = e.build_layout_from_document(&doc);
+
+        fn find_positioned(b: &LayoutBox) -> Option<&LayoutBox> {
+            if b.position != rustkit_layout::Position::Static { return Some(b); }
+            b.children.iter().find_map(find_positioned)
+        }
+        let p = find_positioned(&layout).expect("an absolutely positioned box must exist");
+        assert_eq!(p.position, rustkit_layout::Position::Absolute);
+        assert_eq!(p.offsets.top, Some(12.0));
+        assert_eq!(p.offsets.left, Some(34.0));
     }
 }
 
