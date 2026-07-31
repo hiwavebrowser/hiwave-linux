@@ -1111,6 +1111,18 @@ pub struct ComputedStyle {
     // Box model
     pub display: Display,
     pub position: Position,
+    /// Box offsets. `Option` rather than a plain `Length`, deliberately:
+    /// CSS `auto` and `0` are DIFFERENT. `auto` keeps the element's static
+    /// flow position on that axis; `0` pins that edge to the containing
+    /// block. `Length::default()` is `Zero`, so storing a bare `Length` would
+    /// silently mean "pinned" for every element that never set an offset -
+    /// i.e. every element on the page. `Option::default()` is `None`, which
+    /// is `auto`, which is correct.
+    pub top: Option<Length>,
+    pub right: Option<Length>,
+    pub bottom: Option<Length>,
+    pub left: Option<Length>,
+    pub z_index: i32,
     pub width: Length,
     pub height: Length,
     pub min_width: Length,
@@ -2257,6 +2269,10 @@ mod computed_style_field_guards {
             text_decoration_style, text_decoration_thickness, transform, transform_origin,
             transition_delay, transition_duration, transition_property, transition_timing_function,
             vertical_align, width,
+            // Offsets and z-index: NOT inherited. A child does not adopt its
+            // parent's `top: 20px` - that would cascade a positioned parent's
+            // displacement onto every descendant.
+            top, right, bottom, left, z_index,
         } = ComputedStyle::new();
 
         // THE PARTITION IS CHECKED, NOT MERELY DOCUMENTED - and every
@@ -2373,6 +2389,7 @@ mod computed_style_field_guards {
             transition_delay, transition_duration, transition_property, transition_timing_function,
             vertical_align, white_space, width, word_break,
             word_spacing, writing_mode,
+            top, right, bottom, left, z_index,
         } = ComputedStyle::new();
 
         // Initials that have historically been wrong, pinned positively.
@@ -2391,5 +2408,18 @@ mod computed_style_field_guards {
         // initial for them - pinned as a decision, not a coincidence.
         assert_eq!(min_width, Length::Zero, "min-width initial IS 0 - deliberate");
         assert_eq!(min_height, Length::Zero, "min-height initial IS 0 - deliberate");
+
+        // Offsets DO fall through ..Default::default() correctly, but only
+        // because Option::default() is None. That is the SAME shape as
+        // min_width above - right by virtue of a good default rather than by
+        // anyone deciding it - so it is asserted rather than assumed. Had
+        // these been plain Lengths, Length::default() is Zero and every
+        // element on the page would have been pinned to its containing block
+        // instead of sitting in normal flow.
+        assert_eq!(top, None, "top initial is auto (None), NOT 0");
+        assert_eq!(right, None, "right initial is auto (None), NOT 0");
+        assert_eq!(bottom, None, "bottom initial is auto (None), NOT 0");
+        assert_eq!(left, None, "left initial is auto (None), NOT 0");
+        assert_eq!(z_index, 0, "z-index initial IS 0 (CSS initial is `auto`; 0 is our stand-in)");
     }
 }
