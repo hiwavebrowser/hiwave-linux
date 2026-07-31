@@ -3288,7 +3288,12 @@ mod inheritance_tests {
         );
         let s = find_text(&root, "x").expect("text box");
         assert_eq!(s.color, Color::from_rgb(0, 255, 0), "color inherits");
-        assert_ne!(s.width, Length::Px(500.0), "width must NOT inherit");
+        // POSITIVE residual, per Prometheus's N-width-positive: assert the CSS
+        // initial, not merely "not the parent's value". assert_ne would pass if
+        // width came back garbage in a NEW way - and it did: before the
+        // inherit_from partition fix this was Length::Zero, which is not 500px
+        // and is also completely wrong. The weaker assertion shipped the bug.
+        assert_eq!(s.width, Length::Auto, "width must reset to its CSS initial");
     }
 
     #[test]
@@ -3336,14 +3341,40 @@ mod inheritance_tests {
     }
 
     #[test]
-    fn ua_defaults_still_win_where_they_should() {
-        // h1 gets its UA font-size even though body sets a different one:
-        // UA defaults are applied AFTER inheriting, before author rules.
+    fn ua_defaults_win_over_an_inherited_value() {
+        // Prometheus N-ua-stub: this test previously asserted only
+        // find_depth(..).is_some() while its NAME promised UA-beats-inherited
+        // ordering. A test that names an invariant it does not check makes the
+        // invariant look covered - the same defect class as a vacuous root
+        // assertion. Now it asserts the ordering.
+        //
+        // body sets 10px; h1's UA default is 32px and is applied AFTER
+        // inheriting, so the h1 must be 32px, not the inherited 10px.
         let root = layout(
             r#"<html><head><style>body { font-size: 10px; }</style></head>
                <body><h1>big</h1></body></html>"#,
         );
-        let h1 = find_depth(&root, 1);
-        assert!(h1.is_some(), "layout produced a child box");
+        let s = find_text(&root, "big").expect("h1 text box");
+        // The text inherits from the h1, so it carries the h1's computed size.
+        assert_eq!(s.font_size, Length::Px(32.0), "UA h1 size must beat the inherited 10px");
+    }
+
+    #[test]
+    fn inheriting_does_not_make_elements_zero_sized_black_or_invisible() {
+        // REGRESSION GUARD for the defect this unit nearly shipped. Linux's
+        // inherit_from fell through to ..Default::default() for width/height/
+        // background/opacity, whose DERIVED defaults are Zero / opaque BLACK /
+        // 0.0 - so every inheriting element would have been 0x0, painted black,
+        // and fully transparent. Every other test in this file still passed.
+        let root = layout(
+            r#"<html><head><style>body { color: #ff0000; }</style></head>
+               <body><div><p>x</p></div></body></html>"#,
+        );
+        let s = find_text(&root, "x").expect("text box");
+        assert_eq!(s.width, Length::Auto, "must not inherit a Zero width");
+        assert_eq!(s.height, Length::Auto, "must not inherit a Zero height");
+        assert_eq!(s.background_color, Color::TRANSPARENT, "must not paint black");
+        assert_eq!(s.opacity, 1.0, "must not be invisible");
     }
 }
+

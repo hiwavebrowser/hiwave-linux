@@ -1274,7 +1274,38 @@ impl ComputedStyle {
             text_decoration_style: TextDecorationStyle::Solid,
             text_decoration_thickness: Length::Auto,
 
-            // Non-inherited get defaults
+            // NON-INHERITED PROPERTIES WHOSE DERIVED DEFAULT IS WRONG.
+            //
+            // These four must be spelled out because `..Default::default()`
+            // below does NOT give the CSS initial value for them, and the
+            // failure is invisible in tests that only check inherited props:
+            //
+            //   * Length::default() is Zero, not Auto (the #[default] sits on
+            //     the Zero variant). Falling through makes every inheriting
+            //     element 0x0 - the exact defect fixed for ComputedStyle::new
+            //     in PR #4, which would have returned here through a different
+            //     door the moment the engine started calling inherit_from.
+            //   * Color::default() is opaque BLACK, so every inheriting
+            //     element would paint a black box over the page.
+            //   * f32::default() is 0.0, so every inheriting element would be
+            //     fully transparent - i.e. the whole page renders invisible.
+            //
+            // Measured on this tree, not assumed: before this change
+            // inherit_from(new()) yielded width=Zero, background=BLACK(a=1.0),
+            // opacity=0. (= the 11 explicit re-initialisations Athena measured
+            // in the Windows inherit_from; her note that the comment there is
+            // "a scar, not decoration" is exactly right.)
+            width: Length::Auto,
+            height: Length::Auto,
+            max_width: Length::Auto,
+            max_height: Length::Auto,
+            background_color: Color::TRANSPARENT,
+            opacity: 1.0,
+            flex_shrink: 1.0,
+
+            // Everything genuinely non-inherited whose derived default IS the
+            // CSS initial value (min_width/min_height are Zero, which is the
+            // correct CSS 2.1 initial for those two).
             ..Default::default()
         }
     }
