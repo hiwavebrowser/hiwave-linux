@@ -2096,6 +2096,83 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                         _ => rustkit_css::AnimationPlayState::Running,
                     };
                 }
+                // ---- L0.props.tier1: layout-critical arms ----------
+                // Ported from the Windows applier (104 arms) into this tree's
+                // 30. Without these, author rules REACHED elements (the L0
+                // substrate) but could not take effect for the properties that
+                // decide layout - width/height/display were unknown words.
+                "width" => {
+                    if let Some(l) = parse_length(value) { style.width = l; }
+                }
+                "height" => {
+                    if let Some(l) = parse_length(value) { style.height = l; }
+                }
+                "min-width" => {
+                    if let Some(l) = parse_length(value) { style.min_width = l; }
+                }
+                "min-height" => {
+                    if let Some(l) = parse_length(value) { style.min_height = l; }
+                }
+                "max-width" => {
+                    if let Some(l) = parse_length(value) { style.max_width = l; }
+                }
+                "max-height" => {
+                    if let Some(l) = parse_length(value) { style.max_height = l; }
+                }
+                "display" => {
+                    if let Some(d) = rustkit_css::parse_display(value) { style.display = d; }
+                }
+                "text-align" => {
+                    style.text_align = match value.trim() {
+                        "center" => rustkit_css::TextAlign::Center,
+                        "right" => rustkit_css::TextAlign::Right,
+                        "justify" => rustkit_css::TextAlign::Justify,
+                        _ => rustkit_css::TextAlign::Left,
+                    };
+                }
+                "line-height" => {
+                    if let Ok(n) = value.trim().parse::<f32>() {
+                        style.line_height = n;
+                    } else if let Some(rustkit_css::Length::Px(px)) = parse_length(value) {
+                        style.line_height = px;
+                    }
+                }
+                "font-family" => {
+                    let fam = value.split(',').next().unwrap_or(value).trim();
+                    let fam = fam.trim_matches(['"', '\'']);
+                    if !fam.is_empty() { style.font_family = fam.to_string(); }
+                }
+                "font-style" => {
+                    if value == "italic" || value == "oblique" {
+                        style.font_style = rustkit_css::FontStyle::Italic;
+                    }
+                }
+                // Box-model longhands. The `margin`/`padding` SHORTHANDS
+                // already existed; a rule setting only one side was dropped.
+                "margin-top" => { if let Some(l) = parse_length(value) { style.margin_top = l; } }
+                "margin-right" => { if let Some(l) = parse_length(value) { style.margin_right = l; } }
+                "margin-bottom" => { if let Some(l) = parse_length(value) { style.margin_bottom = l; } }
+                "margin-left" => { if let Some(l) = parse_length(value) { style.margin_left = l; } }
+                "padding-top" => { if let Some(l) = parse_length(value) { style.padding_top = l; } }
+                "padding-right" => { if let Some(l) = parse_length(value) { style.padding_right = l; } }
+                "padding-bottom" => { if let Some(l) = parse_length(value) { style.padding_bottom = l; } }
+                "padding-left" => { if let Some(l) = parse_length(value) { style.padding_left = l; } }
+                "border-width" => {
+                    if let Some(l) = parse_length(value) {
+                        style.border_top_width = l.clone();
+                        style.border_right_width = l.clone();
+                        style.border_bottom_width = l.clone();
+                        style.border_left_width = l;
+                    }
+                }
+                "border-color" => {
+                    if let Some(c) = parse_color(value) {
+                        style.border_top_color = c;
+                        style.border_right_color = c;
+                        style.border_bottom_color = c;
+                        style.border_left_color = c;
+                    }
+                }
                 "color" => {
                     if let Some(color) = parse_color(value) {
                         style.color = color;
@@ -2977,5 +3054,141 @@ mod author_stylesheet_tests {
         // Regression guard: L0 must not alter pages that have no author CSS.
         let s = style_of(r#"<html><body><p style="font-size: 7px">x</p></body></html>"#, "p");
         assert_eq!(s.font_size, Length::Px(7.0));
+    }
+}
+
+#[cfg(test)]
+mod props_tier1_tests {
+    use super::*;
+    use rustkit_css::{Display, Length, TextAlign};
+
+    fn applied(decls: &str) -> ComputedStyle {
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, decls);
+        s
+    }
+
+    /// THE RECEIPT PROMETHEUS ASKED FOR: Athena's #54 shape, width:123 on a
+    /// descendant via an author rule. This exact assertion FAILED on the L0
+    /// branch (width came back Auto) because the applier had no `width` arm —
+    /// which is how the property-coverage gap was found. It passes now.
+    #[test]
+    fn athena_54_shape_width_123_on_a_descendant() {
+        let d = Document::parse_html(
+            r#"<html><head><style>.card p { width: 123px; }</style></head>
+               <body><div class="card"><p>x</p></div></body></html>"#,
+        )
+        .expect("parse");
+        let mut css = String::new();
+        collect_free(&d.root(), &mut css);
+        let sheet = Stylesheet::parse(&css).expect("sheet");
+        let ancestors = vec![
+            ElementCtx { tag: "body".into(), classes: vec![], id: None },
+            ElementCtx { tag: "div".into(), classes: vec!["card".into()], id: None },
+        ];
+        let mut style = ComputedStyle::new();
+        for rule in &sheet.rules {
+            if Engine::selector_matches(&rule.selector, "p", &[], None, &ancestors).is_some() {
+                for decl in &rule.declarations {
+                    if let PropertyValue::Specified(v) = &decl.value {
+                        apply_inline_style_decls(&mut style, &format!("{}: {}", decl.property, v));
+                    }
+                }
+            }
+        }
+        assert_eq!(style.width, Length::Px(123.0), "width must now take effect");
+    }
+
+    fn collect_free(node: &Rc<Node>, out: &mut String) {
+        if let NodeType::Element { tag_name, .. } = &node.node_type {
+            if tag_name.eq_ignore_ascii_case("style") {
+                for c in node.children() {
+                    if let NodeType::Text(t) = &c.node_type {
+                        out.push_str(t);
+                        out.push('\n');
+                    }
+                }
+                return;
+            }
+        }
+        for c in node.children() {
+            collect_free(&c, out);
+        }
+    }
+
+    #[test]
+    fn box_dimensions_and_constraints_apply() {
+        let s = applied("width: 10px; height: 20px; min-width: 1px; max-width: 99px; \
+                         min-height: 2px; max-height: 88px");
+        assert_eq!(s.width, Length::Px(10.0));
+        assert_eq!(s.height, Length::Px(20.0));
+        assert_eq!(s.min_width, Length::Px(1.0));
+        assert_eq!(s.max_width, Length::Px(99.0));
+        assert_eq!(s.min_height, Length::Px(2.0));
+        assert_eq!(s.max_height, Length::Px(88.0));
+    }
+
+    #[test]
+    fn display_applies_including_the_flex_that_layout_branches_on() {
+        assert_eq!(applied("display: flex").display, Display::Flex);
+        assert_eq!(applied("display: none").display, Display::None);
+        // Unknown value must not clobber the computed value.
+        let mut s = applied("display: flex");
+        apply_inline_style_decls(&mut s, "display: bogus-value");
+        assert_eq!(s.display, Display::Flex, "invalid display must be ignored");
+    }
+
+    #[test]
+    fn margin_and_padding_longhands_do_not_cross() {
+        // One test asserting all eight, with DISTINCT values: a crossed wire
+        // (top writing to bottom) is invisible if the values match or if each
+        // side is asserted alone.
+        let s = applied("margin-top: 1px; margin-right: 2px; margin-bottom: 3px; margin-left: 4px; \
+                         padding-top: 5px; padding-right: 6px; padding-bottom: 7px; padding-left: 8px");
+        assert_eq!(s.margin_top, Length::Px(1.0));
+        assert_eq!(s.margin_right, Length::Px(2.0));
+        assert_eq!(s.margin_bottom, Length::Px(3.0));
+        assert_eq!(s.margin_left, Length::Px(4.0));
+        assert_eq!(s.padding_top, Length::Px(5.0));
+        assert_eq!(s.padding_right, Length::Px(6.0));
+        assert_eq!(s.padding_bottom, Length::Px(7.0));
+        assert_eq!(s.padding_left, Length::Px(8.0));
+    }
+
+    #[test]
+    fn longhand_after_shorthand_wins_source_order() {
+        // `margin: 5px; margin-left: 50px` must leave left=50, others 5.
+        let s = applied("margin: 5px; margin-left: 50px");
+        assert_eq!(s.margin_left, Length::Px(50.0));
+        assert_eq!(s.margin_top, Length::Px(5.0));
+    }
+
+    #[test]
+    fn text_and_font_properties_apply() {
+        let s = applied("text-align: center; line-height: 1.5; font-family: Georgia, serif; \
+                         font-style: italic");
+        assert_eq!(s.text_align, TextAlign::Center);
+        assert_eq!(s.line_height, 1.5);
+        assert_eq!(s.font_family, "Georgia", "first family wins, quotes/space trimmed");
+        assert_eq!(s.font_style, rustkit_css::FontStyle::Italic);
+    }
+
+    #[test]
+    fn line_height_accepts_both_a_number_and_a_length() {
+        assert_eq!(applied("line-height: 2").line_height, 2.0);
+        assert_eq!(applied("line-height: 24px").line_height, 24.0);
+    }
+
+    #[test]
+    fn border_shorthand_sides_are_all_set() {
+        let s = applied("border-width: 3px; border-color: #ff0000");
+        assert_eq!(s.border_top_width, Length::Px(3.0));
+        assert_eq!(s.border_left_width, Length::Px(3.0));
+        assert_eq!(s.border_bottom_color.r, 255);
+    }
+
+    #[test]
+    fn quoted_font_family_is_unquoted() {
+        assert_eq!(applied("font-family: \"Times New Roman\", serif").font_family, "Times New Roman");
     }
 }
