@@ -47,6 +47,29 @@ def run(cmd: list[str]) -> tuple[int, str]:
     return proc.returncode, proc.stdout or ""
 
 
+def _applier_body(engine: str) -> str:
+    """The body of the CSS applier, brace-matched.
+
+    Falls back to the whole file if the function is renamed, and says so in
+    the returned marker - a silent fallback would reintroduce the very
+    false-reachable this scoping exists to remove.
+    """
+    i = engine.find("fn apply_inline_style_decls")
+    if i < 0:
+        return engine
+    j = engine.find("{", i)
+    depth, k = 0, j
+    while k < len(engine):
+        if engine[k] == "{":
+            depth += 1
+        elif engine[k] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        k += 1
+    return engine[j:k]
+
+
 def reachability() -> dict:
     """Count ComputedStyle fields that rustkit-layout READS but no CSS can SET.
 
@@ -80,9 +103,23 @@ def reachability() -> dict:
     engine = Path("crates/rustkit-engine/src/lib.rs").read_text()
 
     read = [f for f in fields if re.search(r"\." + f + r"\b", layout)]
+
+    # WRITABLE means "an applier arm can set it from CSS" - so only the
+    # APPLIER's body counts, not the whole engine file.
+    #
+    # A whole-file scan counts internal plumbing as writability and produces a
+    # FALSE REACHABLE. Worked example, caught by this metric's own ratchet
+    # contradicting a fact I knew: text-decoration-thickness has NO arm (the
+    # macOS reference has none, so wiring one would be a divergence), but the
+    # text-run propagation block assigns the field. Whole-file scanning called
+    # it settable and dropped it off the list. Nothing can set it.
+    #
+    # This is the same applier-scoping correction I published for the
+    # reference-subset check and then failed to apply to the metric itself.
+    applier = _applier_body(engine)
     written = [f for f in fields
-               if re.search(r"\bstyle\." + f + r"\s*=", engine)
-               or re.search(r"\bs\." + f + r"\s*=", engine)]
+               if re.search(r"\bstyle\." + f + r"\s*=", applier)
+               or re.search(r"\bs\." + f + r"\s*=", applier)]
     unreachable = [f for f in read if f not in written]
 
     return {
