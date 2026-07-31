@@ -2206,3 +2206,128 @@ mod tests {
         assert_eq!(child.display, Display::Block);
     }
 }
+
+#[cfg(test)]
+mod computed_style_field_guards {
+    use super::*;
+
+    /// GUARD 1 - a new field must get a conscious INHERITANCE decision.
+    /// (= Athena's Windows #57, ported.)
+    ///
+    /// `inherit_from` ends in `..Default::default()`, so a field added tomorrow
+    /// that CSS defines as inherited would silently NOT inherit: the rest
+    /// pattern swallows it, every existing test still passes, and the only
+    /// symptom is a page that renders subtly wrong. This destructure has NO
+    /// rest pattern, so adding any field fails to COMPILE until someone writes
+    /// it into one of the two lists below.
+    ///
+    /// Honest limit: defeatable by adding `..` here - but that means writing
+    /// `..` into a test with this name, which a reviewer can see. Silently
+    /// inheriting nothing is visible to no one.
+    #[test]
+    fn every_field_has_a_conscious_inheritance_decision() {
+        let ComputedStyle {
+            // ---- INHERITED: copied from the parent by inherit_from ----
+            color, direction, font_family, font_size,
+            font_stretch, font_style, font_weight, letter_spacing,
+            line_height, text_align, text_indent, text_transform,
+            white_space, word_break, word_spacing, writing_mode,
+            // ---- NOT INHERITED: reset to an initial by inherit_from, or
+            //      deliberately left to Default because Default IS the CSS
+            //      initial (min_width/min_height are Zero, correct per CSS 2.1
+            //      - the one place "the default is fine" is true, recorded so
+            //      it is visibly true rather than accidentally true).
+            align_content, align_items, align_self, animation_delay,
+            animation_direction, animation_duration, animation_fill_mode, animation_iteration_count,
+            animation_name, animation_play_state, animation_timing_function, background_color,
+            border_bottom_color, border_bottom_width, border_left_color, border_left_width,
+            border_right_color, border_right_width, border_top_color, border_top_width,
+            box_shadows, column_gap, display, flex_basis,
+            flex_direction, flex_grow, flex_shrink, flex_wrap,
+            grid_auto_columns, grid_auto_flow, grid_auto_rows, grid_column_end,
+            grid_column_start, grid_row_end, grid_row_start, grid_template_areas,
+            grid_template_columns, grid_template_rows, height, justify_content,
+            justify_items, justify_self, margin_bottom, margin_left,
+            margin_right, margin_top, max_height, max_width,
+            min_height, min_width, opacity, order,
+            overflow_x, overflow_y, overscroll_behavior_x, overscroll_behavior_y,
+            padding_bottom, padding_left, padding_right, padding_top,
+            position, row_gap, scroll_behavior, scrollbar_color,
+            scrollbar_gutter, scrollbar_width, text_decoration_color, text_decoration_line,
+            text_decoration_style, text_decoration_thickness, transform, transform_origin,
+            transition_delay, transition_duration, transition_property, transition_timing_function,
+            vertical_align, width,
+        } = ComputedStyle::new();
+
+        // The partition is checked, not merely documented.
+        let mut parent = ComputedStyle::new();
+        parent.color = Color::from_rgb(1, 2, 3);
+        parent.font_size = Length::Px(77.0);
+        parent.width = Length::Px(500.0);
+        let child = ComputedStyle::inherit_from(&parent);
+        assert_eq!(child.color, Color::from_rgb(1, 2, 3), "color must inherit");
+        assert_eq!(child.font_size, Length::Px(77.0), "font-size must inherit");
+        assert_eq!(child.width, Length::Auto, "width must NOT inherit");
+    }
+
+    /// GUARD 2 - a new field must get a deliberate INITIAL VALUE.
+    /// (= Athena's Windows #58, the sibling door.)
+    ///
+    /// `new()` also ends in `..Default::default()`, and guard 1 does NOT cover
+    /// this: a field can have a correct inheritance decision and still take a
+    /// wrong INITIAL, because the derived defaults are wrong for three whole
+    /// classes - Length::default() is Zero (not Auto), Color::default() is
+    /// opaque BLACK (not transparent), f32::default() is 0.0 (not 1.0).
+    ///
+    /// Not hypothetical on either tree. Windows shipped it 2026-07-07
+    /// (Length::Zero as the width default laid every unstyled element out at
+    /// width 0). Linux shipped the same root cause through inherit_from on
+    /// 2026-07-31, caught in review before merge. Same trap, two doors, three
+    /// weeks apart, both times with a fully green suite.
+    #[test]
+    fn every_field_has_a_deliberate_initial_value() {
+        let ComputedStyle {
+            align_content, align_items, align_self, animation_delay,
+            animation_direction, animation_duration, animation_fill_mode, animation_iteration_count,
+            animation_name, animation_play_state, animation_timing_function, background_color,
+            border_bottom_color, border_bottom_width, border_left_color, border_left_width,
+            border_right_color, border_right_width, border_top_color, border_top_width,
+            box_shadows, color, column_gap, direction,
+            display, flex_basis, flex_direction, flex_grow,
+            flex_shrink, flex_wrap, font_family, font_size,
+            font_stretch, font_style, font_weight, grid_auto_columns,
+            grid_auto_flow, grid_auto_rows, grid_column_end, grid_column_start,
+            grid_row_end, grid_row_start, grid_template_areas, grid_template_columns,
+            grid_template_rows, height, justify_content, justify_items,
+            justify_self, letter_spacing, line_height, margin_bottom,
+            margin_left, margin_right, margin_top, max_height,
+            max_width, min_height, min_width, opacity,
+            order, overflow_x, overflow_y, overscroll_behavior_x,
+            overscroll_behavior_y, padding_bottom, padding_left, padding_right,
+            padding_top, position, row_gap, scroll_behavior,
+            scrollbar_color, scrollbar_gutter, scrollbar_width, text_align,
+            text_decoration_color, text_decoration_line, text_decoration_style, text_decoration_thickness,
+            text_indent, text_transform, transform, transform_origin,
+            transition_delay, transition_duration, transition_property, transition_timing_function,
+            vertical_align, white_space, width, word_break,
+            word_spacing, writing_mode,
+        } = ComputedStyle::new();
+
+        // Initials that have historically been wrong, pinned positively.
+        assert_eq!(width, Length::Auto, "width initial is auto, not 0");
+        assert_eq!(height, Length::Auto, "height initial is auto, not 0");
+        assert_eq!(max_width, Length::Auto, "max-width initial is not 0");
+        assert_eq!(max_height, Length::Auto, "max-height initial is not 0");
+        assert_eq!(opacity, 1.0, "opacity initial is 1, not 0 (0 = invisible)");
+        assert_eq!(
+            background_color, Color::TRANSPARENT,
+            "background initial is transparent, not opaque black"
+        );
+        assert_eq!(flex_shrink, 1.0, "flex-shrink initial is 1, not 0");
+
+        // min-width/min-height DO fall through, and that IS the correct CSS 2.1
+        // initial for them - pinned as a decision, not a coincidence.
+        assert_eq!(min_width, Length::Zero, "min-width initial IS 0 - deliberate");
+        assert_eq!(min_height, Length::Zero, "min-height initial IS 0 - deliberate");
+    }
+}
