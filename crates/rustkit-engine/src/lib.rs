@@ -21,7 +21,7 @@ pub use rustkit_bindings::IpcMessage;
 pub use rustkit_renderer::{RenderStats, ScreenshotMetadata};
 use rustkit_compositor::Compositor;
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
-use rustkit_css::ComputedStyle;
+use rustkit_css::{ComputedStyle, PropertyValue, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
@@ -191,6 +191,16 @@ pub struct Engine {
     views: HashMap<EngineViewId, ViewState>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
+}
+
+/// Minimal identity of an ancestor element, captured while walking the DOM so
+/// descendant selectors (`.card p`) can verify the ancestor chain instead of
+/// matching on the subject alone. (= Windows/macOS `ElementCtx`.)
+#[derive(Clone)]
+struct ElementCtx {
+    tag: String,
+    classes: Vec<String>,
+    id: Option<String>,
 }
 
 impl Engine {
@@ -717,6 +727,19 @@ impl Engine {
 
     /// Build a layout tree from a DOM document.
     fn build_layout_from_document(&self, document: &Document) -> LayoutBox {
+        // L0 SUBSTRATE: collect and parse author stylesheets from <style>
+        // elements so their rules can reach the cascade. Before this, Linux had
+        // no author-stylesheet path at all - <style> was skipped like <link>,
+        // so a page was styled ONLY by inline style attributes.
+        let mut css_text = String::new();
+        self.collect_style_text(&document.root(), &mut css_text);
+        let sheet = Stylesheet::parse(&css_text).unwrap_or_else(|_| Stylesheet::new());
+        info!(
+            rule_count = sheet.rules.len(),
+            css_len = css_text.len(),
+            "CSS: author stylesheet parsed"
+        );
+
         // Create root layout box for the document
         let mut root_style = ComputedStyle::new();
         root_style.background_color = rustkit_css::Color::WHITE;
@@ -761,7 +784,7 @@ impl Engine {
                 }
             }
             
-            let body_box = self.build_layout_from_node(&body);
+            let body_box = self.build_layout_from_node(&body, &sheet, &[]);
             info!(
                 layout_children = body_box.children.len(),
                 "Layout: body box built"
@@ -778,7 +801,7 @@ impl Engine {
                     info!(index = i, tag = %tag_name, "DOM: html child");
                 }
             }
-            let html_box = self.build_layout_from_node(&html);
+            let html_box = self.build_layout_from_node(&html, &sheet, &[]);
             root_box.children.push(html_box);
         } else {
             warn!("DOM: no body or html element found");
@@ -788,7 +811,12 @@ impl Engine {
     }
 
     /// Build a layout box from a DOM node.
-    fn build_layout_from_node(&self, node: &Rc<Node>) -> LayoutBox {
+    fn build_layout_from_node(
+        &self,
+        node: &Rc<Node>,
+        sheet: &Stylesheet,
+        ancestors: &[ElementCtx],
+    ) -> LayoutBox {
         match &node.node_type {
             NodeType::Element { tag_name, attributes, .. } => {
                 // Determine box type based on tag
@@ -815,9 +843,22 @@ impl Engine {
                 };
 
                 // Create computed style based on element and attributes
-                let style = self.compute_style_for_element(tag_name, attributes);
+                let style = self.compute_style_for_element(tag_name, attributes, sheet, ancestors);
 
                 let mut layout_box = LayoutBox::new(box_type, style);
+
+                // Extend the ancestor chain with THIS element so descendant
+                // selectors (`.card p`) can verify the chain when the children
+                // are styled. Built once per element, not per child.
+                let mut child_ancestors = ancestors.to_vec();
+                child_ancestors.push(ElementCtx {
+                    tag: tag_name.to_lowercase(),
+                    classes: attributes
+                        .get("class")
+                        .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+                        .unwrap_or_default(),
+                    id: attributes.get("id").cloned(),
+                });
 
                 // Get DOM children for processing
                 let dom_children = node.children();
@@ -825,7 +866,7 @@ impl Engine {
 
                 // Process children
                 for child in dom_children {
-                    let child_box = self.build_layout_from_node(&child);
+                    let child_box = self.build_layout_from_node(&child, sheet, &child_ancestors);
                     // Add all boxes - don't filter based on children
                     // The display list builder will handle empty boxes
                     layout_box.children.push(child_box);
@@ -853,10 +894,142 @@ impl Engine {
     }
 
     /// Compute a basic style for an element based on its tag and attributes.
+    /// Walk the document collecting the text of every `<style>` element.
+    ///
+    /// Linux previously had NO author-stylesheet path at all: `<style>` sat in
+    /// the engine's skip list beside `<link>`, so every rule an author wrote in
+    /// a style block was dropped as silently as an external sheet. This is the
+    /// L0 substrate the other two trees already had. (= Windows/macOS
+    /// `collect_style_text`.)
+    fn collect_style_text(&self, node: &Rc<Node>, out: &mut String) {
+        if let NodeType::Element { tag_name, .. } = &node.node_type {
+            if tag_name.eq_ignore_ascii_case("style") {
+                for child in node.children() {
+                    if let NodeType::Text(t) = &child.node_type {
+                        out.push_str(t);
+                        out.push('\n');
+                    }
+                }
+                return;
+            }
+        }
+        for child in node.children() {
+            self.collect_style_text(&child, out);
+        }
+    }
+
+    /// Match a selector against an element, returning its specificity.
+    ///
+    /// Supports comma groups, descendant chains (and `>` treated as descendant
+    /// — stated simplification), type/class/id compounds and `*`. NOT covered,
+    /// deliberately, and left to the B1 selector campaign: pseudo-classes,
+    /// attribute selectors, and sibling combinators. A selector using those
+    /// simply does not match rather than matching wrongly.
+    fn selector_matches(
+        selector: &str,
+        tag: &str,
+        classes: &[&str],
+        id: Option<&str>,
+        ancestors: &[ElementCtx],
+    ) -> Option<u32> {
+        let mut best: Option<u32> = None;
+        for group in selector.split(',') {
+            let group = group.trim();
+            if group.is_empty() {
+                continue;
+            }
+            let compounds: Vec<&str> = group.split_whitespace().filter(|t| *t != ">").collect();
+            let Some((subject, ancestor_sels)) = compounds.split_last() else {
+                continue;
+            };
+            let Some(subject_spec) = Self::simple_selector_match(subject, tag, classes, id) else {
+                continue;
+            };
+            let mut spec = subject_spec;
+            let mut idx = ancestors.len();
+            let mut matched_all = true;
+            for sel in ancestor_sels.iter().rev() {
+                let mut found = false;
+                while idx > 0 {
+                    idx -= 1;
+                    let a = &ancestors[idx];
+                    let a_classes: Vec<&str> = a.classes.iter().map(|s| s.as_str()).collect();
+                    if let Some(s) =
+                        Self::simple_selector_match(sel, &a.tag, &a_classes, a.id.as_deref())
+                    {
+                        spec += s;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    matched_all = false;
+                    break;
+                }
+            }
+            if matched_all {
+                best = Some(best.map_or(spec, |b| b.max(spec)));
+            }
+        }
+        best
+    }
+
+    /// Match one compound selector (`div.card#main`), returning specificity.
+    fn simple_selector_match(
+        sel: &str,
+        tag: &str,
+        classes: &[&str],
+        id: Option<&str>,
+    ) -> Option<u32> {
+        let mut spec = 0u32;
+        let first_special = sel.find(['.', '#']).unwrap_or(sel.len());
+        let type_sel = &sel[..first_special];
+        if !type_sel.is_empty() && type_sel != "*" {
+            if !type_sel.eq_ignore_ascii_case(tag) {
+                return None;
+            }
+            spec += 1;
+        }
+        let rest = &sel[first_special..];
+        let bytes = rest.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let kind = bytes[i];
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() && bytes[j] != b'.' && bytes[j] != b'#' {
+                j += 1;
+            }
+            let name = &rest[start..j];
+            if name.is_empty() {
+                return None;
+            }
+            match kind {
+                b'.' => {
+                    if !classes.iter().any(|c| *c == name) {
+                        return None;
+                    }
+                    spec += 10;
+                }
+                b'#' => {
+                    if id != Some(name) {
+                        return None;
+                    }
+                    spec += 100;
+                }
+                _ => return None,
+            }
+            i = j;
+        }
+        Some(spec)
+    }
+
     fn compute_style_for_element(
         &self,
         tag_name: &str,
         attributes: &std::collections::HashMap<String, String>,
+        sheet: &Stylesheet,
+        ancestors: &[ElementCtx],
     ) -> ComputedStyle {
         let mut style = ComputedStyle::new();
         style.color = rustkit_css::Color::BLACK;
@@ -930,7 +1103,44 @@ impl Engine {
             _ => {}
         }
 
-        // Parse inline style attribute if present
+        // Author stylesheet rules, selector-matched, applied in
+        // (specificity, source order) so later / more specific rules win.
+        // These land AFTER the UA defaults above and BEFORE the inline style
+        // attribute below, which is the correct cascade order for this layer.
+        if !sheet.rules.is_empty() {
+            let classes: Vec<&str> = attributes
+                .get("class")
+                .map(|c| c.split_whitespace().collect())
+                .unwrap_or_default();
+            let id = attributes.get("id").map(|s| s.as_str());
+            let mut matched: Vec<(u32, usize)> = Vec::new();
+            for (i, rule) in sheet.rules.iter().enumerate() {
+                if let Some(spec) =
+                    Self::selector_matches(&rule.selector, tag_name, &classes, id, ancestors)
+                {
+                    matched.push((spec, i));
+                }
+            }
+            matched.sort_by_key(|&(spec, i)| (spec, i));
+            for (_, i) in matched {
+                for decl in &sheet.rules[i].declarations {
+                    // Custom properties (--x) and var() resolution are NOT in
+                    // L0 - stated, not silently skipped. They need the
+                    // inherited custom-property map the other trees carry.
+                    if decl.property.starts_with("--") {
+                        continue;
+                    }
+                    if let PropertyValue::Specified(v) = &decl.value {
+                        apply_inline_style_decls(
+                            &mut style,
+                            &format!("{}: {}", decl.property, v),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Parse inline style attribute if present (highest priority).
         if let Some(style_attr) = attributes.get("style") {
             self.apply_inline_style(&mut style, style_attr);
         }
@@ -2571,5 +2781,201 @@ mod animation_wire_tests {
         assert_eq!(style.transition_delay, 0.05);
         assert_eq!(style.animation_delay, 2.0);
         assert_eq!(style.animation_duration, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod author_stylesheet_tests {
+    use super::*;
+    use rustkit_css::Length;
+
+    fn doc(html: &str) -> Document {
+        Document::parse_html(html).expect("parse")
+    }
+
+    /// Compute the style the engine would give the FIRST element matching
+    /// `tag` at any depth, exercising the real collect -> parse -> match ->
+    /// apply path. No Engine and no GPU: the pieces under test are associated
+    /// functions and a &self method that touches no engine state.
+    fn style_of(html: &str, tag: &str) -> ComputedStyle {
+        let d = doc(html);
+        let mut css = String::new();
+        collect_style_text_free(&d.root(), &mut css);
+        let sheet = Stylesheet::parse(&css).unwrap_or_else(|_| Stylesheet::new());
+        let mut found = None;
+        walk(&d.root(), &sheet, &[], tag, &mut found);
+        found.unwrap_or_else(|| panic!("no <{tag}> in fixture"))
+    }
+
+    // Free mirrors of the engine's walk, so the tests need no Engine instance.
+    fn collect_style_text_free(node: &Rc<Node>, out: &mut String) {
+        if let NodeType::Element { tag_name, .. } = &node.node_type {
+            if tag_name.eq_ignore_ascii_case("style") {
+                for child in node.children() {
+                    if let NodeType::Text(t) = &child.node_type {
+                        out.push_str(t);
+                        out.push('\n');
+                    }
+                }
+                return;
+            }
+        }
+        for child in node.children() {
+            collect_style_text_free(&child, out);
+        }
+    }
+
+    fn walk(
+        node: &Rc<Node>,
+        sheet: &Stylesheet,
+        ancestors: &[ElementCtx],
+        want: &str,
+        out: &mut Option<ComputedStyle>,
+    ) {
+        if out.is_some() {
+            return;
+        }
+        if let NodeType::Element { tag_name, attributes, .. } = &node.node_type {
+            let classes: Vec<&str> = attributes
+                .get("class")
+                .map(|c| c.split_whitespace().collect())
+                .unwrap_or_default();
+            let id = attributes.get("id").map(|s| s.as_str());
+            if tag_name.eq_ignore_ascii_case(want) {
+                // Reproduce the engine's cascade order: UA-ish base, then
+                // author rules by (specificity, source order), then inline.
+                let mut style = ComputedStyle::new();
+                let mut matched: Vec<(u32, usize)> = Vec::new();
+                for (i, rule) in sheet.rules.iter().enumerate() {
+                    if let Some(spec) =
+                        Engine::selector_matches(&rule.selector, tag_name, &classes, id, ancestors)
+                    {
+                        matched.push((spec, i));
+                    }
+                }
+                matched.sort_by_key(|&(spec, i)| (spec, i));
+                for (_, i) in matched {
+                    for decl in &sheet.rules[i].declarations {
+                        if decl.property.starts_with("--") {
+                            continue;
+                        }
+                        if let PropertyValue::Specified(v) = &decl.value {
+                            apply_inline_style_decls(
+                                &mut style,
+                                &format!("{}: {}", decl.property, v),
+                            );
+                        }
+                    }
+                }
+                if let Some(attr) = attributes.get("style") {
+                    apply_inline_style_decls(&mut style, attr);
+                }
+                *out = Some(style);
+                return;
+            }
+            let mut next = ancestors.to_vec();
+            next.push(ElementCtx {
+                tag: tag_name.to_lowercase(),
+                classes: classes.iter().map(|s| s.to_string()).collect(),
+                id: id.map(|s| s.to_string()),
+            });
+            for child in node.children() {
+                walk(&child, sheet, &next, want, out);
+            }
+            return;
+        }
+        for child in node.children() {
+            walk(&child, sheet, ancestors, want, out);
+        }
+    }
+
+    // ---- THE RECEIPT: a <style> rule reaches a DESCENDANT element ----------
+
+    #[test]
+    fn a_style_rule_computes_onto_a_descendant_element() {
+        // Prometheus's required receipt shape: assert a DESCENDANT's computed
+        // style, not the root. Before L0 this width was dropped entirely -
+        // <style> was in the engine's skip list, so author CSS never existed.
+        let s = style_of(
+            r#"<html><head><style>p { font-size: 123px; }</style></head>
+               <body><div><p>hi</p></div></body></html>"#,
+            "p",
+        );
+        assert_eq!(s.font_size, Length::Px(123.0), "author rule must reach the <p>");
+    }
+
+    #[test]
+    fn descendant_selector_requires_the_ancestor_chain() {
+        let html = r#"<html><head><style>.card p { font-size: 50px; }</style></head>
+            <body><div class="card"><p>in</p></div></body></html>"#;
+        assert_eq!(style_of(html, "p").font_size, Length::Px(50.0));
+        // Same rule, no .card ancestor -> must NOT match.
+        let outside = r#"<html><head><style>.card p { font-size: 50px; }</style></head>
+            <body><div><p>out</p></div></body></html>"#;
+        assert_ne!(style_of(outside, "p").font_size, Length::Px(50.0));
+    }
+
+    #[test]
+    fn specificity_orders_the_cascade_not_source_order_alone() {
+        // #id (100) must beat .class (10) must beat tag (1), regardless of the
+        // order the rules appear in.
+        let s = style_of(
+            r#"<html><head><style>
+                 #only { font-size: 300px; }
+                 p { font-size: 100px; }
+                 .c { font-size: 200px; }
+               </style></head>
+               <body><p class="c" id="only">x</p></body></html>"#,
+            "p",
+        );
+        assert_eq!(s.font_size, Length::Px(300.0), "#id must win");
+    }
+
+    #[test]
+    fn equal_specificity_falls_back_to_source_order() {
+        let s = style_of(
+            r#"<html><head><style>p { font-size: 10px; } p { font-size: 20px; }</style></head>
+               <body><p>x</p></body></html>"#,
+            "p",
+        );
+        assert_eq!(s.font_size, Length::Px(20.0), "later rule wins at equal specificity");
+    }
+
+    #[test]
+    fn inline_style_attribute_beats_the_author_sheet() {
+        let s = style_of(
+            r#"<html><head><style>p { font-size: 10px; }</style></head>
+               <body><p style="font-size: 99px">x</p></body></html>"#,
+            "p",
+        );
+        assert_eq!(s.font_size, Length::Px(99.0), "inline must win over the sheet");
+    }
+
+    #[test]
+    fn comma_groups_and_star_match() {
+        let s = style_of(
+            r#"<html><head><style>h1, p { font-size: 42px; }</style></head>
+               <body><p>x</p></body></html>"#,
+            "p",
+        );
+        assert_eq!(s.font_size, Length::Px(42.0));
+        assert!(Engine::selector_matches("*", "div", &[], None, &[]).is_some());
+    }
+
+    #[test]
+    fn unsupported_selector_forms_do_not_match_rather_than_matching_wrongly() {
+        // Pseudo-classes, attribute and sibling selectors are the B1 campaign.
+        // The honest failure is NO match; matching them loosely would apply
+        // rules the author scoped tightly.
+        assert!(Engine::selector_matches("p:hover", "p", &[], None, &[]).is_none());
+        assert!(Engine::selector_matches("[data-x]", "p", &[], None, &[]).is_none());
+        assert!(Engine::selector_matches("h1 + p", "p", &[], None, &[]).is_none());
+    }
+
+    #[test]
+    fn a_page_with_no_style_element_is_unchanged() {
+        // Regression guard: L0 must not alter pages that have no author CSS.
+        let s = style_of(r#"<html><body><p style="font-size: 7px">x</p></body></html>"#, "p");
+        assert_eq!(s.font_size, Length::Px(7.0));
     }
 }
