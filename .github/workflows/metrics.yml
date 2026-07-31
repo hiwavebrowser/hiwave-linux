@@ -85,6 +85,14 @@ jobs:
             libvulkan1 \
             vulkan-tools
 
+      # Runs BEFORE the metrics collection because it needs only the source
+      # tree, so a killed CSS property is reported in seconds rather than
+      # after a full workspace build. Failing loud on purpose: the whole point
+      # of this class of defect is that nothing else reports it.
+      - name: Reachability ratchet
+        shell: bash
+        run: python scripts/collect_metrics.py --check-reachability
+
       - name: Collect metrics
         shell: bash
         run: |
