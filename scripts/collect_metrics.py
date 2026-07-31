@@ -47,6 +47,59 @@ def run(cmd: list[str]) -> tuple[int, str]:
     return proc.returncode, proc.stdout or ""
 
 
+def reachability() -> dict:
+    """Count ComputedStyle fields that rustkit-layout READS but no CSS can SET.
+
+    A field in this set means the layout code consuming it is unreachable: the
+    property is implemented and cannot be triggered. Every page renders as if
+    the author never wrote it, and nothing logs anything.
+
+    This is not visible to any other metric we collect. Test coverage cannot
+    see it - the positioned-layout tests PASS, because they build LayoutBoxes
+    directly and set the fields by hand. Coverage measures whether code runs,
+    not whether a USER can cause it to run. LOC ratio cannot see it either: the
+    missing producer is a one-line match arm while the implemented consumer is
+    hundreds of lines, so a tree can close LOC and still be unable to set a
+    property.
+
+    Method is Athena's (hiwave-windows, 2026-07-31); the reference check that
+    made it actionable is that macOS CAN set these, so they are port defects
+    rather than a shared limit.
+
+    Deliberately reported as a LIST, not just a count. A count that ticks down
+    tells you progress; the list tells you which capability is dead, and that
+    is the part someone can act on.
+    """
+    css = Path("crates/rustkit-css/src/lib.rs").read_text()
+    i = css.find("pub struct ComputedStyle")
+    if i < 0:
+        return {"error": "ComputedStyle not found"}
+    fields = sorted(set(re.findall(r"pub ([a-z_0-9]+):", css[i:css.find("}", css.find("{", i))])))
+
+    layout = "".join(p.read_text() for p in sorted(Path("crates/rustkit-layout/src").glob("*.rs")))
+    engine = Path("crates/rustkit-engine/src/lib.rs").read_text()
+
+    read = [f for f in fields if re.search(r"\." + f + r"\b", layout)]
+    written = [f for f in fields
+               if re.search(r"\bstyle\." + f + r"\s*=", engine)
+               or re.search(r"\bs\." + f + r"\s*=", engine)]
+    unreachable = [f for f in read if f not in written]
+
+    return {
+        "computed_style_fields": len(fields),
+        "read_by_layout": len(read),
+        "writable_by_applier": len(written),
+        "unreachable_count": len(unreachable),
+        "unreachable_fields": unreachable,
+        "caveat": (
+            "Regex over source, not a type-checked analysis. A field written "
+            "only through an alias this pattern does not match would be a "
+            "FALSE POSITIVE - confirm any new entry by grepping the field "
+            "individually before reporting it as a gap."
+        ),
+    }
+
+
 def collect(commit: str, branch: str) -> dict:
     build_code, build_out = run(["cargo", "build", "--workspace"])
     build_warnings = len(re.findall(r"^warning:", build_out, re.M))
@@ -127,6 +180,7 @@ def collect(commit: str, branch: str) -> dict:
         },
         "per_crate": dict(sorted(per_crate.items())),
         "crates_with_no_tests": empty,
+        "reachability": reachability(),
         "not_collected": {
             "parity_pixel_diff": (
                 "requires a GPU adapter; not collectable on a hosted Linux "
@@ -150,8 +204,28 @@ def to_markdown(m: dict) -> str:
         f"| Tests ignored | {t['ignored']} |",
         f"| Commit | `{m['commit'][:8]}` |",
         f"| Branch | {m['branch']} |",
-        "",
     ]
+    r = m.get("reachability") or {}
+    if "unreachable_count" in r:
+        lines.append(
+            f"| CSS properties layout reads but nothing can set | "
+            f"**{r['unreachable_count']}** of {r['read_by_layout']} |"
+        )
+    lines.append("")
+    if r.get("unreachable_fields"):
+        # Named, not just counted. A count says how far there is to go; the
+        # list says WHICH capability is dead, which is the part someone can
+        # act on. Each of these is layout code that exists and cannot be
+        # reached from any stylesheet.
+        lines += [
+            "<details><summary>Unreachable from CSS "
+            f"({r['unreachable_count']}) - implemented in layout, no applier arm</summary>",
+            "",
+            *(f"- `{f.replace('_', '-')}`" for f in r["unreachable_fields"]),
+            "",
+            "</details>",
+            "",
+        ]
     if m["crates_with_no_tests"]:
         lines += [
             "<details><summary>Crates running zero tests "
