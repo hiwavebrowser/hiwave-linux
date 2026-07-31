@@ -3753,14 +3753,25 @@ mod external_stylesheet_tests {
         // "element has a URL attribute" rather than on tag name, the page would
         // cross-contaminate. Neither pass's own tests would reveal it - the bug
         // exists only in the interaction. (= Athena's disjointness principle.)
+        // THE TRAP ELEMENT. A bare <style> carries no href, so a discovery
+        // pass that wrongly matched on "has a URL attribute" could never pick
+        // it up and the first assertion below could not fail - it was close to
+        // vacuous, which is the exact class of half-assertion this fleet has
+        // been stamping out. Giving the <style> a rel and an href makes the
+        // assertion FALSIFIABLE: a tag-gated discovery ignores it, an
+        // attribute-gated one swallows it. Invalid HTML on purpose; the point
+        // is that the gate is on the TAG NAME.
         let d = doc(
             r#"<html><head>
                  <link rel="stylesheet" href="/ext.css">
-                 <style>p { width: 3px; }</style>
+                 <style rel="stylesheet" href="/trap.css">p { width: 3px; }</style>
                </head><body></body></html>"#,
         );
         let urls = Engine::discover_external_stylesheets(&d, Some(&base()));
-        assert_eq!(urls.len(), 1, "discovery must not pick up the <style> element");
+        assert_eq!(
+            urls.len(), 1,
+            "discovery must gate on the <link> TAG, not on carrying a URL attribute; got {urls:?}"
+        );
         assert_eq!(urls[0].as_str(), "https://example.com/ext.css");
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
