@@ -97,7 +97,65 @@ def reachability() -> dict:
             "FALSE POSITIVE - confirm any new entry by grepping the field "
             "individually before reporting it as a gap."
         ),
+        "this_is_a_floor_not_a_proof": (
+            "WRITABLE IS NOT THE SAME AS VISIBLE. A name leaving this list "
+            "proves only that an applier arm exists - NOT that the value "
+            "reaches paint. text-decoration is the worked example: it is not "
+            "inherited, and rustkit-layout emits the decoration commands from "
+            "the TEXT box's style, so wiring the arms alone drops the name "
+            "from this list while the page still renders undecorated. "
+            "Athena hit exactly this on hiwave-windows #64 and only her "
+            "layout-reaching test group caught it. "
+            "So: a falling count is necessary evidence, never sufficient. "
+            "Any wire unit still owes a Group B test that asserts the value "
+            "REACHED the box or the display list. Do not cite this metric as "
+            "end-to-end proof - that would be the same overclaim the metric "
+            "was built to expose."
+        ),
     }
+
+
+BASELINE = Path(__file__).with_name("reachability_baseline.json")
+
+
+def check_reachability_regression(current: dict) -> tuple[bool, str]:
+    """Fail if a capability CSS could reach has become unreachable.
+
+    #32 made this number VISIBLE. Visible is not guarded: a refactor that
+    drops an applier arm would silently kill a property, and the metric would
+    print a larger number that nobody diffed. This is the ratchet.
+
+    Compares the SET, not the count. A count cannot see a SWAP - close one
+    capability while breaking another and the total is unchanged while a
+    property died.
+
+    Asymmetric on purpose: a field may only LEAVE the baseline. Closing one
+    requires deleting it from the baseline file in the same PR, and that edit
+    is the receipt - it makes the win explicit in the diff instead of letting
+    the number drift down unremarked.
+    """
+    if not BASELINE.exists():
+        return True, "no baseline file; skipping (first run)"
+    allowed = set(json.loads(BASELINE.read_text(encoding="utf-8"))["unreachable_fields"])
+    now = set(current.get("unreachable_fields", []))
+    regressed = sorted(now - allowed)
+    fixed = sorted(allowed - now)
+
+    msg = []
+    if fixed:
+        msg.append(
+            "REACHABILITY IMPROVED - now settable from CSS: "
+            + ", ".join(f.replace("_", "-") for f in fixed)
+            + ". Remove them from scripts/reachability_baseline.json."
+        )
+    if regressed:
+        msg.append(
+            "REACHABILITY REGRESSION - layout still reads these but nothing "
+            "can set them any more: "
+            + ", ".join(f.replace("_", "-") for f in regressed)
+            + ". A property that used to work now silently does nothing."
+        )
+    return (not regressed), " | ".join(msg) or "reachability unchanged"
 
 
 def collect(commit: str, branch: str) -> dict:
@@ -221,6 +279,11 @@ def to_markdown(m: dict) -> str:
             "<details><summary>Unreachable from CSS "
             f"({r['unreachable_count']}) - implemented in layout, no applier arm</summary>",
             "",
+            "**This count is a floor, not a proof.** A name leaving this list "
+            "means an applier arm exists - not that the value reaches paint. "
+            "A wire unit still owes a test that asserts the value reached the "
+            "layout box or the display list.",
+            "",
             *(f"- `{f.replace('_', '-')}`" for f in r["unreachable_fields"]),
             "",
             "</details>",
@@ -264,7 +327,26 @@ def main() -> int:
     ap.add_argument("--format", choices=["json", "markdown"], default="json")
     ap.add_argument("--commit", default="")
     ap.add_argument("--branch", default="")
+    ap.add_argument(
+        "--check-reachability",
+        action="store_true",
+        help="exit non-zero if a capability CSS could reach has become unreachable",
+    )
     a = ap.parse_args()
+
+    # Runs BEFORE collection: this check needs only the source tree, so it
+    # gives its answer in a second instead of after a full workspace build.
+    if a.check_reachability:
+        ok, msg = check_reachability_regression(reachability())
+        print(msg)
+        if not ok:
+            print(
+                "Either restore the applier arm, or - if this is intentional - "
+                "say so explicitly by editing scripts/reachability_baseline.json "
+                "in the same PR.",
+                file=sys.stderr,
+            )
+        return 0 if ok else 1
 
     if a.input:
         metrics = json.loads(Path(a.input).read_text(encoding="utf-8"))

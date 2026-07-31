@@ -55,6 +55,6 @@ docs/plans/
 docs/unshared/*
 
 # Python bytecode from scripts/collect_metrics.py. Committed by
-# accident once via `git add -A`; ignored so it cannot happen twice.
+# accident twice via `git add -A`; ignored so it cannot happen again.
 __pycache__/
 *.pyc
