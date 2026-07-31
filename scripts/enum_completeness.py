@@ -102,6 +102,24 @@ def _computed_style_enums(css: str) -> set[str]:
     return set(re.findall(r":\s*(?:Option<)?([A-Z][A-Za-z0-9]*)", body))
 
 
+def _is_produced(name: str, variant: str, *sources: str) -> bool:
+    """Is this variant CONSTRUCTED (not merely mentioned) in any source?
+
+    Used for BOTH this tree and the reference. An asymmetric test - strict
+    here, lenient there - inflates the port-defect count, which is exactly
+    what happened on my first pass: 17 became 49 because the reference was
+    still being matched on bare mentions while this tree required
+    construction. One predicate, both sides.
+    """
+    q = re.escape(name) + r"::" + re.escape(variant) + r"\b"
+    pats = [
+        r"=>\s*(?:Some\()?(?:rustkit_css::)?" + q,
+        r"=\s*(?:Some\()?(?:rustkit_css::)?" + q,
+        r"return\s+(?:Some\()?(?:rustkit_css::)?" + q,
+    ]
+    return any(re.search(p, src) for p in pats for src in sources if src)
+
+
 def analyse() -> dict:
     css = CSS.read_text()
     engine = _strip_tests(ENGINE.read_text())
@@ -115,26 +133,14 @@ def analyse() -> dict:
         if name not in used:
             continue
         for v in variants:
-            # PRODUCED, not merely MENTIONED.
-            #
-            # A variant named on the LEFT of a match arm, or inside a
-            # `matches!(...)`, is being CONSUMED - that is a branch reading the
-            # value, not code creating it. `Display::Grid` appears in
-            # `is_grid()`'s matches! on this tree, so a naive "does the name
-            # appear" search calls it producible even with no parse arm at all.
-            # That is precisely the bug this tool exists to find, and my first
-            # implementation had it: the T-RED (revert the parse_display fix,
-            # expect Display variants to appear) did NOT fire.
-            #
-            # So require a CONSTRUCTION context: the variant on the RIGHT of a
-            # `=>`, or assigned, or wrapped in Some(...)/a return.
-            q = re.escape(name) + r"::" + re.escape(v) + r"\b"
-            produced = (
-                re.compile(r"=>\s*(?:Some\()?(?:rustkit_css::)?" + q).search(engine)
-                or re.compile(r"=>\s*(?:Some\()?(?:rustkit_css::)?" + q).search(css_nt)
-                or re.compile(r"=\s*(?:Some\()?(?:rustkit_css::)?" + q).search(engine)
-                or re.compile(r"return\s+(?:Some\()?(?:rustkit_css::)?" + q).search(css_nt)
-            )
+            # PRODUCED, not merely MENTIONED. A variant named on the LEFT
+            # of a match arm, or inside `matches!(...)`, is being CONSUMED -
+            # a branch reading the value, not code creating it.
+            # `Display::Grid` appears in `is_grid()`'s matches! on this tree,
+            # so a bare-name search calls it producible with no parse arm at
+            # all. My first implementation did exactly that, and the T-RED did
+            # NOT fire on the case the tool was built for.
+            produced = _is_produced(name, v, engine, css_nt)
             if produced:
                 continue
             (default_only if v == dflt else dead).append(f"{name}::{v}")
@@ -150,7 +156,7 @@ def analyse() -> dict:
     for v in dead:
         if not ref:
             unknown.append(v)
-        elif re.search(r"\b" + v.replace("::", "::") + r"\b", ref):
+        elif _is_produced(*v.split("::"), ref):
             port.append(v)
         else:
             shared.append(v)
