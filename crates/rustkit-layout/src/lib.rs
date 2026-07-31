@@ -1138,6 +1138,23 @@ pub struct HitTestAncestor {
 pub enum DisplayCommand {
     /// Fill a rectangle with a solid color.
     SolidColor(Color, Rect),
+    /// Draw a CSS box-shadow. Mirrors the macOS reference variant field for
+    /// field so the two display lists stay diffable.
+    ///
+    /// Blur is approximated on the CPU by the renderer (layered rects with
+    /// falling alpha), matching the reference. A real Gaussian blur is GPU
+    /// work and stays in the held bucket - this variant deliberately carries
+    /// no shader-specific data, so wiring the GPU path later changes the
+    /// renderer and not the display list.
+    BoxShadow {
+        offset_x: f32,
+        offset_y: f32,
+        blur_radius: f32,
+        spread_radius: f32,
+        color: Color,
+        rect: Rect,
+        inset: bool,
+    },
     /// Draw a border.
     Border {
         color: Color,
@@ -1598,6 +1615,19 @@ impl DisplayList {
 
     /// Render a layout box's own content (background, borders, text).
     fn render_box_content(&mut self, layout_box: &LayoutBox) {
+        // Outer shadows paint BEHIND the background, so they are emitted
+        // first. Inset shadows would go after it; not wired, because Linux has
+        // no inset consumer yet and emitting a command nothing paints is the
+        // dead-wire shape this unit exists to remove.
+        //
+        // NOTE FOR THE NEXT PERSON: this is the LIVE render path, reached from
+        // render_stacking_context. `render_box` below is marked
+        // #[allow(dead_code)] and labelled "legacy" - I hooked THAT one first
+        // and the reaching test stayed red with no error anywhere, because a
+        // dead function accepts calls perfectly well. That is the exact
+        // orphaned-consumer trap scripts/wireability.py exists to detect, and I
+        // walked into it while holding the tool.
+        self.render_box_shadows(layout_box);
         self.render_background(layout_box);
         self.render_borders(layout_box);
         self.render_text(layout_box);
@@ -1616,6 +1646,28 @@ impl DisplayList {
     }
 
     /// Render background.
+    /// Emit outer box shadows. Called before the background so they paint
+    /// behind it, matching the reference's ordering.
+    fn render_box_shadows(&mut self, layout_box: &LayoutBox) {
+        let box_rect = layout_box.dimensions.border_box();
+        for shadow in &layout_box.style.box_shadows {
+            // is_visible() gates on alpha and geometry: a fully transparent
+            // shadow would cost a draw call per box for something nobody can
+            // see. Inset shadows are skipped until there is a consumer.
+            if shadow.is_visible() && !shadow.inset {
+                self.commands.push(DisplayCommand::BoxShadow {
+                    offset_x: shadow.offset_x,
+                    offset_y: shadow.offset_y,
+                    blur_radius: shadow.blur_radius,
+                    spread_radius: shadow.spread_radius,
+                    color: shadow.color,
+                    rect: box_rect,
+                    inset: false,
+                });
+            }
+        }
+    }
+
     fn render_background(&mut self, layout_box: &LayoutBox) {
         let color = layout_box.style.background_color;
         if color.a > 0.0 {

@@ -505,6 +505,14 @@ impl Renderer {
                 self.draw_solid_rect(*rect, *color);
             }
 
+            DisplayCommand::BoxShadow {
+                offset_x, offset_y, blur_radius, spread_radius, color, rect, inset,
+            } => {
+                self.draw_box_shadow(
+                    *rect, *offset_x, *offset_y, *blur_radius, *spread_radius, *color, *inset,
+                );
+            }
+
             DisplayCommand::Border {
                 color,
                 rect,
@@ -707,6 +715,84 @@ impl Renderer {
     }
 
     /// Draw a solid color rectangle.
+    /// Draw a CSS box-shadow on the CPU.
+    ///
+    /// Blur is APPROXIMATED, not computed: concentric rects with falling alpha,
+    /// ported from the macOS reference. A real Gaussian blur is a separable
+    /// two-pass compute shader and lives in the held GPU bucket. Kept faithful
+    /// to the reference rather than improved, so the two trees can be compared
+    /// - an independently "better" approximation here would be a divergence
+    /// nobody asked for and would make a pixel diff meaningless.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_box_shadow(
+        &mut self,
+        rect: Rect,
+        offset_x: f32,
+        offset_y: f32,
+        blur_radius: f32,
+        spread_radius: f32,
+        color: Color,
+        inset: bool,
+    ) {
+        if color.a == 0.0 {
+            return;
+        }
+
+        let shadow_rect = if inset {
+            Rect::new(
+                rect.x + offset_x.max(0.0),
+                rect.y + offset_y.max(0.0),
+                rect.width - spread_radius * 2.0 - offset_x.abs(),
+                rect.height - spread_radius * 2.0 - offset_y.abs(),
+            )
+        } else {
+            Rect::new(
+                rect.x + offset_x - spread_radius,
+                rect.y + offset_y - spread_radius,
+                rect.width + spread_radius * 2.0,
+                rect.height + spread_radius * 2.0,
+            )
+        };
+
+        if shadow_rect.width <= 0.0 || shadow_rect.height <= 0.0 {
+            return;
+        }
+
+        if blur_radius > 0.0 {
+            let steps = (blur_radius / 2.0).ceil().max(1.0) as u32;
+            let step_size = blur_radius / steps as f32;
+
+            for i in 0..steps {
+                let layer = steps - i; // outer layers first
+                let expansion = step_size * layer as f32;
+                let layer_alpha = color.a / (steps as f32 * 1.5);
+
+                let layer_rect = if inset {
+                    Rect::new(
+                        shadow_rect.x + expansion,
+                        shadow_rect.y + expansion,
+                        shadow_rect.width - expansion * 2.0,
+                        shadow_rect.height - expansion * 2.0,
+                    )
+                } else {
+                    Rect::new(
+                        shadow_rect.x - expansion,
+                        shadow_rect.y - expansion,
+                        shadow_rect.width + expansion * 2.0,
+                        shadow_rect.height + expansion * 2.0,
+                    )
+                };
+
+                if layer_rect.width > 0.0 && layer_rect.height > 0.0 {
+                    let layer_color = Color::new(color.r, color.g, color.b, layer_alpha);
+                    self.draw_solid_rect(layer_rect, layer_color);
+                }
+            }
+        } else {
+            self.draw_solid_rect(shadow_rect, color);
+        }
+    }
+
     fn draw_solid_rect(&mut self, rect: Rect, color: Color) {
         // Apply clipping
         let rect = if let Some(clip) = self.current_clip() {

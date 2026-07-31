@@ -5206,3 +5206,87 @@ mod grid_arm_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod box_shadow_paint_tests {
+    //! Two-group split. GROUP A = `box-shadow` parses into ComputedStyle.
+    //! GROUP B = it REACHES THE DISPLAY LIST, i.e. something would be painted.
+    //!
+    //! Group B written FIRST. Group A already passed before this unit began -
+    //! the applier arm and the BoxShadow type have existed since A2/#11 - and
+    //! that is exactly the trap: `box-shadow` has been "supported" on this
+    //! tree in the sense that it parses, while no shadow has ever been drawn.
+    //! A producer with no consumer, which I built myself.
+    use super::*;
+
+    fn engine() -> Engine {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        }
+    }
+    fn display_list_for(html: &str) -> String {
+        let e = engine();
+        let doc = Document::parse_html(html).expect("parse");
+        format!("{:?}", DisplayList::build(&e.build_layout_from_document(&doc)).commands)
+    }
+
+    // ---------------- GROUP A: it parses ----------------
+
+    #[test]
+    fn a_box_shadow_parses_into_computed_style() {
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, "box-shadow: 2px 4px 6px rgba(0,0,0,0.5)");
+        assert_eq!(s.box_shadows.len(), 1);
+        let sh = &s.box_shadows[0];
+        assert_eq!((sh.offset_x, sh.offset_y, sh.blur_radius), (2.0, 4.0, 6.0));
+    }
+
+    #[test]
+    fn a_none_clears_the_shadow_list() {
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, "box-shadow: 2px 2px 2px black");
+        apply_inline_style_decls(&mut s, "box-shadow: none");
+        assert!(s.box_shadows.is_empty(), "`none` must clear, so a later rule can cancel");
+    }
+
+    // -------- GROUP B: it reaches the display list (would be painted) --------
+
+    #[test]
+    fn b_box_shadow_reaches_the_display_list() {
+        // THE RECEIPT. Group A has passed since A2 while nothing was ever
+        // drawn - a shadow that parses and never paints is indistinguishable,
+        // on screen, from no support at all.
+        let with = display_list_for(
+            r#"<html><head><style>div { box-shadow: 4px 4px 8px rgba(0,0,0,0.6); width: 50px; height: 50px; }</style></head>
+               <body><div></div></body></html>"#,
+        );
+        let without = display_list_for(
+            r#"<html><head><style>div { width: 50px; height: 50px; }</style></head>
+               <body><div></div></body></html>"#,
+        );
+        assert_ne!(with, without, "box-shadow must change what would be painted");
+        assert!(with.contains("BoxShadow"), "expected a BoxShadow command, got: {with}");
+    }
+
+    #[test]
+    fn b_an_unshadowed_page_emits_no_shadow_commands() {
+        let plain = display_list_for(r#"<html><body><div>x</div></body></html>"#);
+        assert!(!plain.contains("BoxShadow"),
+                "a page with no box-shadow must emit no shadow commands");
+    }
+
+    #[test]
+    fn b_a_fully_transparent_shadow_is_not_emitted() {
+        // is_visible() gates on alpha. Emitting a fully transparent shadow
+        // would cost a draw call per box for something nobody can see.
+        let t = display_list_for(
+            r#"<html><head><style>div { box-shadow: 4px 4px 8px rgba(0,0,0,0); width: 50px; height: 50px; }</style></head>
+               <body><div></div></body></html>"#,
+        );
+        assert!(!t.contains("BoxShadow"), "a transparent shadow must not be emitted");
+    }
+}
