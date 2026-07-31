@@ -740,6 +740,12 @@ impl Engine {
             "CSS: author stylesheet parsed"
         );
 
+        // The initial (root) style every top-level box inherits from. Colour
+        // starts BLACK here - once, at the root - rather than being forced on
+        // every element, which is what previously defeated inheritance.
+        let mut root_inherited = ComputedStyle::new();
+        root_inherited.color = rustkit_css::Color::BLACK;
+
         // Create root layout box for the document
         let mut root_style = ComputedStyle::new();
         root_style.background_color = rustkit_css::Color::WHITE;
@@ -784,7 +790,7 @@ impl Engine {
                 }
             }
             
-            let body_box = self.build_layout_from_node(&body, &sheet, &[]);
+            let body_box = self.build_layout_from_node(&body, &sheet, &root_inherited, &[]);
             info!(
                 layout_children = body_box.children.len(),
                 "Layout: body box built"
@@ -801,7 +807,7 @@ impl Engine {
                     info!(index = i, tag = %tag_name, "DOM: html child");
                 }
             }
-            let html_box = self.build_layout_from_node(&html, &sheet, &[]);
+            let html_box = self.build_layout_from_node(&html, &sheet, &root_inherited, &[]);
             root_box.children.push(html_box);
         } else {
             warn!("DOM: no body or html element found");
@@ -815,6 +821,7 @@ impl Engine {
         &self,
         node: &Rc<Node>,
         sheet: &Stylesheet,
+        parent_style: &ComputedStyle,
         ancestors: &[ElementCtx],
     ) -> LayoutBox {
         match &node.node_type {
@@ -843,7 +850,7 @@ impl Engine {
                 };
 
                 // Create computed style based on element and attributes
-                let style = self.compute_style_for_element(tag_name, attributes, sheet, ancestors);
+                let style = self.compute_style_for_element(tag_name, attributes, sheet, parent_style, ancestors);
 
                 let mut layout_box = LayoutBox::new(box_type, style);
 
@@ -866,7 +873,7 @@ impl Engine {
 
                 // Process children
                 for child in dom_children {
-                    let child_box = self.build_layout_from_node(&child, sheet, &child_ancestors);
+                    let child_box = self.build_layout_from_node(&child, sheet, &layout_box.style, &child_ancestors);
                     // Add all boxes - don't filter based on children
                     // The display list builder will handle empty boxes
                     layout_box.children.push(child_box);
@@ -881,8 +888,10 @@ impl Engine {
                     // Return minimal box for whitespace-only text
                     LayoutBox::new(BoxType::Block, ComputedStyle::new())
                 } else {
-                    let mut style = ComputedStyle::new();
-                    style.color = rustkit_css::Color::BLACK;
+                    // Text nodes inherit from the element that contains them,
+                    // so `p { color: red }` colours the words inside the <p>
+                    // rather than only the box.
+                    let style = ComputedStyle::inherit_from(parent_style);
                     LayoutBox::new(BoxType::Text(trimmed.to_string()), style)
                 }
             }
@@ -1029,10 +1038,16 @@ impl Engine {
         tag_name: &str,
         attributes: &std::collections::HashMap<String, String>,
         sheet: &Stylesheet,
+        parent: &ComputedStyle,
         ancestors: &[ElementCtx],
     ) -> ComputedStyle {
-        let mut style = ComputedStyle::new();
-        style.color = rustkit_css::Color::BLACK;
+        // INHERITANCE (unit 2): start from the parent's inherited properties
+        // instead of a fresh default. Before this, every element computed from
+        // ComputedStyle::new() with an unconditional BLACK, so `body { color:
+        // red; font-family: Georgia }` reached the body element and stopped
+        // dead there - no descendant ever saw it. ComputedStyle::inherit_from
+        // already existed in rustkit-css; the engine simply never called it.
+        let mut style = ComputedStyle::inherit_from(parent);
 
         // Apply tag-specific default styles
         match tag_name.to_lowercase().as_str() {
@@ -3190,5 +3205,145 @@ mod props_tier1_tests {
     #[test]
     fn quoted_font_family_is_unquoted() {
         assert_eq!(applied("font-family: \"Times New Roman\", serif").font_family, "Times New Roman");
+    }
+}
+
+#[cfg(test)]
+mod inheritance_tests {
+    use super::*;
+    use rustkit_css::{Color, Length, TextAlign};
+
+    /// Drive the REAL layout path — Engine::build_layout_from_document — not a
+    /// test-local mirror of the walk. Argos's N1 note on #23 was that mirror
+    /// tests cannot see a divergence between the mirror and the real walk; this
+    /// unit's receipts answer that by going through the engine itself.
+    /// Uses the serialised test_compositor so parallel runs cannot race GPU
+    /// init (the #21 lesson).
+    fn engine() -> Engine {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor: test_compositor(),
+            renderer: None,
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("loader"),
+            ),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        }
+    }
+
+    /// Find the first layout box whose text matches, returning its style.
+    fn find_text<'a>(b: &'a LayoutBox, want: &str) -> Option<&'a ComputedStyle> {
+        if let BoxType::Text(t) = &b.box_type {
+            if t.contains(want) {
+                return Some(&b.style);
+            }
+        }
+        b.children.iter().find_map(|c| find_text(c, want))
+    }
+
+    /// Find the first box that carries a distinguishing computed value.
+    fn find_depth(b: &LayoutBox, depth: usize) -> Option<&LayoutBox> {
+        if depth == 0 {
+            return Some(b);
+        }
+        b.children.first().and_then(|c| find_depth(c, depth - 1))
+    }
+
+    fn layout(html: &str) -> LayoutBox {
+        let e = engine();
+        let d = Document::parse_html(html).expect("parse");
+        e.build_layout_from_document(&d)
+    }
+
+    #[test]
+    fn multi_property_inheritance_reaches_a_deep_descendant() {
+        // THE RECEIPT: three inherited properties set once on <body>, asserted
+        // on a nested element through the real layout build. Before this unit
+        // every element started from ComputedStyle::new() with a forced BLACK,
+        // so none of these crossed a single level.
+        let root = layout(
+            r#"<html><head><style>
+                 body { color: #ff0000; font-size: 21px; font-family: Georgia; }
+               </style></head>
+               <body><div><section><p>deep</p></section></div></body></html>"#,
+        );
+        let s = find_text(&root, "deep").expect("text box");
+        assert_eq!(s.color, Color::from_rgb(255, 0, 0), "color must inherit");
+        assert_eq!(s.font_size, Length::Px(21.0), "font-size must inherit");
+        assert_eq!(s.font_family, "Georgia", "font-family must inherit");
+    }
+
+    #[test]
+    fn a_non_inherited_property_does_NOT_leak_to_descendants() {
+        // The other half of the claim, and the one a naive "copy parent style"
+        // implementation gets wrong: width is NOT an inherited property.
+        let root = layout(
+            r#"<html><head><style>body { width: 500px; color: #00ff00; }</style></head>
+               <body><div><p>x</p></div></body></html>"#,
+        );
+        let s = find_text(&root, "x").expect("text box");
+        assert_eq!(s.color, Color::from_rgb(0, 255, 0), "color inherits");
+        assert_ne!(s.width, Length::Px(500.0), "width must NOT inherit");
+    }
+
+    #[test]
+    fn a_descendant_rule_overrides_the_inherited_value() {
+        let root = layout(
+            r#"<html><head><style>
+                 body { color: #ff0000; }
+                 p { color: #0000ff; }
+               </style></head>
+               <body><div><p>over</p></div></body></html>"#,
+        );
+        let s = find_text(&root, "over").expect("text box");
+        assert_eq!(s.color, Color::from_rgb(0, 0, 255), "own rule beats inherited");
+    }
+
+    #[test]
+    fn text_nodes_inherit_from_their_containing_element() {
+        // Text is where inheritance is actually visible to a user: colouring a
+        // <p> must colour the words in it, not just the box.
+        let root = layout(
+            r#"<html><head><style>p { color: #123456; }</style></head>
+               <body><p>words</p></body></html>"#,
+        );
+        let s = find_text(&root, "words").expect("text box");
+        assert_eq!(s.color, Color::from_rgb(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn text_align_inherits_portably() {
+        let root = layout(
+            r#"<html><head><style>body { text-align: center; }</style></head>
+               <body><div><p>c</p></div></body></html>"#,
+        );
+        let s = find_text(&root, "c").expect("text box");
+        assert_eq!(s.text_align, TextAlign::Center);
+    }
+
+    #[test]
+    fn default_colour_is_still_black_without_any_author_rule() {
+        // Regression guard: dropping the unconditional BLACK must not leave
+        // text colourless. The root seeds it once instead.
+        let root = layout(r#"<html><body><p>plain</p></body></html>"#);
+        let s = find_text(&root, "plain").expect("text box");
+        assert_eq!(s.color, Color::BLACK);
+    }
+
+    #[test]
+    fn ua_defaults_still_win_where_they_should() {
+        // h1 gets its UA font-size even though body sets a different one:
+        // UA defaults are applied AFTER inheriting, before author rules.
+        let root = layout(
+            r#"<html><head><style>body { font-size: 10px; }</style></head>
+               <body><h1>big</h1></body></html>"#,
+        );
+        let h1 = find_depth(&root, 1);
+        assert!(h1.is_some(), "layout produced a child box");
     }
 }
