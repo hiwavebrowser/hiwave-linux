@@ -16,8 +16,22 @@ name: Linux Metrics
 # wire the pixel-diff then and not before.
 
 on:
+  # PETE-DIRECT (2026-07-30, via Atlas; Prometheus countersigned): stop the
+  # duplicate metric-reporting notifications.
+  #
+  # `push: branches:['**']` PLUS `pull_request` fired TWO runs on every PR-branch
+  # SHA - verified from the run list, not assumed (e.g. 94fdf411 and 77954ca6
+  # each show one push run and one pull_request run). Narrowing push to the
+  # trunk keeps exactly one run per reviewable SHA:
+  #   - PR branches      -> pull_request only
+  #   - trunk merges     -> push only (this is the run that publishes history)
+  #   - anything else    -> workflow_dispatch on demand
+  #
+  # The history step still executes on non-master refs under `pull_request`, so
+  # the R1-executable-coverage clause (a step gated to a ref no reviewer can
+  # force is unreviewable) is preserved.
   push:
-    branches: ['**']
+    branches: [master, main]
   pull_request:
   workflow_dispatch:
 
