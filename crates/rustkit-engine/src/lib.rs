@@ -154,6 +154,58 @@ struct ViewState {
     focused_node: Option<rustkit_dom::NodeId>,
     /// Whether the view itself has focus.
     view_focused: bool,
+    /// CSS text of every successfully fetched `<link rel="stylesheet">`, in
+    /// document order. Held on the view rather than re-fetched at layout time
+    /// because relayout is synchronous and runs on every resize.
+    external_css: String,
+}
+
+impl ViewState {
+    /// Attach a newly-loaded document to this view, resetting the state that
+    /// belongs to the document being REPLACED.
+    ///
+    /// This exists because assigning `document` alone was a cross-document
+    /// style leak: `external_css` outlives a single navigation by design (it
+    /// must survive the synchronous relayout a resize triggers), so nothing
+    /// cleared it when the next document had no `<link rel="stylesheet">` of
+    /// its own. Navigating from a styled page to an unstyled one left the old
+    /// page's rules cascading, and nothing logged anything.
+    ///
+    /// The reset lives HERE, at the single point where a document is
+    /// attached, rather than in the stylesheet loader. Putting it in the
+    /// loader would only work for load paths that remember to call the loader
+    /// - and `load_html` does not call it at all, which was the second door
+    /// into the same bug. Any per-document cache added to `ViewState` later
+    /// should be cleared in this method and nowhere else.
+    fn attach_document(&mut self, document: Rc<Document>) {
+        self.document = Some(document);
+        self.external_css = String::new();
+    }
+
+    /// A view with no window and no compositor surface, for tests that
+    /// exercise per-view STATE rather than presentation. `create_view` needs a
+    /// real window handle and a GPU surface; requiring those to test a String
+    /// field is what put GPU init on the test path and produced the parallel
+    /// SIGSEGV earlier in this port.
+    #[cfg(test)]
+    fn headless_for_test() -> Self {
+        let (nav_tx, nav_rx) = mpsc::unbounded_channel();
+        ViewState {
+            id: EngineViewId::new(),
+            viewhost_id: ViewId::new(),
+            url: None,
+            title: None,
+            document: None,
+            layout: None,
+            display_list: None,
+            bindings: None,
+            navigation: NavigationStateMachine::new(nav_tx),
+            nav_event_rx: nav_rx,
+            focused_node: None,
+            view_focused: false,
+            external_css: String::new(),
+        }
+    }
 }
 
 /// Engine configuration.
@@ -321,6 +373,7 @@ impl Engine {
             nav_event_rx: nav_rx,
             focused_node: None,
             view_focused: false,
+            external_css: String::new(),
         };
 
         self.views.insert(id, view_state);
@@ -481,7 +534,7 @@ impl Engine {
         // Store in view
         let view = self.views.get_mut(&id).unwrap();
         view.url = Some(url.clone());
-        view.document = Some(document.clone());
+        view.attach_document(document.clone());
         view.title = title.clone();
 
         // Initialize JavaScript if enabled
@@ -502,6 +555,11 @@ impl Engine {
             let view = self.views.get_mut(&id).unwrap();
             view.bindings = Some(bindings);
         }
+
+        // Fetch <link rel="stylesheet"> BEFORE layout, so external rules take
+        // part in the very first cascade instead of appearing on a later
+        // repaint (a flash of unstyled content).
+        self.load_external_stylesheets(id, &document, &url).await;
 
         // Layout and render
         self.relayout(id)?;
@@ -581,7 +639,7 @@ impl Engine {
         // Store in view
         let view = self.views.get_mut(&id).unwrap();
         view.url = Some(url.clone());
-        view.document = Some(document.clone());
+        view.attach_document(document.clone());
         view.title = title.clone();
 
         // Initialize JavaScript if enabled
@@ -661,7 +719,15 @@ impl Engine {
         };
 
         // Build layout tree from DOM
-        let mut root_box = self.build_layout_from_document(&document);
+        // Use the CSS fetched for this view by load_external_stylesheets, so a
+        // resize re-lays-out with the external rules still applied rather than
+        // silently dropping them (relayout is synchronous and cannot re-fetch).
+        let external_css = self
+            .views
+            .get(&id)
+            .map(|v| v.external_css.clone())
+            .unwrap_or_default();
+        let mut root_box = self.build_layout_with_external_css(&document, &external_css);
 
         // Count children for debugging
         let child_count = root_box.children.len();
@@ -727,11 +793,34 @@ impl Engine {
 
     /// Build a layout tree from a DOM document.
     fn build_layout_from_document(&self, document: &Document) -> LayoutBox {
+        self.build_layout_with_external_css(document, "")
+    }
+
+    /// Same, plus the CSS text of any fetched external stylesheets.
+    ///
+    /// `external_css` is placed BEFORE the inline `<style>` text so that an
+    /// inline rule wins over an external one at equal specificity. That is the
+    /// common authoring order (`<link>` then `<style>` in `<head>`) but it is a
+    /// SIMPLIFICATION: true CSS cascade order follows the document position of
+    /// each element, so a `<style>` appearing BEFORE a `<link>` is applied in
+    /// the wrong order here. Stated rather than glossed - fixing it needs
+    /// per-element source ordering, which this change does not add and which
+    /// Prometheus scoped as a separate correctness PR for all trees.
+    /// (= the declared simplification in Athena's Windows #54.)
+    fn build_layout_with_external_css(
+        &self,
+        document: &Document,
+        external_css: &str,
+    ) -> LayoutBox {
         // L0 SUBSTRATE: collect and parse author stylesheets from <style>
         // elements so their rules can reach the cascade. Before this, Linux had
         // no author-stylesheet path at all - <style> was skipped like <link>,
         // so a page was styled ONLY by inline style attributes.
         let mut css_text = String::new();
+        if !external_css.is_empty() {
+            css_text.push_str(external_css);
+            css_text.push('\n');
+        }
         self.collect_style_text(&document.root(), &mut css_text);
         let sheet = Stylesheet::parse(&css_text).unwrap_or_else(|_| Stylesheet::new());
         info!(
@@ -903,6 +992,95 @@ impl Engine {
     }
 
     /// Compute a basic style for an element based on its tag and attributes.
+    /// Discover every `<link rel="stylesheet">` href in the document, resolved
+    /// against the document's own URL.
+    ///
+    /// Associated fn - a pure function of the document - so the tests exercise
+    /// the real discovery path without constructing an Engine (and therefore
+    /// without a GPU adapter). Same reasoning as the Option A wire tests.
+    ///
+    /// Relative hrefs need `base_url`; with no base, only absolute hrefs
+    /// resolve. An href that will not parse is SKIPPED, not guessed at.
+    /// (= Athena's Windows #54.)
+    fn discover_external_stylesheets(document: &Document, base_url: Option<&Url>) -> Vec<Url> {
+        let mut urls = Vec::new();
+        for link in document.get_elements_by_tag_name("link") {
+            // `rel` is an unordered SET in HTML ("stylesheet", "alternate
+            // stylesheet"), so match any token rather than the whole attribute,
+            // and case-insensitively - REL="StyleSheet" is legal.
+            let is_stylesheet = link
+                .get_attribute("rel")
+                .map(|rel| {
+                    rel.split_whitespace()
+                        .any(|t| t.eq_ignore_ascii_case("stylesheet"))
+                })
+                .unwrap_or(false);
+            if !is_stylesheet {
+                continue;
+            }
+            let Some(href) = link.get_attribute("href") else {
+                continue;
+            };
+            if href.trim().is_empty() {
+                continue;
+            }
+            let resolved = match base_url {
+                Some(base) => base.join(&href).ok(),
+                None => Url::parse(&href).ok(),
+            };
+            match resolved {
+                Some(url) => urls.push(url),
+                None => warn!(href = %href, "stylesheet href did not resolve; skipping"),
+            }
+        }
+        urls
+    }
+
+    /// Fetch every `<link rel="stylesheet">` and store the CSS on the view so
+    /// the next layout can cascade it. Returns how many sheets loaded.
+    ///
+    /// FAIL-SOFT PER SHEET, DELIBERATELY: one 404 stylesheet must not fail the
+    /// whole navigation - that is how a real browser behaves. But each failure
+    /// is logged at warn WITH ITS URL, because a silently-dropped stylesheet
+    /// looks exactly like a page that renders wrong for no reason. Fail-soft
+    /// but never silent.
+    async fn load_external_stylesheets(
+        &mut self,
+        id: EngineViewId,
+        document: &Document,
+        base_url: &Url,
+    ) -> usize {
+        let urls = Self::discover_external_stylesheets(document, Some(base_url));
+        // NO EARLY RETURN on an empty list. Returning here would leave
+        // whatever `external_css` already held, which for a reused view is the
+        // PREVIOUS document's stylesheets. The empty case must ASSIGN an empty
+        // string. (attach_document already clears it; this is the second lock
+        // on the same door, because this function is also reachable directly.)
+        let mut css = String::new();
+        let mut loaded = 0usize;
+        for url in urls {
+            match self.loader.fetch(Request::get(url.clone())).await {
+                Ok(response) if response.ok() => match response.text().await {
+                    Ok(text) => {
+                        css.push_str(&text);
+                        css.push('\n');
+                        loaded += 1;
+                    }
+                    Err(e) => warn!(%url, error = %e, "stylesheet body was not readable"),
+                },
+                Ok(response) => {
+                    warn!(%url, status = ?response.status, "stylesheet fetch returned non-OK")
+                }
+                Err(e) => warn!(%url, error = %e, "stylesheet fetch failed"),
+            }
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.external_css = css;
+        }
+        info!(?id, loaded, "external stylesheets loaded");
+        loaded
+    }
+
     /// Walk the document collecting the text of every `<style>` element.
     ///
     /// Linux previously had NO author-stylesheet path at all: `<style>` sat in
@@ -3378,3 +3556,223 @@ mod inheritance_tests {
     }
 }
 
+
+#[cfg(test)]
+mod external_stylesheet_tests {
+    use super::*;
+    use rustkit_css::Length;
+
+    fn doc(html: &str) -> Document {
+        Document::parse_html(html).expect("parse")
+    }
+    fn base() -> Url {
+        Url::parse("https://example.com/dir/page.html").unwrap()
+    }
+
+    #[test]
+    fn relative_href_resolves_against_the_document_url() {
+        let d = doc(r#"<html><head><link rel="stylesheet" href="site.css"></head><body></body></html>"#);
+        let urls = Engine::discover_external_stylesheets(&d, Some(&base()));
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].as_str(), "https://example.com/dir/site.css");
+    }
+
+    #[test]
+    fn root_relative_and_absolute_hrefs_both_resolve() {
+        let d = doc(
+            r#"<html><head>
+               <link rel="stylesheet" href="/a.css">
+               <link rel="stylesheet" href="https://cdn.example.org/b.css">
+               </head><body></body></html>"#,
+        );
+        let got: Vec<String> = Engine::discover_external_stylesheets(&d, Some(&base()))
+            .iter().map(|u| u.to_string()).collect();
+        assert!(got.iter().any(|u| u == "https://example.com/a.css"), "got {got:?}");
+        assert!(got.iter().any(|u| u == "https://cdn.example.org/b.css"), "got {got:?}");
+    }
+
+    #[test]
+    fn non_stylesheet_links_are_ignored() {
+        // <link> is also used for icons, preconnect and manifests. Treating
+        // every <link href> as CSS would fetch the favicon and parse it as CSS.
+        let d = doc(
+            r#"<html><head>
+               <link rel="icon" href="favicon.ico">
+               <link rel="preconnect" href="https://fonts.example.com">
+               <link rel="manifest" href="app.webmanifest">
+               </head><body></body></html>"#,
+        );
+        assert!(Engine::discover_external_stylesheets(&d, Some(&base())).is_empty());
+    }
+
+    #[test]
+    fn rel_is_a_token_set_and_case_insensitive() {
+        let d = doc(
+            r#"<html><head>
+               <link rel="alternate stylesheet" href="alt.css">
+               <link REL="StyleSheet" href="caps.css">
+               </head><body></body></html>"#,
+        );
+        // Both match: rel is an unordered token set, matched case-insensitively.
+        // KNOWN LIMIT, inherited from the Windows recipe and stated rather than
+        // discovered: `alternate stylesheet` sheets are ALTERNATE and should not
+        // enter the default cascade. Over-applying (both themes) is milder than
+        // under-applying (zero CSS), but it is wrong for theme-switcher pages.
+        assert_eq!(Engine::discover_external_stylesheets(&d, Some(&base())).len(), 2);
+    }
+
+    #[test]
+    fn an_unparseable_href_is_skipped_not_guessed() {
+        let d = doc(r#"<html><head><link rel="stylesheet" href="ht!tp://[[bad"></head><body></body></html>"#);
+        // With no base there is nothing to resolve against; a bad href must be
+        // dropped rather than turned into some invented URL.
+        assert!(Engine::discover_external_stylesheets(&d, None).is_empty());
+    }
+
+    #[test]
+    fn empty_and_missing_href_are_skipped() {
+        let d = doc(
+            r#"<html><head>
+               <link rel="stylesheet" href="">
+               <link rel="stylesheet">
+               </head><body></body></html>"#,
+        );
+        assert!(Engine::discover_external_stylesheets(&d, Some(&base())).is_empty());
+    }
+
+    #[test]
+    fn external_css_cascades_and_inline_style_element_wins_at_equal_specificity() {
+        // THE WIRE RECEIPT, through the real layout build: external CSS must
+        // reach a descendant, and the <style> block must win at equal
+        // specificity because external is placed first.
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor: test_compositor(),
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        };
+        let d = doc(r#"<html><head><style>p { width: 10px; }</style></head>
+                      <body><div><p>x</p></div></body></html>"#);
+
+        // External alone reaches the descendant.
+        let ext_only = e.build_layout_with_external_css(&doc(
+            r#"<html><body><div><p>x</p></div></body></html>"#), "p { width: 55px; }");
+        // Find the ELEMENT box carrying the width, not its text child: width
+        // is not an inherited property, so the text box would read Auto no
+        // matter what the rule said. (My first version asserted on the text box
+        // and failed for that reason - a test bug, not a product one.)
+        fn width_of_any_box(b: &LayoutBox) -> Option<Length> {
+            if !matches!(b.box_type, BoxType::Text(_)) && b.style.width != Length::Auto {
+                return Some(b.style.width.clone());
+            }
+            b.children.iter().find_map(width_of_any_box)
+        }
+        assert_eq!(
+            width_of_any_box(&ext_only), Some(Length::Px(55.0)),
+            "external CSS must reach the element"
+        );
+
+        // With both, the <style> element wins at equal specificity.
+        let both = e.build_layout_with_external_css(&d, "p { width: 55px; }");
+        assert_eq!(
+            width_of_any_box(&both), Some(Length::Px(10.0)),
+            "inline <style> must win at equal specificity"
+        );
+    }
+
+    fn engine_for_test() -> Engine {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor: test_compositor(),
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_document_without_stylesheets_does_not_inherit_the_previous_one(
+    ) {
+        // THE SECOND-CALL TEST. Every other test in this module loads exactly
+        // ONE document, and a per-view cache cannot be validated by exercising
+        // the operation that FILLS it while never exercising the one that must
+        // CLEAR it. Found by Argos's R1 HOLD and independently by Athena on
+        // Windows (#59) - both from the review question I wrote about a
+        // different hazard.
+        let mut e = engine_for_test();
+        let mut view = ViewState::headless_for_test();
+        let id = view.id;
+        // Page 1 left external CSS on the view.
+        view.external_css = "p { width: 999px; }".to_string();
+        e.views.insert(id, view);
+
+        // Page 2 has no <link rel="stylesheet"> at all.
+        let d = doc(r#"<html><head></head><body><p>x</p></body></html>"#);
+        let loaded = e.load_external_stylesheets(id, &d, &base()).await;
+
+        assert_eq!(loaded, 0);
+        assert_eq!(
+            e.views[&id].external_css, "",
+            "a document with zero stylesheet links must CLEAR the previous \
+             document's CSS, not keep it"
+        );
+    }
+
+    #[test]
+    fn attaching_a_document_clears_the_previous_documents_external_css() {
+        // The robust door: the reset lives at the point a document is
+        // attached, so a load path that never calls the stylesheet loader at
+        // all - load_html does not - still gets it. Testing the loader alone
+        // would have missed that route entirely.
+        let mut view = ViewState::headless_for_test();
+        view.external_css = "p { width: 999px; }".to_string();
+
+        view.attach_document(Rc::new(doc(r#"<html><body><p>x</p></body></html>"#)));
+
+        assert_eq!(
+            view.external_css, "",
+            "attaching a document must reset per-document cached CSS"
+        );
+        assert!(view.document.is_some(), "and must still attach the document");
+    }
+
+    #[test]
+    fn stylesheet_discovery_does_not_collect_style_elements_or_vice_versa() {
+        // Both passes now run over the same document. If EITHER matched on
+        // "element has a URL attribute" rather than on tag name, the page would
+        // cross-contaminate. Neither pass's own tests would reveal it - the bug
+        // exists only in the interaction. (= Athena's disjointness principle.)
+        let d = doc(
+            r#"<html><head>
+                 <link rel="stylesheet" href="/ext.css">
+                 <style>p { width: 3px; }</style>
+               </head><body></body></html>"#,
+        );
+        let urls = Engine::discover_external_stylesheets(&d, Some(&base()));
+        assert_eq!(urls.len(), 1, "discovery must not pick up the <style> element");
+        assert_eq!(urls[0].as_str(), "https://example.com/ext.css");
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        };
+        let mut css = String::new();
+        e.collect_style_text(&d.root(), &mut css);
+        assert!(css.contains("width: 3px"), "collect must find the <style> text");
+        assert!(!css.contains("ext.css"), "collect must not pick up the <link> href");
+    }
+}
