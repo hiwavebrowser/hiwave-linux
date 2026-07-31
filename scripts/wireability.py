@@ -131,6 +131,39 @@ def classify(fields: list[str]) -> dict[str, dict]:
     return out
 
 
+REFERENCE = Path("/home/petec/repos/hiwave/hiwave-macos/crates/rustkit-engine/src/lib.rs")
+
+
+def reference_can_set(fields: list[str]) -> dict[str, bool | None]:
+    """Can the REFERENCE tree set this property?
+
+    WIREABLE is a statement about this tree's plumbing. It is NOT permission to
+    wire. If the reference cannot set the property either, it is a SHARED LIMIT
+    and wiring it here alone is a DIVERGENCE under the fleet's third gate - the
+    same rule Athena's mislabelled `>` combinator taught us, applied in the
+    other direction.
+
+    Worked example: justify_items and justify_self are read by
+    layout_grid_container, which is live, so the transitive check calls them
+    WIREABLE - correctly. But macOS has no arm for either. Wiring them on Linux
+    alone would diverge from the reference while looking like progress on the
+    metric. grid-template-areas is the same.
+
+    Returns None per field when the reference tree is not on this machine;
+    absence of the reference is not evidence that wiring is safe.
+    """
+    if not REFERENCE.exists():
+        return {f: None for f in fields}
+    src = REFERENCE.read_text()
+    out = {}
+    for f in fields:
+        prop = f.replace("_", "-")
+        has_arm = f'"{prop}"' in src
+        has_assign = re.search(r"\b(style|s)\." + re.escape(f) + r"\s*=", src) is not None
+        out[f] = has_arm and has_assign
+    return out
+
+
 def classify_one_level(fields: list[str]) -> dict[str, str]:
     """The NAIVE check, kept deliberately, as this file's own falsifier.
 
@@ -168,12 +201,29 @@ def main() -> int:
     wireable = [f for f, v in result.items() if v["verdict"] == "WIREABLE"]
     orphaned = [f for f, v in result.items() if v["verdict"] == "ORPHANED"]
 
-    print(f"{'field':26} verdict     live reader")
-    print("-" * 72)
+    ref = reference_can_set(fields)
+
+    def action(f: str) -> str:
+        if result[f]["verdict"] != "WIREABLE":
+            return "wire the caller first"
+        if ref[f] is None:
+            return "PORT? reference tree absent - check before wiring"
+        return "PORT (reference has it)" if ref[f] else "SHARED LIMIT - do NOT wire alone"
+
+    print(f"{'field':26} {'verdict':10} {'ref?':6} action")
+    print("-" * 86)
     for f in sorted(result):
-        v = result[f]
-        print(f"{f:26} {v['verdict']:11} {(v['live_readers'] or ['(none - all readers dead)'])[0]}")
+        r = ref[f]
+        rs = "?" if r is None else ("yes" if r else "NO")
+        print(f"{f:26} {result[f]['verdict']:10} {rs:6} {action(f)}")
     print()
+    shared = [f for f in wireable if ref[f] is False]
+    if shared:
+        print("SHARED LIMIT (wireable here, but the REFERENCE cannot set it either): "
+              + ", ".join(shared))
+        print("  Wiring these on this tree alone is a DIVERGENCE, not progress. "
+              "Reference-first design or a joint fleet wire.")
+        print()
     print(f"WIREABLE ({len(wireable)}): an arm here would actually change the page.")
     print(f"ORPHANED ({len(orphaned)}): an arm here drops a name off the metric "
           f"and changes NOTHING. Wire the caller first.")
