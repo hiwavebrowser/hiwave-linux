@@ -190,11 +190,22 @@ def main() -> int:
     if r["reference_absent"]:
         print(f"UNCLASSIFIED ({len(r['reference_absent'])}) - reference tree not on "
               f"this machine; absence is not evidence that wiring is safe.")
-    if not r["unproducible"]:
-        print("No unproducible variants.")
+    # ONE summary line, derived from the numbers rather than written beside
+    # them. The previous version printed a success sentence in BOTH branches -
+    # a leftover `else` from an earlier edit - so a run listing 26 port defects
+    # closed with "No unproducible variants". Argos caught it, and it is the
+    # same decorative-claim failure as #37's fallback that only claimed to be
+    # loud: prose asserting something the program had just contradicted.
+    if r["unproducible"]:
+        print(
+            f"SUMMARY: {len(r['unproducible'])} variant(s) cannot be produced from "
+            f"CSS - {len(r['port_defect'])} port defect(s), "
+            f"{len(r['shared_limit'])} shared limit(s), "
+            f"{len(r['reference_absent'])} unclassified."
+        )
     else:
-        print("No unproducible variants. Every enum value a stylesheet could name "
-              "can be constructed.")
+        print("SUMMARY: 0 unproducible variants - every enum value a stylesheet "
+              "could name can be constructed.")
     if r["default_only"]:
         print()
         print(f"Reachable ONLY as the default ({len(r['default_only'])}) - not a "
