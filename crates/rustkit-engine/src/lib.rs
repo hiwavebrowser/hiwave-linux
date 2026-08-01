@@ -5350,22 +5350,30 @@ mod flex_column_cross_stretch {
         }
     }
 
-    #[test]
-    fn column_flex_children_are_not_square() {
-        // The SHAPE is the tell Atlas identified: on the defective tree the
-        // children came out 16x16 and 32x32. Asserting non-squareness catches
-        // the axis mix-up even if the width happens to look plausible.
-        let boxes = laid_out(
-            r#"<html><head><style>body{margin:0;display:flex;flex-direction:column;width:1000px}</style></head>
-               <body><div>one</div></body></html>"#,
-            1000.0,
-        );
-        for (is_text, w, h) in boxes.iter().filter(|(t, _, _)| !t) {
-            let _ = is_text;
-            assert!(
-                !((*w - *h).abs() < 0.01 && *w > 0.0),
-                "a column flex box came out SQUARE ({w}x{h}) - cross size tracking main axis"
-            );
-        }
-    }
+    // RETIRED: column_flex_children_are_not_square.
+    //
+    // It shipped in #43 with the T-RED explicitly not firing it, which I named
+    // at the time and then let stand. Under FALSIFY_BEFORE_SHIP_GUARD (Athena,
+    // who threw away her own unfalsifiable guard rather than ship it with a
+    // caveat) that is not good enough, so I went looking for a mutation that
+    // would make it scream.
+    //
+    // There is not one on this tree. I modelled the ACTUAL macOS defect -
+    // `item.cross_size = item.target_main_size`, cross tracking main - and the
+    // guard still passed, because Linux flex items currently have a main size
+    // of 0. Every square this tree can produce is 0x0, and the guard
+    // deliberately excludes zero-size boxes so it does not fire on the
+    // legitimate current state.
+    //
+    // So it could not have caught the defect it was written for. Deleted
+    // rather than kept with a comment: a guard that cannot fail is the thing
+    // this fleet has spent two days removing, and keeping mine because I wrote
+    // it would be the worst possible reason.
+    //
+    // The WIDTH guard below is falsifiable and does catch the defect - macOS
+    // showed 16px children in a 1000px container - so coverage is not lost.
+    // Worth noting WHY the square guard is unfalsifiable here: it is the same
+    // main-size-0 behaviour I reported to Atlas as an open observation. If that
+    // resolves, a square guard becomes meaningful and can come back WITH a
+    // mutation that proves it.
 }
