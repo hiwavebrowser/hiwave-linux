@@ -1516,6 +1516,50 @@ impl Engine {
             self.apply_inline_style(&mut style, style_attr);
         }
 
+        // ABSOLUTISE FONT-SIZE. One chokepoint, AFTER every source that can
+        // set it - UA defaults, author rules, inline style - so no path can
+        // leave a relative unit behind.
+        //
+        // Until now this tree stored `font-size: 2rem` as Rem(2.0) and handed
+        // it to layout, where ~6 consumers each did
+        // `match font_size { Px(px) => px, _ => 16.0 }`. Every rem/em/%
+        // font-size on every page laid out at 16px. Measured on Atlas's
+        // fixture: 12 of 16 context/unit combinations unresolved.
+        //
+        // The reference already does exactly this (macos rustkit-engine
+        // lib.rs ~1344) and carries the scar comment for the same bug:
+        // "leaving Em here made h1 { font-size: 2em } render at 16px". This is
+        // a PORT DEFECT - macOS is clean, we are behind - not a shared one.
+        // My earlier classification of it as shared came from instance-
+        // counting the reference instead of running it, which is how Atlas got
+        // assigned a PR with nothing to fix.
+        //
+        // NOTE ON THE CONSUMER FALLBACKS: the ~6 `_ => 16.0` arms in
+        // rustkit-layout are deliberately LEFT IN PLACE. Once the cascade
+        // absolutises they become unreached sentinels, exactly as the
+        // reference's 26 are. Deleting them would remove the safety net for
+        // any future path that forgets to absolutise, and the fleet ruling is
+        // to keep them until the cascade is enforced everywhere.
+        let parent_font_px = match parent.font_size {
+            rustkit_css::Length::Px(px) => px,
+            // Only the root can legitimately reach here: every non-root parent
+            // has been through this same block. 16 is the initial font size.
+            _ => 16.0,
+        };
+        style.font_size = match style.font_size {
+            // `em` resolves against the PARENT's used font size, not the root.
+            rustkit_css::Length::Em(em) => rustkit_css::Length::Px(em * parent_font_px),
+            // A percentage font-size is the same relation expressed differently.
+            rustkit_css::Length::Percent(pct) => {
+                rustkit_css::Length::Px(pct / 100.0 * parent_font_px)
+            }
+            // `rem` is always against the ROOT font size. Hardcoded 16 mirrors
+            // the reference; a real root-font-size lookup is a separate unit on
+            // all three trees and inventing one here would diverge.
+            rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+            other => other,
+        };
+
         style
     }
 
@@ -5376,4 +5420,128 @@ mod flex_column_cross_stretch {
     // main-size-0 behaviour I reported to Atlas as an open observation. If that
     // resolves, a square guard becomes meaningful and can come back WITH a
     // mutation that proves it.
+}
+
+#[cfg(test)]
+mod font_size_cascade_absolutise {
+    //! THREE groups, not two. This defect class demands the third: a
+    //! computed-value test passes the moment the field holds *a* Px, and a
+    //! reaching test passes the moment the text box carries *a* number. Only
+    //! group 3 catches a Px with the WRONG VALUE - which is what a
+    //! resolve-against-the-root-instead-of-the-parent bug produces.
+    use super::*;
+    use rustkit_css::Length;
+
+    fn engine() -> Engine {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        }
+    }
+
+    /// Atlas's fixture: html 16px, body 20px. Returns the <p>'s font-size.
+    fn p_font_size(body_extra: &str, p_decl: &str) -> Length {
+        let e = engine();
+        let html = format!(
+            r#"<html><head><style>html{{font-size:16px}}body{{font-size:20px;{body_extra}}}p{{{p_decl}}}</style></head><body><p>x</p></body></html>"#
+        );
+        let doc = Document::parse_html(&html).expect("parse");
+        let lay = e.build_layout_from_document(&doc);
+        fn find(b: &LayoutBox) -> Option<Length> {
+            if !matches!(b.box_type, BoxType::Text(_)) {
+                if let Some(t) = b.children.iter().find(|c| matches!(c.box_type, BoxType::Text(_))) {
+                    let _ = t;
+                    return Some(b.style.font_size.clone());
+                }
+            }
+            b.children.iter().find_map(find)
+        }
+        find(&lay).expect("no <p> box")
+    }
+
+    // ---- GROUP 1: computed value is ABSOLUTE ----
+
+    #[test]
+    fn g1_relative_units_are_stored_as_px() {
+        for decl in ["font-size:2rem", "font-size:1.5em", "font-size:200%"] {
+            assert!(
+                matches!(p_font_size("", decl), Length::Px(_)),
+                "{decl} must be absolutised in the cascade, got {:?}", p_font_size("", decl)
+            );
+        }
+    }
+
+    // ---- GROUP 2: it REACHES the text run ----
+
+    #[test]
+    fn g2_the_text_box_carries_the_absolute_size() {
+        let e = engine();
+        let doc = Document::parse_html(
+            r#"<html><head><style>html{font-size:16px}body{font-size:20px}p{font-size:2rem}</style></head><body><p>x</p></body></html>"#
+        ).expect("parse");
+        let lay = e.build_layout_from_document(&doc);
+        fn text_fs(b: &LayoutBox) -> Option<Length> {
+            if matches!(b.box_type, BoxType::Text(_)) { return Some(b.style.font_size.clone()); }
+            b.children.iter().find_map(text_fs)
+        }
+        assert_eq!(text_fs(&lay), Some(Length::Px(32.0)),
+                   "the text run must inherit the ABSOLUTE size, not the relative one");
+    }
+
+    // ---- GROUP 3: the VALUE IS CORRECT ----
+
+    #[test]
+    fn g3_values_are_right_in_every_context() {
+        // The four numbers Atlas specified, across the five paths Prometheus
+        // named. `em` resolves against the PARENT (20px), `rem` against the
+        // ROOT (16px) - a resolver that used the root for both would pass
+        // groups 1 and 2 and fail here on the em case.
+        for ctx in ["", "display:flex;flex-direction:row;",
+                    "display:flex;flex-direction:column;", "display:grid;"] {
+            assert_eq!(p_font_size(ctx, "font-size:2rem"), Length::Px(32.0), "2rem in [{ctx}]");
+            assert_eq!(p_font_size(ctx, "font-size:1.5em"), Length::Px(30.0),
+                       "1.5em must resolve against the PARENT's 20px = 30, not the root's 16 = 24, in [{ctx}]");
+            assert_eq!(p_font_size(ctx, "font-size:200%"), Length::Px(40.0), "200% in [{ctx}]");
+            assert_eq!(p_font_size(ctx, "font-size:24px"), Length::Px(24.0), "control in [{ctx}]");
+        }
+    }
+
+    #[test]
+    fn g3_inline_style_attribute_path() {
+        // The fifth path. Inline style is applied AFTER author rules, so the
+        // absolutise block has to sit after it - if it ran earlier this would
+        // still be Rem(2.0).
+        let e = engine();
+        let doc = Document::parse_html(
+            r#"<html><head><style>html{font-size:16px}body{font-size:20px}</style></head><body><p style="font-size:2rem">x</p></body></html>"#
+        ).expect("parse");
+        let lay = e.build_layout_from_document(&doc);
+        fn text_fs(b: &LayoutBox) -> Option<Length> {
+            if matches!(b.box_type, BoxType::Text(_)) { return Some(b.style.font_size.clone()); }
+            b.children.iter().find_map(text_fs)
+        }
+        assert_eq!(text_fs(&lay), Some(Length::Px(32.0)), "inline style must absolutise too");
+    }
+
+    #[test]
+    fn g3_em_chains_compound() {
+        // Athena flagged this as unverified on her side: 2em inside 2em must
+        // compound, which only works if the parent's font_size was already
+        // absolutised when the child reads it. Root 16 -> outer 32 -> inner 64.
+        let e = engine();
+        let doc = Document::parse_html(
+            r#"<html><head><style>html{font-size:16px}body{font-size:16px}.o{font-size:2em}.i{font-size:2em}</style></head>
+               <body><div class="o"><div class="i">x</div></div></body></html>"#
+        ).expect("parse");
+        let lay = e.build_layout_from_document(&doc);
+        fn text_fs(b: &LayoutBox) -> Option<Length> {
+            if matches!(b.box_type, BoxType::Text(_)) { return Some(b.style.font_size.clone()); }
+            b.children.iter().find_map(text_fs)
+        }
+        assert_eq!(text_fs(&lay), Some(Length::Px(64.0)),
+                   "2em inside 2em must compound to 64, not flatten to 32");
+    }
 }
