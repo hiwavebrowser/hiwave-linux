@@ -3129,6 +3129,48 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                 "grid-row-end" => {
                     if let Some(l) = parse_grid_line(value) { style.grid_row_end = l; }
                 }
+                // BORDER-RADIUS. Four corners plus the shorthand, mirroring
+                // the reference's arm set exactly (checked PER PROPERTY, not
+                // per family - the check that caught my text-decoration-
+                // thickness divergence).
+                //
+                // The shorthand takes 1-4 values in CSS's clockwise-from-
+                // top-left order with the standard fill-in rules, which are
+                // NOT intuitive: 2 values means [TL+BR, TR+BL], 3 means
+                // [TL, TR+BL, BR]. Getting the 2- and 3-value cases wrong
+                // produces a plausible-looking box with the wrong corners
+                // rounded, which is why each arity has its own assertion.
+                "border-radius" => {
+                    let parts: Vec<&str> = value.split('/').next().unwrap_or("")
+                        .split_whitespace().collect();
+                    let r: Vec<rustkit_css::Length> =
+                        parts.iter().filter_map(|p| parse_length(p)).collect();
+                    let (tl, tr, br, bl) = match r.len() {
+                        1 => (r[0].clone(), r[0].clone(), r[0].clone(), r[0].clone()),
+                        2 => (r[0].clone(), r[1].clone(), r[0].clone(), r[1].clone()),
+                        3 => (r[0].clone(), r[1].clone(), r[2].clone(), r[1].clone()),
+                        4 => (r[0].clone(), r[1].clone(), r[2].clone(), r[3].clone()),
+                        // Unparseable or empty: leave the previous value rather
+                        // than resetting corners a typo never mentioned.
+                        _ => continue,
+                    };
+                    style.border_top_left_radius = tl;
+                    style.border_top_right_radius = tr;
+                    style.border_bottom_right_radius = br;
+                    style.border_bottom_left_radius = bl;
+                }
+                "border-top-left-radius" => {
+                    if let Some(l) = parse_length(value) { style.border_top_left_radius = l; }
+                }
+                "border-top-right-radius" => {
+                    if let Some(l) = parse_length(value) { style.border_top_right_radius = l; }
+                }
+                "border-bottom-right-radius" => {
+                    if let Some(l) = parse_length(value) { style.border_bottom_right_radius = l; }
+                }
+                "border-bottom-left-radius" => {
+                    if let Some(l) = parse_length(value) { style.border_bottom_left_radius = l; }
+                }
                 "display" => {
                     if let Some(d) = rustkit_css::parse_display(value) { style.display = d; }
                 }
@@ -5716,5 +5758,124 @@ mod html_root_inheritance {
         // Fragment parsing and malformed documents must not panic or regress.
         let s = text_style(r#"<body><p>x</p></body>"#);
         assert_eq!(s.font_size, Length::Px(16.0), "no html element: the initial size still applies");
+    }
+}
+
+#[cfg(test)]
+mod rounded_rect_tests {
+    //! Two groups. GROUP A = the arms parse, including the shorthand arities.
+    //! GROUP B = a RoundedRect command reaches the display list WITH THE RIGHT
+    //! RADII (N2: values, not a substring).
+    use super::*;
+    use rustkit_css::Length;
+
+    fn st(css: &str) -> ComputedStyle {
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, css);
+        s
+    }
+    fn corners(css: &str) -> (Length, Length, Length, Length) {
+        let s = st(css);
+        (s.border_top_left_radius, s.border_top_right_radius,
+         s.border_bottom_right_radius, s.border_bottom_left_radius)
+    }
+    fn engine() -> Engine {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        }
+    }
+    /// The rounded-rect commands as VALUES.
+    fn rounded(html: &str) -> Vec<rustkit_layout::BorderRadius> {
+        let e = engine();
+        let doc = Document::parse_html(html).expect("parse");
+        DisplayList::build(&e.build_layout_from_document(&doc))
+            .commands.iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::RoundedRect { radius, .. } => Some(*radius),
+                _ => None,
+            })
+            .collect()
+    }
+    fn plain_rects(html: &str) -> usize {
+        let e = engine();
+        let doc = Document::parse_html(html).expect("parse");
+        DisplayList::build(&e.build_layout_from_document(&doc))
+            .commands.iter()
+            .filter(|c| matches!(c, rustkit_layout::DisplayCommand::SolidColor(..)))
+            .count()
+    }
+
+    // ---------------- GROUP A: the arms parse ----------------
+
+    #[test]
+    fn a_shorthand_arities_follow_the_css_fill_in_rules() {
+        // NOT intuitive, and each arity is its own bug: 2 values means
+        // [TL+BR, TR+BL]; 3 means [TL, TR+BL, BR]. Getting these wrong rounds
+        // the wrong corners while the box still looks plausible.
+        assert_eq!(corners("border-radius: 5px"),
+                   (Length::Px(5.0), Length::Px(5.0), Length::Px(5.0), Length::Px(5.0)));
+        assert_eq!(corners("border-radius: 5px 10px"),
+                   (Length::Px(5.0), Length::Px(10.0), Length::Px(5.0), Length::Px(10.0)),
+                   "2 values = [TL+BR, TR+BL]");
+        assert_eq!(corners("border-radius: 5px 10px 20px"),
+                   (Length::Px(5.0), Length::Px(10.0), Length::Px(20.0), Length::Px(10.0)),
+                   "3 values = [TL, TR+BL, BR]");
+        assert_eq!(corners("border-radius: 1px 2px 3px 4px"),
+                   (Length::Px(1.0), Length::Px(2.0), Length::Px(3.0), Length::Px(4.0)));
+    }
+
+    #[test]
+    fn a_longhands_set_one_corner_each() {
+        let s = st("border-top-left-radius: 7px; border-bottom-right-radius: 9px");
+        assert_eq!(s.border_top_left_radius, Length::Px(7.0));
+        assert_eq!(s.border_bottom_right_radius, Length::Px(9.0));
+        assert_eq!(s.border_top_right_radius, Length::Zero, "untouched corners stay 0");
+        assert_eq!(s.border_bottom_left_radius, Length::Zero);
+    }
+
+    #[test]
+    fn a_a_malformed_value_leaves_the_previous_radii_alone() {
+        let mut s = ComputedStyle::new();
+        apply_inline_style_decls(&mut s, "border-radius: 8px");
+        apply_inline_style_decls(&mut s, "border-radius: banana");
+        assert_eq!(s.border_top_left_radius, Length::Px(8.0),
+                   "a typo must not reset corners it never mentioned");
+    }
+
+    // ------ GROUP B: it reaches the display list with the right values ------
+
+    #[test]
+    fn b_radii_reach_the_display_list_per_corner() {
+        let r = rounded(
+            r#"<html><head><style>div{background:#f00;width:100px;height:100px;border-radius:1px 2px 3px 4px}</style></head><body><div></div></body></html>"#,
+        );
+        assert_eq!(r.len(), 1, "one background must emit one rounded command; got {r:?}");
+        assert_eq!((r[0].top_left, r[0].top_right, r[0].bottom_right, r[0].bottom_left),
+                   (1.0, 2.0, 3.0, 4.0),
+                   "each corner must arrive at its own value, in CSS order");
+    }
+
+    #[test]
+    fn b_a_square_box_still_emits_a_plain_rect() {
+        // The fallback is load-bearing: emitting RoundedRect for every box
+        // would put every page on the SDF path for nothing.
+        let html = r#"<html><head><style>div{background:#f00;width:100px;height:100px}</style></head><body><div></div></body></html>"#;
+        assert!(rounded(html).is_empty(), "a square box must emit no rounded command");
+        assert!(plain_rects(html) > 0, "and must still emit a plain rect");
+    }
+
+    #[test]
+    fn b_em_radii_resolve_against_the_elements_font_size() {
+        // Relies on the cascade absolutising font-size (#46): 2em at 32px is
+        // 64, not 32. If font-size were still relative here this would be 32.
+        let r = rounded(
+            r#"<html><head><style>div{background:#f00;width:200px;height:200px;font-size:32px;border-radius:2em}</style></head><body><div></div></body></html>"#,
+        );
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].top_left, 64.0, "2em at font-size 32px is 64px");
     }
 }

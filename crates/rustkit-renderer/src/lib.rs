@@ -505,6 +505,14 @@ impl Renderer {
                 self.draw_solid_rect(*rect, *color);
             }
 
+            DisplayCommand::RoundedRect { color, rect, radius } => {
+                if radius.is_zero() {
+                    self.draw_solid_rect(*rect, *color);
+                } else {
+                    self.draw_rounded_rect(*rect, *color, *radius);
+                }
+            }
+
             DisplayCommand::BoxShadow {
                 offset_x, offset_y, blur_radius, spread_radius, color, rect, inset,
             } => {
@@ -790,6 +798,206 @@ impl Renderer {
             }
         } else {
             self.draw_solid_rect(shadow_rect, color);
+        }
+    }
+
+    /// Hermite interpolation, used for corner antialiasing.
+    ///
+    /// Ported with the rest: the reference uses this to match its own GPU
+    /// shader's edge falloff, so a different curve here would make the CPU and
+    /// GPU paths disagree on the same tree.
+    #[inline]
+    fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+        let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    // ---- ROUNDED-RECT PAINT, ported verbatim from the macOS reference ----
+    //
+    // CPU, not GPU: the reference rasterises corners by point-in-shape testing
+    // rather than with a shader, which is why this slice is inside the paint
+    // GO and not the held GPU bucket. Kept byte-faithful rather than
+    // "improved" - an independently better rasteriser here would be an
+    // undeclared divergence and would make any future pixel diff meaningless.
+
+    /// Draw a rounded rectangle using SDF-based rendering.
+    fn draw_rounded_rect(&mut self, rect: Rect, color: Color, radius: rustkit_layout::BorderRadius) {
+        // For small radii or very small rects, fall back to solid rect
+        let max_radius = radius.top_left.max(radius.top_right).max(radius.bottom_left).max(radius.bottom_right);
+        if max_radius < 1.0 || rect.width < 4.0 || rect.height < 4.0 {
+            self.draw_solid_rect(rect, color);
+            return;
+        }
+
+        // Clamp radii to half the rect dimensions
+        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
+        let r_tl = radius.top_left.min(max_r);
+        let r_tr = radius.top_right.min(max_r);
+        let r_br = radius.bottom_right.min(max_r);
+        let r_bl = radius.bottom_left.min(max_r);
+
+        // Draw the interior (non-corner) regions as solid rects for efficiency
+        // Top edge (between corners)
+        if rect.width > r_tl + r_tr {
+            self.draw_solid_rect(
+                Rect::new(rect.x + r_tl, rect.y, rect.width - r_tl - r_tr, r_tl.max(r_tr)),
+                color,
+            );
+        }
+        // Bottom edge (between corners)
+        if rect.width > r_bl + r_br {
+            self.draw_solid_rect(
+                Rect::new(rect.x + r_bl, rect.y + rect.height - r_bl.max(r_br), rect.width - r_bl - r_br, r_bl.max(r_br)),
+                color,
+            );
+        }
+        // Middle section (full width, between top and bottom corner rows)
+        let top_corner_height = r_tl.max(r_tr);
+        let bottom_corner_height = r_bl.max(r_br);
+        if rect.height > top_corner_height + bottom_corner_height {
+            self.draw_solid_rect(
+                Rect::new(rect.x, rect.y + top_corner_height, rect.width, rect.height - top_corner_height - bottom_corner_height),
+                color,
+            );
+        }
+
+        // Draw corners using SDF
+        self.draw_rounded_corner(rect.x, rect.y, r_tl, color, 0); // top-left
+        self.draw_rounded_corner(rect.x + rect.width - r_tr, rect.y, r_tr, color, 1); // top-right
+        self.draw_rounded_corner(rect.x + rect.width - r_br, rect.y + rect.height - r_br, r_br, color, 2); // bottom-right
+        self.draw_rounded_corner(rect.x, rect.y + rect.height - r_bl, r_bl, color, 3); // bottom-left
+    }
+
+    /// Uses smoothstep for antialiasing to match the GPU shader implementation.
+    #[inline]
+    fn point_in_rounded_rect(
+        px: f32,
+        py: f32,
+        rect: Rect,
+        radius: rustkit_layout::BorderRadius,
+    ) -> f32 {
+        // Quick check: outside bounding rect
+        if px < rect.x || px > rect.x + rect.width || py < rect.y || py > rect.y + rect.height {
+            return 0.0;
+        }
+
+        // If no border radius, point is inside
+        if radius.is_zero() {
+            return 1.0;
+        }
+
+        // Clamp radii to half the rect dimensions
+        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
+        let r_tl = radius.top_left.min(max_r);
+        let r_tr = radius.top_right.min(max_r);
+        let r_br = radius.bottom_right.min(max_r);
+        let r_bl = radius.bottom_left.min(max_r);
+
+        // Check each corner
+        let local_x = px - rect.x;
+        let local_y = py - rect.y;
+        let right_x = rect.width - local_x;
+        let bottom_y = rect.height - local_y;
+
+        // Top-left corner: use smoothstep SDF antialiasing to match GPU shader
+        if local_x < r_tl && local_y < r_tl {
+            let dx = r_tl - local_x;
+            let dy = r_tl - local_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let sdf = dist - r_tl;
+            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
+        }
+
+        // Top-right corner: use smoothstep SDF antialiasing to match GPU shader
+        if right_x < r_tr && local_y < r_tr {
+            let dx = r_tr - right_x;
+            let dy = r_tr - local_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let sdf = dist - r_tr;
+            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
+        }
+
+        // Bottom-right corner: use smoothstep SDF antialiasing to match GPU shader
+        if right_x < r_br && bottom_y < r_br {
+            let dx = r_br - right_x;
+            let dy = r_br - bottom_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let sdf = dist - r_br;
+            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
+        }
+
+        // Bottom-left corner: use smoothstep SDF antialiasing to match GPU shader
+        if local_x < r_bl && bottom_y < r_bl {
+            let dx = r_bl - local_x;
+            let dy = r_bl - bottom_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let sdf = dist - r_bl;
+            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
+        }
+
+        // Inside the rect, not in a corner region
+        1.0
+    }
+
+    /// quadrant: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
+    fn draw_rounded_corner(&mut self, x: f32, y: f32, radius: f32, color: Color, quadrant: u8) {
+        if radius < 1.0 {
+            return;
+        }
+
+        // Calculate center of the corner circle
+        let (cx, cy) = match quadrant {
+            0 => (x + radius, y + radius), // top-left: center is inside
+            1 => (x, y + radius),          // top-right: center is to the left
+            2 => (x, y),                   // bottom-right: center is up-left
+            3 => (x + radius, y),          // bottom-left: center is up
+            _ => return,
+        };
+
+        // Draw corner using small rectangles with AA
+        let step = 1.0;
+        let mut py = y;
+        while py < y + radius {
+            let mut px = x;
+            while px < x + radius {
+                // Calculate distance from pixel center to corner center
+                let dx = match quadrant {
+                    0 | 3 => cx - (px + step / 2.0), // left corners: measure from right edge
+                    _ => (px + step / 2.0) - cx,    // right corners: measure from left edge
+                };
+                let dy = match quadrant {
+                    0 | 1 => cy - (py + step / 2.0), // top corners: measure from bottom edge
+                    _ => (py + step / 2.0) - cy,    // bottom corners: measure from top edge
+                };
+                
+                let dist = (dx * dx + dy * dy).sqrt();
+                
+                // Use signed distance field for anti-aliasing
+                // Distance to edge (positive = inside, negative = outside)
+                let signed_dist = radius - dist;
+                
+                if signed_dist >= 1.0 {
+                    // Fully inside
+                    self.draw_solid_rect(Rect::new(px, py, step, step), color);
+                } else if signed_dist > -1.0 {
+                    // Edge pixel - apply anti-aliasing
+                    // Coverage is 0.5 + signed_dist * 0.5 (clamped to 0-1)
+                    let coverage = (signed_dist * 0.5 + 0.5).clamp(0.0, 1.0);
+                    if coverage > 0.01 {
+                        let aa_color = Color::new(
+                            color.r,
+                            color.g,
+                            color.b,
+                            color.a * coverage,
+                        );
+                        self.draw_solid_rect(Rect::new(px, py, step, step), aa_color);
+                    }
+                }
+                // else: outside, don't draw
+                
+                px += step;
+            }
+            py += step;
         }
     }
 
