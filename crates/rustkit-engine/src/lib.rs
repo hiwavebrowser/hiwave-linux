@@ -879,10 +879,12 @@ impl Engine {
         // from body with root_inherited when html is not body's parent. He
         // flagged it as pre-existing and non-blocking; it turned out to drop
         // every inherited property on the element.
-        if let Some(html_el) = document.root().children().iter().find(|c| {
-            matches!(&c.node_type, NodeType::Element { tag_name, .. }
-                     if tag_name.eq_ignore_ascii_case("html"))
-        }) {
+        // Uses document_element() rather than a second hand-rolled scan of the
+        // root children (Argos, soft note on #47): document.body() already
+        // resolves through the same API, so this guarantees we compute the
+        // style of body's ACTUAL ancestor rather than something that merely
+        // matches the tag name.
+        if let Some(html_el) = document.document_element() {
             if let NodeType::Element { tag_name, attributes, .. } = &html_el.node_type {
                 root_inherited = self.compute_style_for_element(
                     tag_name,
@@ -944,6 +946,25 @@ impl Engine {
                 "Layout: body box built"
             );
             root_box.children.push(body_box);
+        // NO-BODY FALLBACK - UNREACHABLE THROUGH THE PARSER, MEASURED.
+        //
+        // Argos flagged a real structural hazard here on #47: this branch
+        // walks <html> as a layout node while root_inherited ALREADY holds
+        // html's computed style, so an em/% font-size on <html> could compound
+        // against itself (2em -> 32 -> 64).
+        //
+        // I could not trigger it. The html5 parser synthesises a <body> for
+        // every input I could construct - `<html></html>`, a bare `<p>`, a
+        // head-only document, a document with text and no body tag - so
+        // document.body() is always Some and this branch never runs. Probed by
+        // printing from inside it: it did not fire once.
+        //
+        // So this is DELIBERATELY NOT FIXED. A change here would have no
+        // failing test behind it, and a guard for it would be unfalsifiable -
+        // the two things this fleet has spent two days removing. Recorded
+        // instead, so the next person who reads the hazard knows it was
+        // measured rather than missed. If the parser ever stops synthesising
+        // body, fix it THEN, with a test that fails first.
         } else if let Some(html) = document.document_element() {
             // Fallback: use html element if no body
             info!("DOM: no body found, using html element");
