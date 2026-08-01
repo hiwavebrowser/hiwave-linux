@@ -5338,6 +5338,22 @@ mod box_shadow_paint_tests {
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
         }
     }
+    /// The BoxShadow commands themselves, not their Debug rendering.
+    fn shadow_commands(html: &str) -> Vec<(f32, f32, f32, f32, rustkit_css::Color, bool)> {
+        let e = engine();
+        let doc = Document::parse_html(html).expect("parse");
+        DisplayList::build(&e.build_layout_from_document(&doc))
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::BoxShadow {
+                    offset_x, offset_y, blur_radius, spread_radius, color, inset, ..
+                } => Some((*offset_x, *offset_y, *blur_radius, *spread_radius, *color, *inset)),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn display_list_for(html: &str) -> String {
         let e = engine();
         let doc = Document::parse_html(html).expect("parse");
@@ -5379,7 +5395,24 @@ mod box_shadow_paint_tests {
                <body><div></div></body></html>"#,
         );
         assert_ne!(with, without, "box-shadow must change what would be painted");
-        assert!(with.contains("BoxShadow"), "expected a BoxShadow command, got: {with}");
+
+        // COUNT and VALUES, not a substring (Prometheus N2). A
+        // `contains("BoxShadow")` check passes for a shadow at the wrong
+        // offset, the wrong colour, or emitted twice - the last of which would
+        // double-darken every shadowed box while the test stayed green.
+        let cmds = shadow_commands(
+            r#"<html><head><style>div { box-shadow: 4px 4px 8px rgba(0,0,0,0.6); width: 50px; height: 50px; }</style></head>
+               <body><div></div></body></html>"#,
+        );
+        assert_eq!(cmds.len(), 1,
+                   "one authored shadow must emit exactly one command; got {cmds:?}");
+        let (ox, oy, blur, spread, color, inset) = cmds[0];
+        assert_eq!((ox, oy), (4.0, 4.0), "offsets must survive to the display list");
+        assert_eq!(blur, 8.0, "blur radius must survive");
+        assert_eq!(spread, 0.0, "unspecified spread must be 0, not copied from blur");
+        assert_eq!((color.r, color.g, color.b), (0, 0, 0), "shadow colour must survive");
+        assert!((color.a - 0.6).abs() < 0.01, "alpha must survive, got {}", color.a);
+        assert!(!inset, "an outer shadow must not be flagged inset");
     }
 
     #[test]
