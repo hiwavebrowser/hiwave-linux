@@ -1729,9 +1729,35 @@ impl DisplayList {
     /// inventing a single number here would be silently wrong on non-square
     /// boxes.
     fn resolve_radius(style: &ComputedStyle) -> BorderRadius {
+        // NOT a product default. Post-#46 the cascade absolutises font-size to
+        // Px before layout sees it, so a relative unit arriving here means
+        // something reached layout without going through
+        // compute_style_for_element - and THAT path would be the defect, not
+        // this arm.
+        //
+        // Measured before choosing this shape: instrumented the arm and ran
+        // the whole workspace suite plus seven adversarial documents (rem on
+        // the box, em inherited, percentage, font-size on <html> only, inline
+        // style, no font-size at all, anonymous box around mixed inline
+        // content). ZERO hits. Unreachable through the document path.
+        //
+        // debug_assert rather than a silent 16.0, per Prometheus's ruling that
+        // a magic layout default is a smell when the value cannot legitimately
+        // arrive: tests and debug builds fail loudly and name the path, while
+        // release degrades to the initial font size rather than panicking in a
+        // user's browser. The should_panic test below proves the assert is
+        // live rather than decorative.
         let font_px = match style.font_size {
             Length::Px(px) => px,
-            _ => 16.0,
+            ref unresolved => {
+                debug_assert!(
+                    false,
+                    "font-size reached resolve_radius unresolved ({unresolved:?}); \
+                     the cascade absolutises it (#46), so this box skipped \
+                     compute_style_for_element - that path is the defect"
+                );
+                16.0
+            }
         };
         let to_px = |l: &Length| match l {
             Length::Px(px) => *px,
@@ -2154,5 +2180,38 @@ mod tests {
         assert_eq!(paint_order[0].z_index, -1);
         assert_eq!(paint_order[1].position, Position::Static);
         assert_eq!(paint_order[2].z_index, 1);
+    }
+}
+
+#[cfg(test)]
+mod radius_fallback_is_unreachable {
+    use super::*;
+
+    /// The assert must FIRE when a box reaches paint with an unresolved
+    /// font-size. Without this, the debug_assert is exactly the kind of guard
+    /// nobody has seen fail - the class this fleet has spent two days deleting.
+    ///
+    /// Reaching it requires constructing a LayoutBox by hand, which is the
+    /// point: no document path can produce this. Measured before writing the
+    /// assert - the whole workspace suite plus seven adversarial documents
+    /// produced zero hits.
+    #[test]
+    #[should_panic(expected = "reached resolve_radius unresolved")]
+    fn a_hand_built_box_with_a_relative_font_size_trips_the_assert() {
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Em(2.0);
+        style.border_top_left_radius = Length::Px(4.0);
+        let _ = DisplayList::resolve_radius(&style);
+    }
+
+    #[test]
+    fn an_absolute_font_size_resolves_em_radii_without_tripping() {
+        // The positive half: the same call with a Px font-size must work, or
+        // the test above would pass for the wrong reason.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(32.0);
+        style.border_top_left_radius = Length::Em(2.0);
+        let r = DisplayList::resolve_radius(&style);
+        assert_eq!(r.top_left, 64.0, "2em at font-size 32px is 64px");
     }
 }
