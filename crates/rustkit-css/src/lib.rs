@@ -1150,6 +1150,12 @@ pub struct ComputedStyle {
     pub border_top_color: Color,
     pub border_right_color: Color,
     pub border_bottom_color: Color,
+    /// Corner radii. Stored as Length so `border-radius: 1em` survives the
+    /// cascade; resolved to px at the paint boundary, like every other length.
+    pub border_top_left_radius: Length,
+    pub border_top_right_radius: Length,
+    pub border_bottom_right_radius: Length,
+    pub border_bottom_left_radius: Length,
     pub border_left_color: Color,
 
     // Colors
@@ -2286,6 +2292,10 @@ mod computed_style_field_guards {
             // parent's `top: 20px` - that would cascade a positioned parent's
             // displacement onto every descendant.
             top, right, bottom, left, z_index,
+            // Corner radii: NOT inherited. A child does not adopt its parent's
+            // rounding - that would round every descendant of a rounded card.
+            border_top_left_radius, border_top_right_radius,
+            border_bottom_right_radius, border_bottom_left_radius,
         } = ComputedStyle::new();
 
         // THE PARTITION IS CHECKED, NOT MERELY DOCUMENTED - and every
@@ -2403,6 +2413,8 @@ mod computed_style_field_guards {
             vertical_align, white_space, width, word_break,
             word_spacing, writing_mode,
             top, right, bottom, left, z_index,
+            border_top_left_radius, border_top_right_radius,
+            border_bottom_right_radius, border_bottom_left_radius,
         } = ComputedStyle::new();
 
         // Initials that have historically been wrong, pinned positively.
@@ -2434,5 +2446,15 @@ mod computed_style_field_guards {
         assert_eq!(bottom, None, "bottom initial is auto (None), NOT 0");
         assert_eq!(left, None, "left initial is auto (None), NOT 0");
         assert_eq!(z_index, 0, "z-index initial IS 0 (CSS initial is `auto`; 0 is our stand-in)");
+
+        // Corner radii fall through ..Default::default() to Length::Zero, and
+        // that IS the correct CSS initial - unlike width, where Zero was wrong
+        // and blanked the page. Same shape as min_width: right by virtue of a
+        // good default, asserted so it is visibly true rather than accidentally
+        // true.
+        assert_eq!(border_top_left_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_top_right_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_bottom_right_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_bottom_left_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
     }
 }

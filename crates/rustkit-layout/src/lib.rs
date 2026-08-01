@@ -1134,10 +1134,46 @@ pub struct HitTestAncestor {
 }
 
 /// A paint command for rendering.
+/// Border radius values for each corner, resolved to pixels.
+///
+/// Mirrors the reference type field-for-field so the two display lists stay
+/// diffable. Ported, not redesigned.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BorderRadius {
+    pub top_left: f32,
+    pub top_right: f32,
+    pub bottom_right: f32,
+    pub bottom_left: f32,
+}
+
+impl BorderRadius {
+    /// All four corners the same.
+    pub fn uniform(radius: f32) -> Self {
+        Self { top_left: radius, top_right: radius, bottom_right: radius, bottom_left: radius }
+    }
+
+    /// No rounding anywhere - the renderer falls back to a plain rect.
+    pub fn is_zero(&self) -> bool {
+        self.top_left == 0.0
+            && self.top_right == 0.0
+            && self.bottom_right == 0.0
+            && self.bottom_left == 0.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum DisplayCommand {
     /// Fill a rectangle with a solid color.
     SolidColor(Color, Rect),
+    /// Fill a rectangle with rounded corners.
+    ///
+    /// Emitted INSTEAD of SolidColor when a box has any non-zero radius, so a
+    /// square box costs exactly what it did before this existed.
+    RoundedRect {
+        color: Color,
+        rect: Rect,
+        radius: BorderRadius,
+    },
     /// Draw a CSS box-shadow. Mirrors the macOS reference variant field for
     /// field so the two display lists stay diffable.
     ///
@@ -1671,10 +1707,44 @@ impl DisplayList {
     fn render_background(&mut self, layout_box: &LayoutBox) {
         let color = layout_box.style.background_color;
         if color.a > 0.0 {
-            self.commands.push(DisplayCommand::SolidColor(
-                color,
-                layout_box.dimensions.border_box(),
-            ));
+            let rect = layout_box.dimensions.border_box();
+            let radius = Self::resolve_radius(&layout_box.style);
+            if radius.is_zero() {
+                // Square boxes emit exactly what they always did. A rounded
+                // command for a square box would cost every page the SDF path
+                // for nothing.
+                self.commands.push(DisplayCommand::SolidColor(color, rect));
+            } else {
+                self.commands.push(DisplayCommand::RoundedRect { color, rect, radius });
+            }
+        }
+    }
+
+    /// Resolve the four corner radii to pixels.
+    ///
+    /// Non-px units resolve against the element's own font size, which is
+    /// absolute by the time layout runs - the cascade absolutises it (Linux
+    /// #46). Percentages are refused rather than guessed: they resolve against
+    /// the box's own dimensions, which is a different unit on each axis, and
+    /// inventing a single number here would be silently wrong on non-square
+    /// boxes.
+    fn resolve_radius(style: &ComputedStyle) -> BorderRadius {
+        let font_px = match style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let to_px = |l: &Length| match l {
+            Length::Px(px) => *px,
+            Length::Zero => 0.0,
+            Length::Em(em) => em * font_px,
+            Length::Rem(rem) => rem * 16.0,
+            _ => 0.0,
+        };
+        BorderRadius {
+            top_left: to_px(&style.border_top_left_radius),
+            top_right: to_px(&style.border_top_right_radius),
+            bottom_right: to_px(&style.border_bottom_right_radius),
+            bottom_left: to_px(&style.border_bottom_left_radius),
         }
     }
 
