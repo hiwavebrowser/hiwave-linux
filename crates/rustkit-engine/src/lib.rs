@@ -3129,10 +3129,40 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                 "grid-row-end" => {
                     if let Some(l) = parse_grid_line(value) { style.grid_row_end = l; }
                 }
-                // BORDER-RADIUS. Four corners plus the shorthand, mirroring
-                // the reference's arm set exactly (checked PER PROPERTY, not
-                // per family - the check that caught my text-decoration-
-                // thickness divergence).
+                // BORDER-RADIUS. Four corners plus the shorthand.
+                //
+                // DIVERGENCE FROM THE REFERENCE, DECLARED (this declaration
+                // was missing from #50 and is the reason for this follow-up).
+                //
+                // The macOS arm calls parse_length() on the WHOLE value and
+                // assigns the result to all four corners, so it supports the
+                // ONE-VALUE form only. Measured on the shared parser:
+                //   parse_length("5px")           -> Some(Px(5.0))
+                //   parse_length("5px 10px")      -> None
+                //   parse_length("5px 10px 20px") -> None
+                //   parse_length("10px / 20px")   -> None
+                // `border-radius: 5px 10px` therefore sets NOTHING on the
+                // reference and leaves all four corners square.
+                //
+                // This tree implements the CSS fill-in rules (CSS Backgrounds
+                // and Borders Level 3, section 5.1: one to four values,
+                // clockwise from top-left, with 2 -> [TL+BR, TR+BL] and
+                // 3 -> [TL, TR+BL, BR]). That is spec-correct and it is MORE
+                // than the reference does.
+                //
+                // Kept, not narrowed, on Argos's recommendation - narrowing to
+                // the reference would be REFERENCE_WINS_OVER_SPEC in the wrong
+                // direction. The FORMAL call belongs to the design seat and is
+                // open at the time of writing; if Prometheus rules the other
+                // way this comment and the arities go together.
+                //
+                // ELLIPTICAL RADII (`10px / 20px`) are NOT supported on either
+                // tree. The reference fails to parse them entirely; this arm
+                // takes the horizontal half and discards the vertical. Both
+                // wrong against spec, this one less so. Fixing it needs
+                // ComputedStyle to carry two radii per corner - a type change
+                // on all three trees, so it is a fleet unit and not a
+                // unilateral Linux expansion.
                 //
                 // The shorthand takes 1-4 values in CSS's clockwise-from-
                 // top-left order with the standard fill-in rules, which are
