@@ -1,0 +1,8 @@
+{
+  "_comment": "Pre-existing display commands that no live path constructs. A variant may only LEAVE this list; a new entry fails CI. Remove an entry in the same PR that wires its emitter to a live path.",
+  "dead_only_variants": [
+    "BackgroundImage",
+    "Border",
+    "Image"
+  ]
+}
