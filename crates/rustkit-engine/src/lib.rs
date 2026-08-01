@@ -849,6 +849,51 @@ impl Engine {
         let mut root_inherited = ComputedStyle::new();
         root_inherited.color = rustkit_css::Color::BLACK;
 
+        // COMPUTE THE <html> ELEMENT'S STYLE so its inherited properties reach
+        // <body> and everything below.
+        //
+        // Layout starts at <body>, and this tree previously built body from a
+        // bare root_inherited - so every inherited property an author set on
+        // <html> was silently dropped. Measured before the fix, with
+        // `html { font-size:20px; color:#f00; line-height:1.5;
+        // font-family:Georgia; text-align:center }`:
+        //
+        //   font_size    Px(16.0)      expected Px(20)
+        //   color        black         expected red
+        //   line_height  1.2           expected 1.5
+        //   font_family  "sans-serif"  expected Georgia
+        //   text_align   Left          expected Center
+        //
+        // ALL FIVE dropped. That matters more than it looks: parity-reset.css
+        // and most real stylesheets set inherited properties on `html`, so the
+        // page starts from the wrong baseline before a single author rule for
+        // an element is considered.
+        //
+        // The reference already does this (macos rustkit-engine
+        // build_layout_from_document) and carries the scar comment for the same
+        // bug: "building body with parent_style = None silently dropped them
+        // (e.g. html { line-height: 1.5 } never reached any heading)". PORT
+        // DEFECT - measured on both sides this time, behaviour not grep.
+        //
+        // Found from Argos's soft note on #46: he observed that Linux builds
+        // from body with root_inherited when html is not body's parent. He
+        // flagged it as pre-existing and non-blocking; it turned out to drop
+        // every inherited property on the element.
+        if let Some(html_el) = document.root().children().iter().find(|c| {
+            matches!(&c.node_type, NodeType::Element { tag_name, .. }
+                     if tag_name.eq_ignore_ascii_case("html"))
+        }) {
+            if let NodeType::Element { tag_name, attributes, .. } = &html_el.node_type {
+                root_inherited = self.compute_style_for_element(
+                    tag_name,
+                    attributes,
+                    &sheet,
+                    &root_inherited,
+                    &[],
+                );
+            }
+        }
+
         // Create root layout box for the document
         let mut root_style = ComputedStyle::new();
         root_style.background_color = rustkit_css::Color::WHITE;
@@ -5543,5 +5588,79 @@ mod font_size_cascade_absolutise {
         }
         assert_eq!(text_fs(&lay), Some(Length::Px(64.0)),
                    "2em inside 2em must compound to 64, not flatten to 32");
+    }
+}
+
+#[cfg(test)]
+mod html_root_inheritance {
+    //! Inherited properties set on `<html>` must reach `<body>` and below.
+    //!
+    //! Layout starts at <body>, so building it from a bare root style dropped
+    //! everything an author set on the root element. Found from Argos's soft
+    //! note on #46 - he flagged it as pre-existing and non-blocking, and it
+    //! turned out to drop EVERY inherited property.
+    use super::*;
+    use rustkit_css::Length;
+
+    fn text_style(html: &str) -> ComputedStyle {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        };
+        let doc = Document::parse_html(html).expect("parse");
+        let lay = e.build_layout_from_document(&doc);
+        fn t(b: &LayoutBox) -> Option<ComputedStyle> {
+            if matches!(b.box_type, BoxType::Text(_)) { return Some(b.style.clone()); }
+            b.children.iter().find_map(t)
+        }
+        t(&lay).expect("no text box")
+    }
+
+    #[test]
+    fn every_inherited_property_on_html_reaches_the_text() {
+        // All five were dropped before this unit. Asserting them together
+        // because the defect was not per-property - the whole inherited set
+        // was discarded at one seam.
+        let s = text_style(
+            r#"<html><head><style>html{font-size:20px;color:#ff0000;line-height:1.5;font-family:Georgia;text-align:center}</style></head><body><p>x</p></body></html>"#
+        );
+        assert_eq!(s.font_size, Length::Px(20.0), "font-size on html must reach text");
+        assert_eq!((s.color.r, s.color.g, s.color.b), (255, 0, 0), "color on html must reach text");
+        assert_eq!(s.line_height, 1.5, "line-height on html must reach text");
+        assert_eq!(s.font_family, "Georgia", "font-family on html must reach text");
+        assert_eq!(s.text_align, rustkit_css::TextAlign::Center, "text-align on html must reach text");
+    }
+
+    #[test]
+    fn em_on_body_resolves_against_the_html_font_size() {
+        // The value test, not just the reaching test. html 20px + body 2em
+        // must be 40. If html's size never arrives, body resolves 2em against
+        // the 16px initial and yields 32 - a plausible-looking wrong number.
+        let s = text_style(
+            r#"<html><head><style>html{font-size:20px}body{font-size:2em}</style></head><body>x</body></html>"#
+        );
+        assert_eq!(s.font_size, Length::Px(40.0),
+                   "2em on body must resolve against html's 20px = 40, not the 16px initial = 32");
+    }
+
+    #[test]
+    fn body_still_overrides_html() {
+        // Inheritance must not become imposition: a property set on BOTH must
+        // take body's value, or this fix would have traded one bug for another.
+        let s = text_style(
+            r#"<html><head><style>html{color:#ff0000;font-size:20px}body{color:#0000ff;font-size:30px}</style></head><body>x</body></html>"#
+        );
+        assert_eq!((s.color.r, s.color.g, s.color.b), (0, 0, 255), "body's colour must win over html's");
+        assert_eq!(s.font_size, Length::Px(30.0), "body's font-size must win over html's");
+    }
+
+    #[test]
+    fn a_document_without_an_html_element_still_builds() {
+        // Fragment parsing and malformed documents must not panic or regress.
+        let s = text_style(r#"<body><p>x</p></body>"#);
+        assert_eq!(s.font_size, Length::Px(16.0), "no html element: the initial size still applies");
     }
 }
