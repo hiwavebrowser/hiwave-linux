@@ -93,6 +93,13 @@ jobs:
         shell: bash
         run: python scripts/collect_metrics.py --check-reachability
 
+      # Same source-only, seconds-not-minutes placement as the reachability
+      # ratchet. Catches the #41 shape: a paint command emitted only from a
+      # function nothing calls, which compiles clean and passes every test.
+      - name: Dead-emit check
+        shell: bash
+        run: python scripts/dead_emit_check.py
+
       - name: Collect metrics
         shell: bash
         run: |
