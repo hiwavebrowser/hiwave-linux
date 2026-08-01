@@ -5290,3 +5290,82 @@ mod box_shadow_paint_tests {
         assert!(!t.contains("BoxShadow"), "a transparent shadow must not be emitted");
     }
 }
+
+#[cfg(test)]
+mod flex_column_cross_stretch {
+    //! Guard against the macOS defect Atlas reported 2026-07-31: in a
+    //! flex-direction:column container, children were NOT stretched to fill
+    //! the cross axis, coming out shrink-to-fit and perfectly SQUARE - the
+    //! cross size tracking the MAIN-axis value.
+    //!
+    //! Linux does NOT have it (measured: children are container-width). This
+    //! test exists so it cannot arrive later unnoticed, because the failure is
+    //! invisible to every other check we run: the page still renders, nothing
+    //! errors, and boxes are merely the wrong size.
+    use super::*;
+
+    fn laid_out(html: &str, w: f32) -> Vec<(bool, f32, f32)> {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        };
+        let doc = Document::parse_html(html).expect("parse");
+        let mut layout = e.build_layout_from_document(&doc);
+        layout.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, w, 800.0),
+            ..Default::default()
+        });
+        fn walk(b: &LayoutBox, out: &mut Vec<(bool, f32, f32)>) {
+            out.push((
+                matches!(b.box_type, BoxType::Text(_)),
+                b.dimensions.content.width,
+                b.dimensions.content.height,
+            ));
+            for c in &b.children { walk(c, out); }
+        }
+        let mut v = Vec::new();
+        walk(&layout, &mut v);
+        v
+    }
+
+    #[test]
+    fn column_flex_children_fill_the_cross_axis() {
+        // align-items defaults to stretch, so every element box in a 1000px
+        // column container must be 1000px wide.
+        let boxes = laid_out(
+            r#"<html><head><style>body{margin:0;display:flex;flex-direction:column;width:1000px}</style></head>
+               <body><div>one</div><div>two words here</div></body></html>"#,
+            1000.0,
+        );
+        let elements: Vec<_> = boxes.iter().filter(|(is_text, _, _)| !is_text).collect();
+        assert!(elements.len() >= 4, "expected html/body plus two children, got {elements:?}");
+        for (_, w, h) in &elements {
+            assert!(
+                (*w - 1000.0).abs() < 1.0,
+                "a column flex child must stretch to the container width; got w={w} h={h}.                  If w == h the cross size is tracking the MAIN axis - that is the macOS defect."
+            );
+        }
+    }
+
+    #[test]
+    fn column_flex_children_are_not_square() {
+        // The SHAPE is the tell Atlas identified: on the defective tree the
+        // children came out 16x16 and 32x32. Asserting non-squareness catches
+        // the axis mix-up even if the width happens to look plausible.
+        let boxes = laid_out(
+            r#"<html><head><style>body{margin:0;display:flex;flex-direction:column;width:1000px}</style></head>
+               <body><div>one</div></body></html>"#,
+            1000.0,
+        );
+        for (is_text, w, h) in boxes.iter().filter(|(t, _, _)| !t) {
+            let _ = is_text;
+            assert!(
+                !((*w - *h).abs() < 0.01 && *w > 0.0),
+                "a column flex box came out SQUARE ({w}x{h}) - cross size tracking main axis"
+            );
+        }
+    }
+}
