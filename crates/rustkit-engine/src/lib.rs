@@ -2809,6 +2809,22 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                 "max-height" => {
                     if let Some(l) = parse_length(value) { style.max_height = l; }
                 }
+                "overflow" => {
+                    // Shorthand sets both axes. CSS allows two values
+                    // (`overflow: hidden auto`); only the single-value form is
+                    // wired here, and a two-value declaration parses as invalid
+                    // and is dropped rather than half-applied.
+                    if let Some(o) = parse_overflow(value) {
+                        style.overflow_x = o;
+                        style.overflow_y = o;
+                    }
+                }
+                "overflow-x" => {
+                    if let Some(o) = parse_overflow(value) { style.overflow_x = o; }
+                }
+                "overflow-y" => {
+                    if let Some(o) = parse_overflow(value) { style.overflow_y = o; }
+                }
                 // FLEX (tier2). rustkit-layout has had a complete, tested
                 // flex container since the port began - layout_flex_container,
                 // dispatched from Display::Flex - and `display: flex` already
@@ -3296,6 +3312,29 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                 _ => {}
             }
         }
+    }
+}
+
+/// Parse a CSS `overflow` keyword.
+///
+/// Returns `None` for anything unrecognised so the caller can DROP the
+/// declaration and leave the cascaded value in place. That is what CSS
+/// requires of an invalid declaration, and it is the shape every neighbouring
+/// arm in this file already uses (`if let Some(..) = parse_..`).
+///
+/// DECLARED DIVERGENCE from the reference tree, which maps unknown values to
+/// `Visible`. That makes a typo silently RESET overflow rather than be ignored
+/// — `overflow: hiden` would clear an inherited `hidden` instead of leaving it
+/// alone. Matching this tree's local idiom and the spec was preferred to
+/// matching the other tree's fallback.
+fn parse_overflow(value: &str) -> Option<rustkit_css::Overflow> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "visible" => Some(rustkit_css::Overflow::Visible),
+        "hidden" => Some(rustkit_css::Overflow::Hidden),
+        "scroll" => Some(rustkit_css::Overflow::Scroll),
+        "auto" => Some(rustkit_css::Overflow::Auto),
+        "clip" => Some(rustkit_css::Overflow::Clip),
+        _ => None,
     }
 }
 
@@ -6060,5 +6099,95 @@ mod l1_live_relative_units_reach_flex_and_grid {
                <body><div id=g><div id=a>x</div><div id=b>y</div></div></body></html>"#);
         let second = *xs.last().expect("second grid item");
         assert_eq!(second, 132.0, "a rem column-gap must use the root constant 16 (100 + 2*16)");
+    }
+}
+
+#[cfg(test)]
+mod overflow_is_parsed {
+    //! `overflow` must reach ComputedStyle.
+    //!
+    //! Before this wire, `rustkit-css` declared `overflow_x`/`overflow_y` and
+    //! ELEVEN call sites read them, but no CSS input could ever set them: the
+    //! properties were parsed nowhere, so every element was permanently
+    //! `Overflow::Visible`. Eleven consumers of a constant.
+    //!
+    //! The reason this is worth a wire rather than a shrug is that a condition
+    //! which cannot go false passes every test written for the case it does
+    //! handle. CSS Flexbox §4.5 gates the automatic minimum size on the item's
+    //! overflow being visible; implemented against a field nothing can change,
+    //! that gate reads as spec-correct, compiles, greens — and is decorative.
+    use super::*;
+    use rustkit_css::{Length, Overflow};
+
+    fn applied_style(decls: &str) -> ComputedStyle {
+        let mut s = ComputedStyle::default();
+        apply_inline_style_decls(&mut s, decls);
+        s
+    }
+
+    #[test]
+    fn control_a_known_parsed_property_reaches_style() {
+        // Load-bearing: distinguishes "overflow is not parsed" from "this
+        // harness does not apply declarations at all".
+        assert_eq!(applied_style("width: 55px").width, Length::Px(55.0));
+    }
+
+    #[test]
+    fn default_is_visible() {
+        let s = ComputedStyle::default();
+        assert_eq!(s.overflow_x, Overflow::Visible);
+        assert_eq!(s.overflow_y, Overflow::Visible);
+    }
+
+    #[test]
+    fn overflow_shorthand_sets_both_axes() {
+        let s = applied_style("overflow: hidden");
+        assert_eq!(s.overflow_x, Overflow::Hidden, "overflow shorthand must set x");
+        assert_eq!(s.overflow_y, Overflow::Hidden, "overflow shorthand must set y");
+    }
+
+    #[test]
+    fn overflow_x_and_y_are_independent() {
+        // The whole point of the longhands: if both axes moved together, a
+        // per-axis rule like §4.5's main-axis gate could not be expressed.
+        let s = applied_style("overflow-x: hidden; overflow-y: scroll");
+        assert_eq!(s.overflow_x, Overflow::Hidden);
+        assert_eq!(s.overflow_y, Overflow::Scroll);
+    }
+
+    #[test]
+    fn every_keyword_round_trips() {
+        for (text, expected) in [
+            ("visible", Overflow::Visible),
+            ("hidden", Overflow::Hidden),
+            ("scroll", Overflow::Scroll),
+            ("auto", Overflow::Auto),
+            ("clip", Overflow::Clip),
+        ] {
+            let s = applied_style(&format!("overflow-x: {text}"));
+            assert_eq!(s.overflow_x, expected, "keyword {text}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_value_leaves_the_previous_value_alone() {
+        // DECLARED DIVERGENCE from the reference tree, which maps unknown
+        // values to Visible and therefore RESETS overflow on a typo. CSS
+        // says an invalid declaration is dropped, leaving the cascaded value,
+        // and every neighbouring arm in this file already follows that shape
+        // (`if let Some(..) = parse_..`). Matching local idiom and the spec
+        // beats matching the other tree's fallback.
+        let mut s = ComputedStyle::default();
+        apply_inline_style_decls(&mut s, "overflow: hidden");
+        apply_inline_style_decls(&mut s, "overflow: nonsense");
+        assert_eq!(
+            s.overflow_x, Overflow::Hidden,
+            "an unparseable value must not silently reset overflow to visible"
+        );
+    }
+
+    #[test]
+    fn keywords_are_case_insensitive_and_space_tolerant() {
+        assert_eq!(applied_style("overflow:   HIDDEN  ").overflow_x, Overflow::Hidden);
     }
 }
