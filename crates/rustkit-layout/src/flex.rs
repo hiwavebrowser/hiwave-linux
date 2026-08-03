@@ -316,6 +316,63 @@ fn create_flex_item<'a>(
         ),
     };
 
+    // CSS Flexbox §4.5 — automatic minimum size.
+    //
+    // `min-width: auto` is the DEFAULT for a flex item, and the spec resolves it
+    // to the item's content-based minimum, not to zero. Flooring at zero lets
+    // shrink squeeze an item arbitrarily narrow — including text, which the
+    // shaper still paints at full width because it sits downstream of this and
+    // never sees the squeeze. Layout and paint then disagree about the same box.
+    //
+    // Two conditions, both required by the spec:
+    //
+    //   - the SPECIFIED minimum is `auto`. An author who wrote `min-width: 0` is
+    //     explicitly asking to be shrinkable to nothing and must keep getting
+    //     it. This tests the Length variant rather than `min_main > 0.0`,
+    //     because the resolver maps BOTH Auto and Px(0) to 0.0 — the numeric
+    //     test cannot tell the two apart, which is exactly the distinction
+    //     §4.5 depends on and the reason the initial value had to become Auto.
+    //
+    //   - the item's own overflow on the MAIN axis is `visible`. Any other value
+    //     means the item can clip its own content, so content stops flooring the
+    //     box.
+    //
+    // That second condition is only meaningful because `overflow` is now
+    // parseable on this tree. Until it was, `overflow_x` was permanently
+    // Visible, and this gate would have read as spec-correct while being
+    // unconditional — a condition that cannot go false passes every test
+    // written for the case it does handle.
+    //
+    // estimate_min_content_width already returns a border-box figure for
+    // element boxes (it adds padding and border itself) and a bare measure for
+    // text runs, which have neither, so it is used RAW.
+    let specified_min_is_auto = matches!(
+        match main_axis {
+            Axis::Horizontal => &layout_box.style.min_width,
+            Axis::Vertical => &layout_box.style.min_height,
+        },
+        Length::Auto
+    );
+    let main_overflow_is_visible = matches!(
+        match main_axis {
+            Axis::Horizontal => layout_box.style.overflow_x,
+            Axis::Vertical => layout_box.style.overflow_y,
+        },
+        rustkit_css::Overflow::Visible
+    );
+    let min_main = if specified_min_is_auto && main_overflow_is_visible {
+        match main_axis {
+            Axis::Horizontal => crate::grid::estimate_min_content_width(layout_box),
+            // No min-content HEIGHT estimator exists on this tree. Returning the
+            // resolved value keeps previous behaviour on the vertical main axis
+            // rather than inventing a number — stated so the gap is visible
+            // instead of looking like the rule is implemented on both axes.
+            Axis::Vertical => min_main,
+        }
+    } else {
+        min_main
+    };
+
     // Hypothetical main size (clamped)
     let hypothetical_main_size = flex_basis.max(min_main).min(max_main);
 
@@ -1002,4 +1059,5 @@ mod tests {
         );
     }
 }
+
 

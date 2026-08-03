@@ -1255,8 +1255,20 @@ impl ComputedStyle {
             // suppresses parent/last-child margin collapsing (height != auto).
             width: Length::Auto,
             height: Length::Auto,
-            min_width: Length::Zero,
-            min_height: Length::Zero,
+            // CSS 2.1 said the initial value of min-width/min-height is 0.
+            // CSS Flexbox §4.5 supersedes that for flex items: the initial is
+            // `auto`, which on a flex item means "floor me at my content-based
+            // minimum", not "zero".
+            //
+            // The distinction is invisible almost everywhere — Length::Auto and
+            // Length::Zero both resolve to 0.0 — but it is the ONLY thing that
+            // lets flex tell an author who wrote `min-width: 0` ("you may shrink
+            // me to nothing") apart from an author who wrote nothing at all
+            // ("floor me at content"). Defaulting to Zero collapsed those two
+            // into one, so every flex item was shrinkable to zero and text was
+            // squeezed below the width it actually paints at.
+            min_width: Length::Auto,
+            min_height: Length::Auto,
             max_width: Length::Auto, // No max constraint
             max_height: Length::Auto,
             ..Default::default()
@@ -1294,7 +1306,7 @@ impl ComputedStyle {
 
             // NON-INHERITED PROPERTIES WHOSE DERIVED DEFAULT IS WRONG.
             //
-            // These four must be spelled out because `..Default::default()`
+            // These SIX must be spelled out because `..Default::default()`
             // below does NOT give the CSS initial value for them, and the
             // failure is invisible in tests that only check inherited props:
             //
@@ -1317,13 +1329,23 @@ impl ComputedStyle {
             height: Length::Auto,
             max_width: Length::Auto,
             max_height: Length::Auto,
+            // min-width/min-height joined this list when the initial value
+            // became `auto` (Flexbox §4.5). The comment above predicted this
+            // exact return: the door was left open, and the moment §4.5 needed
+            // Auto, `..Default::default()` handed back Zero for every element
+            // that inherits — which is every element except the root. The
+            // symptom was a flex automatic minimum that worked in a unit test
+            // built from `ComputedStyle::new()` and did nothing whatsoever in
+            // the engine.
+            min_width: Length::Auto,
+            min_height: Length::Auto,
             background_color: Color::TRANSPARENT,
             opacity: 1.0,
             flex_shrink: 1.0,
 
             // Everything genuinely non-inherited whose derived default IS the
-            // CSS initial value (min_width/min_height are Zero, which is the
-            // correct CSS 2.1 initial for those two).
+            // CSS initial value. min_width/min_height are NO LONGER in this
+            // group — see above.
             ..Default::default()
         }
     }
@@ -2265,9 +2287,9 @@ mod computed_style_field_guards {
             white_space, word_break, word_spacing, writing_mode,
             // ---- NOT INHERITED: reset to an initial by inherit_from, or
             //      deliberately left to Default because Default IS the CSS
-            //      initial (min_width/min_height are Zero, correct per CSS 2.1
-            //      - the one place "the default is fine" is true, recorded so
-            //      it is visibly true rather than accidentally true).
+            //      initial. NOTE min_width/min_height are NOT in that group any
+            //      more: their initial is Auto (Flexbox §4.5) and Default gives
+            //      Zero, so both constructors spell them out explicitly.
             align_content, align_items, align_self, animation_delay,
             animation_direction, animation_duration, animation_fill_mode, animation_iteration_count,
             animation_name, animation_play_state, animation_timing_function, background_color,
@@ -2429,10 +2451,18 @@ mod computed_style_field_guards {
         );
         assert_eq!(flex_shrink, 1.0, "flex-shrink initial is 1, not 0");
 
-        // min-width/min-height DO fall through, and that IS the correct CSS 2.1
-        // initial for them - pinned as a decision, not a coincidence.
-        assert_eq!(min_width, Length::Zero, "min-width initial IS 0 - deliberate");
-        assert_eq!(min_height, Length::Zero, "min-height initial IS 0 - deliberate");
+        // min-width/min-height fall through to Default, and Default is now
+        // Auto — the CSS Flexbox §4.5 initial, which SUPERSEDES the CSS 2.1
+        // initial of 0.
+        //
+        // This assertion previously pinned Zero and cited CSS 2.1 as a
+        // deliberate decision. It was green, confident, and defending a
+        // superseded spec: any correct implementation of §4.5 had to delete it
+        // first. A guard that must be removed to implement a rule is guarding
+        // the absence of that rule, so it dies in the same diff as the default
+        // it was pinning.
+        assert_eq!(min_width, Length::Auto, "min-width initial is auto (Flexbox §4.5)");
+        assert_eq!(min_height, Length::Auto, "min-height initial is auto (Flexbox §4.5)");
 
         // Offsets DO fall through ..Default::default() correctly, but only
         // because Option::default() is None. That is the SAME shape as
@@ -2456,5 +2486,69 @@ mod computed_style_field_guards {
         assert_eq!(border_top_right_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
         assert_eq!(border_bottom_right_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
         assert_eq!(border_bottom_left_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
+    }
+}
+
+#[cfg(test)]
+mod initial_value_doors_agree {
+    //! Every way of producing an initial style must agree on min-width.
+    //!
+    //! There are three doors onto "a fresh computed style" — `new()`,
+    //! `inherit_from(parent)`, and the derived `default()` — and they are
+    //! written independently. When the Flexbox §4.5 initial value changed from
+    //! `Zero` to `Auto`, changing only `new()` left `inherit_from` handing back
+    //! `Zero` through `..Default::default()`, because `Length::default()` is
+    //! `Zero`.
+    //!
+    //! That produced the worst possible failure shape: the flex automatic
+    //! minimum was correct in every unit test built from `ComputedStyle::new()`
+    //! and did nothing at all in the engine, because the engine reaches every
+    //! non-root element through `inherit_from`. A fully green suite over a
+    //! feature that never once ran.
+    //!
+    //! The file already carried a comment predicting exactly this ("would have
+    //! returned here through a different door"). A prediction in a comment is
+    //! not a guard; this is the guard.
+    use super::*;
+
+    #[test]
+    fn new_and_inherit_from_agree_on_min_size_initials() {
+        let fresh = ComputedStyle::new();
+        let inherited = ComputedStyle::inherit_from(&fresh);
+        assert_eq!(fresh.min_width, Length::Auto, "new() must start at the §4.5 initial");
+        assert_eq!(
+            inherited.min_width, fresh.min_width,
+            "inherit_from must reset min-width to the SAME initial as new(); \
+             Length::default() is Zero, so falling through ..Default::default() \
+             silently disagrees"
+        );
+        assert_eq!(inherited.min_height, fresh.min_height, "same for min-height");
+    }
+
+    #[test]
+    fn inheriting_twice_does_not_drift() {
+        // Second-call check: a reset that is wrong only on the second hop would
+        // pass a single-inherit test. The engine inherits at every depth.
+        let root = ComputedStyle::new();
+        let child = ComputedStyle::inherit_from(&root);
+        let grandchild = ComputedStyle::inherit_from(&child);
+        assert_eq!(grandchild.min_width, Length::Auto);
+        assert_eq!(grandchild.min_height, Length::Auto);
+    }
+
+    #[test]
+    fn an_author_zero_survives_inheritance_as_a_child_initial() {
+        // A parent writing `min-width: 0` must NOT leak that to its children as
+        // an initial — min-width is not an inherited property. If this ever
+        // fails, §4.5's "author wrote 0" vs "unset" distinction is broken one
+        // level down.
+        let mut parent = ComputedStyle::new();
+        parent.min_width = Length::Zero;
+        let child = ComputedStyle::inherit_from(&parent);
+        assert_eq!(
+            child.min_width,
+            Length::Auto,
+            "min-width is not inherited; a parent's explicit 0 must not become the child's initial"
+        );
     }
 }
