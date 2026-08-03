@@ -53,6 +53,44 @@ use rustkit_css::{Color, ComputedStyle, Length};
 use std::cmp::Ordering;
 use thiserror::Error;
 
+/// The base `rem` resolves against, engine-wide.
+///
+/// This is a CONSTANT, not the root element's computed font size. CSS Values 3
+/// defines `rem` as the root element's font size, so a document that sets
+/// `html { font-size: … }` renders differently here than in a conformant engine.
+/// That divergence is known, shared with the reference tree, and tracked as its
+/// own coordinated unit — it is deliberately NOT fixed here, because supplying
+/// a real root size means changing the cascade and every consumer together, and
+/// doing it piecemeal would leave the paths disagreeing again.
+pub const ROOT_FONT_SIZE_PX: f32 = 16.0;
+
+/// The font size `em` resolves against for a given style, in pixels.
+///
+/// The cascade absolutises `font-size` to `Px`, so any other variant reaching
+/// here means the cascade did not run for this box; falling back to the root
+/// base keeps layout finite rather than propagating a nonsense size.
+pub fn font_size_px(style: &ComputedStyle) -> f32 {
+    match style.font_size {
+        Length::Px(px) => px,
+        _ => ROOT_FONT_SIZE_PX,
+    }
+}
+
+/// Resolve a `Length` to pixels against a style and its containing size.
+///
+/// THE single length resolver for layout. `em` uses the element's own font
+/// size; `rem` uses [`ROOT_FONT_SIZE_PX`]; percentages use `container_size`.
+///
+/// It exists because there were three hand-rolled copies of this match — block,
+/// flex and grid — and two of them resolved `em` against a hardcoded 16. That
+/// is not a latent hazard: a flex item with `margin-left: 2em` at `font-size:
+/// 20px` was placed at x=32 while its own text child was placed at x=40, in one
+/// layout. Six independent copies is how that class of defect happens, so new
+/// call sites belong here rather than in another local match.
+pub fn resolve_length_px(length: &Length, style: &ComputedStyle, container_size: f32) -> f32 {
+    length.to_px(font_size_px(style), ROOT_FONT_SIZE_PX, container_size)
+}
+
 /// Errors that can occur in layout.
 #[derive(Error, Debug)]
 pub enum LayoutError {
@@ -929,13 +967,16 @@ impl LayoutBox {
         // Otherwise, content.height was set by layout_block_children
     }
 
-    /// Convert a Length to pixels.
+    /// Convert a Length to pixels against this box's own style.
+    ///
+    /// Delegates to [`resolve_length_px`] so that the block path, the flex path
+    /// and the grid path cannot drift apart: before this consolidation each had
+    /// its own hand-rolled match, and flex/grid resolved `em` against a
+    /// hardcoded 16 while this one used the element's font size. A single
+    /// document could therefore place an element box and its own text child at
+    /// different offsets.
     fn length_to_px(&self, length: &Length, container_size: f32) -> f32 {
-        let font_size = match self.style.font_size {
-            Length::Px(px) => px,
-            _ => 16.0,
-        };
-        length.to_px(font_size, 16.0, container_size)
+        resolve_length_px(length, &self.style, container_size)
     }
 
     /// Get children sorted by z-index for painting.

@@ -5909,3 +5909,156 @@ mod rounded_rect_tests {
         assert_eq!(r[0].top_left, 64.0, "2em at font-size 32px is 64px");
     }
 }
+
+#[cfg(test)]
+mod l1_live_relative_units_reach_flex_and_grid {
+    //! T-RED for L1-LINUX-LIVE sites 4 and 6 (Prometheus dual-class, 2026-08-03).
+    //!
+    //! Site 4: `flex::resolve_length` resolved `em` against a hardcoded 16 while
+    //! the block oracle (`LayoutBox::length_to_px`) used the element's own font
+    //! size. Two resolvers, one document, disagreeing.
+    //!
+    //! Site 6: `grid` gaps did the same for `column_gap`/`row_gap`.
+    //!
+    //! ORACLE DISCIPLINE. These assert **hard CSS numbers** (em x element
+    //! font-size, rem x the engine's root constant 16), never a grid or flex box
+    //! under test as its own oracle -- broken-vs-broken compares equal and
+    //! yields an accidental green.
+    //!
+    //! Element font-size is deliberately 20px, never 16: at 16 the defective and
+    //! correct paths return the same number, so a green at 16 is a blind spot
+    //! rather than evidence.
+    use super::*;
+
+    /// Content-box x of every element (non-text) box, in tree order.
+    fn element_xs(html: &str) -> Vec<f32> {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        };
+        let doc = Document::parse_html(html).expect("parse");
+        let mut layout = e.build_layout_from_document(&doc);
+        layout.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 1000.0, 800.0),
+            ..Default::default()
+        });
+        fn walk(b: &LayoutBox, out: &mut Vec<f32>) {
+            if !matches!(b.box_type, BoxType::Text(_)) {
+                out.push(b.dimensions.content.x);
+            }
+            for c in &b.children { walk(c, out); }
+        }
+        let mut v = Vec::new();
+        walk(&layout, &mut v);
+        v
+    }
+
+    /// x of the flex/grid item, which is the last element box in these fixtures.
+    fn item_x(html: &str) -> f32 {
+        *element_xs(html).last().expect("at least one element box")
+    }
+
+    // ---- baseline: the fixture is not vacuous -------------------------------
+
+    #[test]
+    fn baseline_unmargined_flex_item_sits_at_zero() {
+        // If this is ever non-zero, every number below is measuring something
+        // other than the margin and the whole module is worthless.
+        let x = item_x(
+            r#"<html><head><style>body{margin:0;padding:0;display:flex;width:1000px}
+               #a{font-size:20px}</style></head><body><div id=a>x</div></body></html>"#);
+        assert_eq!(x, 0.0, "baseline: an unmargined flex item must sit at 0");
+    }
+
+    #[test]
+    fn control_px_margin_reaches_flex_layout() {
+        // CONTROL, and it is load-bearing: it separates "relative units resolve
+        // wrongly" from "margins never reach flex layout at all". Without it a
+        // red below is ambiguous.
+        let x = item_x(
+            r#"<html><head><style>body{margin:0;padding:0;display:flex;width:1000px}
+               #a{font-size:20px;margin-left:40px}</style></head><body><div id=a>x</div></body></html>"#);
+        assert_eq!(x, 40.0, "CONTROL: an absolute margin must reach flex layout");
+    }
+
+    // ---- site 4: flex, em ---------------------------------------------------
+
+    #[test]
+    fn flex_em_margin_uses_the_element_font_size() {
+        // 2em at font-size 20px = 40px. A hardcoded 16 yields 32.
+        let x = item_x(
+            r#"<html><head><style>body{margin:0;padding:0;display:flex;width:1000px}
+               #a{font-size:20px;margin-left:2em}</style></head><body><div id=a>x</div></body></html>"#);
+        assert_eq!(
+            x, 40.0,
+            "em in a flex margin must resolve against the ELEMENT font size (20), \
+             not a hardcoded 16; 32.0 here means site 4 is still defective"
+        );
+    }
+
+    #[test]
+    fn flex_em_gap_uses_the_container_font_size() {
+        // Container font-size 20px, gap 2em = 40px, so the SECOND item starts at
+        // 40 (first item has zero width in this tree).
+        let xs = element_xs(
+            r#"<html><head><style>body{margin:0;padding:0}
+               #f{display:flex;font-size:20px;gap:2em;width:1000px}</style></head>
+               <body><div id=f><div id=a>x</div><div id=b>y</div></div></body></html>"#);
+        let second = *xs.last().expect("second flex item");
+        assert_eq!(
+            second, 40.0,
+            "an em gap must resolve against the flex CONTAINER font size (20); got {second}"
+        );
+    }
+
+    // ---- site 4: flex, rem --------------------------------------------------
+
+    #[test]
+    fn flex_rem_margin_uses_the_root_constant_not_the_element_font_size() {
+        // rem is pinned fleet-wide to the engine root constant 16, NOT the
+        // element font size. 2rem = 32 even though the element is 20px. This
+        // guards the opposite error from the em case: a fix that naively passes
+        // the element font size for BOTH bases would make this 40 and be wrong.
+        let x = item_x(
+            r#"<html><head><style>body{margin:0;padding:0;display:flex;width:1000px}
+               #a{font-size:20px;margin-left:2rem}</style></head><body><div id=a>x</div></body></html>"#);
+        assert_eq!(
+            x, 32.0,
+            "rem must resolve against the engine root constant 16 (2rem = 32), \
+             never the element font size; 40.0 here means rem was wired to the em base"
+        );
+    }
+
+    // ---- site 6: grid gaps --------------------------------------------------
+
+    #[test]
+    fn grid_em_column_gap_uses_the_container_font_size() {
+        // Two 100px columns, container font-size 20px, column-gap 2em = 40px.
+        // Second column therefore starts at 140.
+        let xs = element_xs(
+            r#"<html><head><style>body{margin:0;padding:0}
+               #g{display:grid;grid-template-columns:100px 100px;font-size:20px;
+                  column-gap:2em;width:1000px}</style></head>
+               <body><div id=g><div id=a>x</div><div id=b>y</div></div></body></html>"#);
+        let second = *xs.last().expect("second grid item");
+        assert_eq!(
+            second, 140.0,
+            "an em column-gap must resolve against the grid CONTAINER font size \
+             (100 + 2*20); 132.0 means site 6 is still on the hardcoded 16"
+        );
+    }
+
+    #[test]
+    fn grid_rem_column_gap_uses_the_root_constant() {
+        let xs = element_xs(
+            r#"<html><head><style>body{margin:0;padding:0}
+               #g{display:grid;grid-template-columns:100px 100px;font-size:20px;
+                  column-gap:2rem;width:1000px}</style></head>
+               <body><div id=g><div id=a>x</div><div id=b>y</div></div></body></html>"#);
+        let second = *xs.last().expect("second grid item");
+        assert_eq!(second, 132.0, "a rem column-gap must use the root constant 16 (100 + 2*16)");
+    }
+}

@@ -17,7 +17,8 @@
 
 use crate::{Dimensions, EdgeSizes, LayoutBox, Rect};
 use rustkit_css::{
-    AlignContent, AlignItems, AlignSelf, FlexBasis, FlexWrap, JustifyContent, Length,
+    AlignContent, AlignItems, AlignSelf, ComputedStyle, FlexBasis, FlexWrap, JustifyContent,
+    Length,
 };
 
 /// Represents the main and cross axes.
@@ -189,12 +190,12 @@ pub fn layout_flex_container(
 
     // Get gap values
     let main_gap = match main_axis {
-        Axis::Horizontal => resolve_length(&style.column_gap, container_main_size),
-        Axis::Vertical => resolve_length(&style.row_gap, container_main_size),
+        Axis::Horizontal => resolve_length(&style.column_gap, style, container_main_size),
+        Axis::Vertical => resolve_length(&style.row_gap, style, container_main_size),
     };
     let cross_gap = match cross_axis {
-        Axis::Horizontal => resolve_length(&style.column_gap, container_cross_size),
-        Axis::Vertical => resolve_length(&style.row_gap, container_cross_size),
+        Axis::Horizontal => resolve_length(&style.column_gap, style, container_cross_size),
+        Axis::Vertical => resolve_length(&style.row_gap, style, container_cross_size),
     };
 
     // 2. Collect flex items (skip absolutely positioned)
@@ -269,16 +270,16 @@ fn create_flex_item<'a>(
     // Get margins
     let (main_margin_start, main_margin_end, cross_margin_start, cross_margin_end) = match main_axis {
         Axis::Horizontal => (
-            resolve_length(&layout_box.style.margin_left, container_main),
-            resolve_length(&layout_box.style.margin_right, container_main),
-            resolve_length(&layout_box.style.margin_top, container_cross),
-            resolve_length(&layout_box.style.margin_bottom, container_cross),
+            resolve_length(&layout_box.style.margin_left, &layout_box.style, container_main),
+            resolve_length(&layout_box.style.margin_right, &layout_box.style, container_main),
+            resolve_length(&layout_box.style.margin_top, &layout_box.style, container_cross),
+            resolve_length(&layout_box.style.margin_bottom, &layout_box.style, container_cross),
         ),
         Axis::Vertical => (
-            resolve_length(&layout_box.style.margin_top, container_main),
-            resolve_length(&layout_box.style.margin_bottom, container_main),
-            resolve_length(&layout_box.style.margin_left, container_cross),
-            resolve_length(&layout_box.style.margin_right, container_cross),
+            resolve_length(&layout_box.style.margin_top, &layout_box.style, container_main),
+            resolve_length(&layout_box.style.margin_bottom, &layout_box.style, container_main),
+            resolve_length(&layout_box.style.margin_left, &layout_box.style, container_cross),
+            resolve_length(&layout_box.style.margin_right, &layout_box.style, container_cross),
         ),
     };
 
@@ -287,8 +288,8 @@ fn create_flex_item<'a>(
         FlexBasis::Auto => {
             // Use main size property
             match main_axis {
-                Axis::Horizontal => resolve_length(&layout_box.style.width, container_main),
-                Axis::Vertical => resolve_length(&layout_box.style.height, container_main),
+                Axis::Horizontal => resolve_length(&layout_box.style.width, &layout_box.style, container_main),
+                Axis::Vertical => resolve_length(&layout_box.style.height, &layout_box.style, container_main),
             }
         }
         FlexBasis::Content => {
@@ -302,16 +303,16 @@ fn create_flex_item<'a>(
     // Get min/max constraints
     let (min_main, max_main, min_cross, max_cross) = match main_axis {
         Axis::Horizontal => (
-            resolve_length(&layout_box.style.min_width, container_main),
-            resolve_max_length(&layout_box.style.max_width, container_main),
-            resolve_length(&layout_box.style.min_height, container_cross),
-            resolve_max_length(&layout_box.style.max_height, container_cross),
+            resolve_length(&layout_box.style.min_width, &layout_box.style, container_main),
+            resolve_max_length(&layout_box.style.max_width, &layout_box.style, container_main),
+            resolve_length(&layout_box.style.min_height, &layout_box.style, container_cross),
+            resolve_max_length(&layout_box.style.max_height, &layout_box.style, container_cross),
         ),
         Axis::Vertical => (
-            resolve_length(&layout_box.style.min_height, container_main),
-            resolve_max_length(&layout_box.style.max_height, container_main),
-            resolve_length(&layout_box.style.min_width, container_cross),
-            resolve_max_length(&layout_box.style.max_width, container_cross),
+            resolve_length(&layout_box.style.min_height, &layout_box.style, container_main),
+            resolve_max_length(&layout_box.style.max_height, &layout_box.style, container_main),
+            resolve_length(&layout_box.style.min_width, &layout_box.style, container_cross),
+            resolve_max_length(&layout_box.style.max_width, &layout_box.style, container_cross),
         ),
     };
 
@@ -719,66 +720,98 @@ fn apply_positions(
 /// viewport units → 0.0 (no viewport in scope), Auto/Zero → 0.0. The
 /// equivalence is PROVEN by `test_resolve_length_pins_previous_behaviour`
 /// below, which keeps the previous arms verbatim.
-fn resolve_length(length: &Length, container_size: f32) -> f32 {
-    length.to_px(16.0, 16.0, container_size)
+fn resolve_length(length: &Length, style: &ComputedStyle, container_size: f32) -> f32 {
+    crate::resolve_length_px(length, style, container_size)
 }
 
 /// Resolve a max Length (returns f32::INFINITY for Auto).
-fn resolve_max_length(length: &Length, container_size: f32) -> f32 {
+fn resolve_max_length(length: &Length, style: &ComputedStyle, container_size: f32) -> f32 {
     match length {
         Length::Auto => f32::INFINITY,
-        _ => resolve_length(length, container_size),
+        _ => resolve_length(length, style, container_size),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustkit_css::{ComputedStyle, FlexDirection, JustifyContent, AlignItems, Length};
+    use rustkit_css::{FlexDirection, JustifyContent, AlignItems};
     use crate::BoxType;
 
-    /// PINS the consolidation of `resolve_length` into `Length::to_px`.
-    /// The match below is the PREVIOUS hand-written implementation, kept
-    /// verbatim; the test asserts the delegation agrees with it for every
-    /// pre-existing variant, converting the "behaviour-identical" claim in
-    /// the doc comment from a promise into a checked fact. (= Windows #42.)
+    /// PINS the semantics of `resolve_length` against HARD CSS NUMBERS.
+    ///
+    /// This replaces `test_resolve_length_pins_previous_behaviour`, which
+    /// asserted the delegation agreed with a verbatim copy of the PREVIOUS
+    /// hand-written match. That match contained
+    ///
+    ///     Length::Em(em) => em * 16.0, // Default font size
+    ///
+    /// so the test pinned the defect as correct: it was green precisely BECAUSE
+    /// `em` ignored the element font size, and any fix would have had to delete
+    /// it. A guard that must be removed to repair a bug is defending the bug.
+    /// Same shape as the CSS 2.1 `min_width` assertion killed alongside its own
+    /// default, and the reason both die in the diff that changes the behaviour.
+    ///
+    /// Pinning against an older implementation only ever proves "unchanged".
+    /// These cases state what the values must BE, so they stay meaningful if the
+    /// resolver is rewritten again.
     #[test]
-    fn test_resolve_length_pins_previous_behaviour() {
-        fn previous_resolve_length(length: &Length, container_size: f32) -> f32 {
-            match length {
-                Length::Px(px) => *px,
-                Length::Em(em) => em * 16.0, // Default font size
-                Length::Rem(rem) => rem * 16.0,
-                Length::Percent(pct) => pct / 100.0 * container_size,
-                Length::Vw(_) | Length::Vh(_) | Length::Vmin(_) | Length::Vmax(_) => 0.0,
-                Length::Auto => 0.0,
-                Length::Zero => 0.0,
-                // Not pre-existing: math variants did not exist before the
-                // consolidation, so they are outside the pin.
-                Length::Min(_) | Length::Max(_) | Length::Clamp(_) => unreachable!(),
-            }
+    fn test_resolve_length_semantics() {
+        fn style_with_font(px: f32) -> ComputedStyle {
+            let mut s = ComputedStyle::default();
+            s.font_size = Length::Px(px);
+            s
         }
+        // Element font-size deliberately != 16: at 16 the correct and the
+        // previously-defective results coincide, so a green there proves
+        // nothing.
+        let s20 = style_with_font(20.0);
 
-        let cases = [
-            Length::Px(13.5),
-            Length::Em(1.25),
-            Length::Rem(2.0),
-            Length::Percent(37.5),
-            Length::Vw(50.0),
-            Length::Vh(25.0),
-            Length::Vmin(100.0),
-            Length::Vmax(100.0),
-            Length::Auto,
-            Length::Zero,
-        ];
-        for container in [0.0, 320.0, 1024.0] {
-            for len in &cases {
-                assert_eq!(
-                    resolve_length(len, container),
-                    previous_resolve_length(len, container),
-                    "consolidation changed behaviour for {len:?} @ container {container}"
-                );
-            }
+        // em follows the ELEMENT font size.
+        assert_eq!(resolve_length(&Length::Em(2.0), &s20, 0.0), 40.0);
+        assert_eq!(resolve_length(&Length::Em(2.0), &style_with_font(10.0), 0.0), 20.0);
+
+        // rem follows the ROOT CONSTANT, never the element font size. If a
+        // future change wires both bases to the element size, this fails while
+        // the em cases above still pass.
+        assert_eq!(resolve_length(&Length::Rem(2.0), &s20, 0.0), 32.0);
+        assert_eq!(
+            resolve_length(&Length::Rem(2.0), &style_with_font(10.0), 0.0),
+            32.0,
+            "rem must not track the element font size"
+        );
+
+        // Percent follows the containing size; absolute and zero-ish variants
+        // are unaffected by either base.
+        assert_eq!(resolve_length(&Length::Percent(37.5), &s20, 320.0), 120.0);
+        assert_eq!(resolve_length(&Length::Px(13.5), &s20, 1024.0), 13.5);
+        assert_eq!(resolve_length(&Length::Auto, &s20, 1024.0), 0.0);
+        assert_eq!(resolve_length(&Length::Zero, &s20, 1024.0), 0.0);
+
+        // No viewport in scope for flex resolution.
+        for len in [Length::Vw(50.0), Length::Vh(25.0), Length::Vmin(100.0), Length::Vmax(100.0)] {
+            assert_eq!(resolve_length(&len, &s20, 1024.0), 0.0, "{len:?}");
+        }
+    }
+
+    /// The flex resolver and the block oracle must not drift apart again.
+    ///
+    /// They were separate hand-rolled matches that disagreed on `em`; this
+    /// asserts they now agree by construction, which is the property the shared
+    /// helper exists to provide.
+    #[test]
+    fn test_flex_resolver_agrees_with_the_shared_crate_resolver() {
+        let mut s = ComputedStyle::default();
+        s.font_size = Length::Px(20.0);
+        for len in [
+            Length::Em(2.0), Length::Rem(2.0), Length::Percent(50.0),
+            Length::Px(7.0), Length::Auto, Length::Zero,
+        ] {
+            assert_eq!(
+                resolve_length(&len, &s, 300.0),
+                crate::resolve_length_px(&len, &s, 300.0),
+                "flex resolver diverged from the shared resolver for {len:?}"
+            );
         }
     }
 
