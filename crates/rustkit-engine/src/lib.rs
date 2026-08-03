@@ -6038,13 +6038,20 @@ mod l1_live_relative_units_reach_flex_and_grid {
         );
     }
 
+    /// `min-width: 0` on the items is load-bearing, not decoration. Once
+    /// Flexbox §4.5 landed, an item with the initial `min-width: auto` is
+    /// floored at its own content width, so the second item's x is
+    /// (first item width + gap) rather than the gap alone. Pinning the items to
+    /// an authored zero keeps this test measuring the GAP, which is what it was
+    /// written to measure.
     #[test]
     fn flex_em_gap_uses_the_container_font_size() {
         // Container font-size 20px, gap 2em = 40px, so the SECOND item starts at
         // 40 (first item has zero width in this tree).
         let xs = element_xs(
             r#"<html><head><style>body{margin:0;padding:0}
-               #f{display:flex;font-size:20px;gap:2em;width:1000px}</style></head>
+               #f{display:flex;font-size:20px;gap:2em;width:1000px}
+               #a,#b{min-width:0}</style></head>
                <body><div id=f><div id=a>x</div><div id=b>y</div></div></body></html>"#);
         let second = *xs.last().expect("second flex item");
         assert_eq!(
@@ -6080,7 +6087,8 @@ mod l1_live_relative_units_reach_flex_and_grid {
         let xs = element_xs(
             r#"<html><head><style>body{margin:0;padding:0}
                #g{display:grid;grid-template-columns:100px 100px;font-size:20px;
-                  column-gap:2em;width:1000px}</style></head>
+                  column-gap:2em;width:1000px}
+               #a,#b{min-width:0}</style></head>
                <body><div id=g><div id=a>x</div><div id=b>y</div></div></body></html>"#);
         let second = *xs.last().expect("second grid item");
         assert_eq!(
@@ -6095,7 +6103,8 @@ mod l1_live_relative_units_reach_flex_and_grid {
         let xs = element_xs(
             r#"<html><head><style>body{margin:0;padding:0}
                #g{display:grid;grid-template-columns:100px 100px;font-size:20px;
-                  column-gap:2rem;width:1000px}</style></head>
+                  column-gap:2rem;width:1000px}
+               #a,#b{min-width:0}</style></head>
                <body><div id=g><div id=a>x</div><div id=b>y</div></div></body></html>"#);
         let second = *xs.last().expect("second grid item");
         assert_eq!(second, 132.0, "a rem column-gap must use the root constant 16 (100 + 2*16)");
@@ -6189,5 +6198,126 @@ mod overflow_is_parsed {
     #[test]
     fn keywords_are_case_insensitive_and_space_tolerant() {
         assert_eq!(applied_style("overflow:   HIDDEN  ").overflow_x, Overflow::Hidden);
+    }
+}
+
+
+
+#[cfg(test)]
+mod flexbox_45_automatic_minimum {
+    //! CSS Flexbox §4.5 automatic minimum size, end to end through the cascade.
+    //!
+    //! These run through `Document::parse_html` + `build_layout_from_document`
+    //! deliberately, not against hand-built `ComputedStyle::new()` boxes. The
+    //! first version of this feature was correct in a unit test built from
+    //! `new()` and did nothing at all in the engine, because the engine reaches
+    //! every non-root element through `inherit_from`, which was still handing
+    //! back `Length::Zero`. A unit-level receipt would have been green over a
+    //! feature that never once ran on a real document.
+    use super::*;
+    use rustkit_css::Length;
+
+    /// Width of the first child of the first flex container in the tree.
+    fn flex_item_width(item_css: &str) -> f32 {
+        let html = format!(
+            r#"<html><head><style>body{{margin:0;padding:0}}
+               #f{{display:flex;width:40px}} #a{{{item_css}}}</style></head>
+               <body><div id=f><div id=a>Wide Text Here</div></div></body></html>"#
+        );
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        };
+        let doc = Document::parse_html(&html).expect("parse");
+        let mut layout = e.build_layout_from_document(&doc);
+        layout.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 1000.0, 800.0),
+            ..Default::default()
+        });
+        fn find(b: &LayoutBox) -> Option<f32> {
+            if b.style.display == rustkit_css::Display::Flex {
+                return b.children.first().map(|c| c.dimensions.content.width);
+            }
+            for c in &b.children {
+                if let Some(w) = find(c) { return Some(w); }
+            }
+            None
+        }
+        find(&layout).expect("a flex container with one item")
+    }
+
+    #[test]
+    fn control_the_harness_reaches_computed_style() {
+        // Load-bearing: without it, every zero below is ambiguous between
+        // "the rule correctly declined to apply" and "nothing in this fixture
+        // works at all".
+        let mut s = ComputedStyle::default();
+        apply_inline_style_decls(&mut s, "min-width: 7px");
+        assert_eq!(s.min_width, Length::Px(7.0));
+    }
+
+    #[test]
+    fn positive_unset_min_floors_the_item_at_its_content() {
+        // The item is in a 40px container with content wider than that. With
+        // `min-width: auto` (the initial) and visible overflow, §4.5 floors it
+        // at its min-content width instead of letting shrink squeeze it away.
+        let w = flex_item_width("");
+        assert!(
+            w > 0.0,
+            "an item with the initial min-width:auto must be floored at its \
+             content-based minimum, got {w}"
+        );
+    }
+
+    #[test]
+    fn negative_an_authored_zero_is_still_honoured() {
+        // §4.5 applies only when the SPECIFIED minimum is `auto`. An author who
+        // writes 0 is asking to be shrinkable to nothing and must keep getting
+        // it — this is the distinction that required the initial value to
+        // become Auto, since the resolver maps both Auto and Px(0) to 0.0.
+        assert_eq!(
+            flex_item_width("min-width:0;"), 0.0,
+            "an explicit min-width:0 must remain shrinkable to nothing"
+        );
+    }
+
+    #[test]
+    fn negative_overflow_hidden_suppresses_the_automatic_minimum() {
+        // THE DISCRIMINATOR. An item that can clip its own content stops being
+        // floored by that content. This test was IMPOSSIBLE to write until
+        // `overflow` became parseable: `overflow_x` was permanently Visible, so
+        // the spec condition could never go false and the rule was
+        // unconditional while looking conditional.
+        assert_eq!(
+            flex_item_width("overflow:hidden;"), 0.0,
+            "overflow:hidden must suppress the §4.5 automatic minimum"
+        );
+    }
+
+    #[test]
+    fn negative_scroll_and_auto_also_suppress_it() {
+        // `hidden` alone would leave "not visible" tested through a single
+        // keyword while the rule is written against every non-visible value.
+        for keyword in ["scroll", "auto", "clip"] {
+            assert_eq!(
+                flex_item_width(&format!("overflow:{keyword};")), 0.0,
+                "overflow:{keyword} must also suppress the automatic minimum"
+            );
+        }
+    }
+
+    #[test]
+    fn overflow_y_does_not_suppress_a_horizontal_main_axis() {
+        // The gate is per-AXIS: a row flex container's main axis is horizontal,
+        // so clipping vertically must not affect the horizontal floor. If both
+        // axes were consulted, this would wrongly collapse to 0.
+        let w = flex_item_width("overflow-y:hidden;");
+        assert!(
+            w > 0.0,
+            "overflow-y must not suppress the minimum on a HORIZONTAL main axis, got {w}"
+        );
     }
 }

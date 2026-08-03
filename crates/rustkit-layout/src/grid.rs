@@ -18,12 +18,12 @@
 //! - [CSS Grid Layout Module Level 2](https://www.w3.org/TR/css-grid-2/)
 
 use rustkit_css::{
-    AlignItems, AlignSelf, Display, GridAutoFlow, GridLine, GridPlacement,
-    GridTemplate, JustifyItems, JustifySelf, Length, TrackSize,
+    AlignItems, AlignSelf, ComputedStyle, Display, GridAutoFlow, GridLine, GridPlacement,
+    GridTemplate, JustifyItems, JustifySelf, Length, TrackSize, WhiteSpace,
 };
 use tracing::{debug, trace};
 
-use crate::{LayoutBox, Rect};
+use crate::{BoxType, LayoutBox, Rect};
 
 // ==================== Grid Container ====================
 
@@ -914,3 +914,380 @@ mod tests {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Intrinsic width estimation (css-sizing-3 §4)
+//
+// INTRODUCED on this tree, not repaired. The reference tree had these helpers
+// with a `if let Length::Px(v) = l { v } else { 0.0 }` closure that silently
+// dropped every relative unit, and its #81 fixed that. This tree had no
+// intrinsic estimator at all, so there is no px-only closure here to go red
+// against — these are written relative-aware from the first line, which is why
+// this leg carries feature receipts (helper-level unit tests) rather than a
+// T-RED. Manufacturing a "before" by writing the broken version first would be
+// theatre, not evidence.
+// ---------------------------------------------------------------------------
+
+/// Resolve a length used in an intrinsic-size contribution.
+///
+/// Percentages resolve to 0.0 because there is no containing block at
+/// intrinsic-sizing time. That is a STATED POLICY, not a side effect of
+/// dropping unrecognised units — the distinction matters, because the reference
+/// tree's bug was exactly a fallback that made "unsupported" and "legitimately
+/// zero" indistinguishable.
+///
+/// Everything else goes through [`crate::resolve_length_px`], the single length
+/// resolver shared with the block, flex and grid paths, so `em` follows the
+/// element's font size and `rem` follows the root constant here exactly as it
+/// does in final layout.
+///
+/// DECLARED DIVERGENCE: viewport units resolve to 0.0 here, because this tree's
+/// resolver has no viewport in scope. The reference resolves them against a
+/// hardcoded 800x600. A fabricated viewport yields a plausible WRONG number;
+/// 0.0 is visibly a non-contribution. Preferred the visible gap.
+fn intrinsic_len_px(l: &Length, style: &ComputedStyle) -> f32 {
+    match l {
+        Length::Percent(_) => 0.0,
+        other => crate::resolve_length_px(other, style, 0.0),
+    }
+}
+
+/// Horizontal margins contributing to an intrinsic size.
+fn horizontal_margins(style: &ComputedStyle) -> f32 {
+    intrinsic_len_px(&style.margin_left, style) + intrinsic_len_px(&style.margin_right, style)
+}
+
+/// Horizontal padding + border contributing to an intrinsic size.
+fn horizontal_padding_border(style: &ComputedStyle) -> f32 {
+    intrinsic_len_px(&style.padding_left, style)
+        + intrinsic_len_px(&style.padding_right, style)
+        + intrinsic_len_px(&style.border_left_width, style)
+        + intrinsic_len_px(&style.border_right_width, style)
+}
+
+/// Min-content width of a text run: the widest unbreakable unit (word).
+///
+/// DECLARED LIMITATION: `white-space` is NOT honoured here, because it is not
+/// settable on this tree — the CSS property is parsed nowhere, so that field
+/// is permanently its default. The reference tree branches on
+/// `Nowrap | Pre` to treat the whole run as unbreakable.
+///
+/// That branch is deliberately ABSENT rather than present-and-inert. Writing it
+/// would add a condition that cannot be true, which is the same shape as the
+/// `overflow` gate that had to be fixed before Flexbox §4.5 could be given an
+/// honest receipt: it would read as spec-aware, compile, and never once fire.
+/// The reachability ratchet flags exactly this, and baselining a branch THIS
+/// change introduced would be worse than not writing it.
+///
+/// Widest-word is the correct answer for `white-space: normal`, which is the
+/// only value this engine can currently express. When `white-space` gains a
+/// producer, the nowrap branch belongs in that unit.
+fn text_min_content_width(text: &str, style: &ComputedStyle) -> f32 {
+    if text.trim().is_empty() {
+        return 0.0;
+    }
+    let font_size = crate::font_size_px(style);
+    let measure = |t: &str| {
+        crate::measure_text_advanced(t, &style.font_family, font_size, style.font_weight, style.font_style)
+            .width
+    };
+    text.split_whitespace().map(measure).fold(0.0f32, f32::max)
+}
+
+/// Max-content width of a text run: the full single-line measure.
+fn text_max_content_width(text: &str, style: &ComputedStyle) -> f32 {
+    if text.trim().is_empty() {
+        return 0.0;
+    }
+    let font_size = crate::font_size_px(style);
+    crate::measure_text_advanced(text, &style.font_family, font_size, style.font_weight, style.font_style)
+        .width
+}
+
+/// True if this box is out of flow and so contributes nothing intrinsically.
+fn is_out_of_flow(layout_box: &LayoutBox) -> bool {
+    matches!(
+        layout_box.position,
+        crate::Position::Absolute | crate::Position::Fixed
+    )
+}
+
+/// Estimate of a box's min-content (border-box) width.
+///
+/// DECLARED DIVERGENCE: the reference branches on `style.box_sizing` for an
+/// explicit pixel width. This tree has NO `box_sizing` field — `BoxSizing` is a
+/// declared enum with zero consumers and the property is parsed nowhere — so
+/// that branch cannot be ported. The content-box path is implemented, which is
+/// the CSS initial value and therefore correct for every document this engine
+/// can currently express. Wiring `box-sizing` is its own producer unit; it is
+/// NOT invented here.
+pub(crate) fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
+    let style = &layout_box.style;
+    if style.display == Display::None {
+        return 0.0;
+    }
+    if let BoxType::Text(text) = &layout_box.box_type {
+        return text_min_content_width(text, style);
+    }
+    if is_out_of_flow(layout_box) {
+        return 0.0;
+    }
+
+    let padding_border = horizontal_padding_border(style);
+
+    // An explicit pixel width fixes the contribution regardless of content.
+    // Content-box only — see the box-sizing divergence above.
+    if let Length::Px(w) = style.width {
+        return w + padding_border;
+    }
+
+    // Each child stands alone (max); a block-level child interrupts an inline
+    // run. The reference additionally SUMS consecutive inline-level children
+    // under a non-wrapping `white-space`; that branch is omitted here for the
+    // same reason as in text_min_content_width — `white-space` has no producer
+    // on this tree, so the condition could never be true.
+    let nowrap = false;
+    let mut max_contribution = 0.0f32;
+    let mut inline_run = 0.0f32;
+    for child in &layout_box.children {
+        if child.style.display == Display::None || is_out_of_flow(child) {
+            continue;
+        }
+        let inline_level =
+            child.style.display.is_inline_level() || matches!(child.box_type, BoxType::Text(_));
+        let outer = estimate_min_content_width(child) + horizontal_margins(&child.style);
+        if inline_level && nowrap {
+            inline_run += outer;
+        } else {
+            max_contribution = max_contribution.max(outer);
+            if !inline_level {
+                max_contribution = max_contribution.max(inline_run);
+                inline_run = 0.0;
+            }
+        }
+    }
+    max_contribution = max_contribution.max(inline_run);
+
+    max_contribution + padding_border
+}
+
+/// Estimate of a box's max-content (border-box) width: the width it takes
+/// laying inline content on one line with no wrap opportunity taken.
+pub(crate) fn estimate_max_content_width(layout_box: &LayoutBox) -> f32 {
+    let style = &layout_box.style;
+    if style.display == Display::None {
+        return 0.0;
+    }
+    if is_out_of_flow(layout_box) {
+        return 0.0;
+    }
+    if let BoxType::Text(text) = &layout_box.box_type {
+        return text_max_content_width(text, style);
+    }
+
+    let padding_border = horizontal_padding_border(style);
+
+    if let Length::Px(w) = style.width {
+        return w + padding_border;
+    }
+
+    // A flex container's max-content main size sums its items plus main-axis
+    // gaps (row), or takes the widest item (column). Whitespace-only text never
+    // becomes a flex item, so it contributes neither width nor a gap slot.
+    //
+    // NOTE: the reference resolves this gap with a px-only match, which is the
+    // same class of drop its own #81 repaired elsewhere and left standing here.
+    // This tree uses the shared resolver, so an `em`/`rem` gap contributes.
+    if style.display.is_flex() {
+        let is_row = style.flex_direction.is_row();
+        let main_gap = intrinsic_len_px(&style.column_gap, style);
+        let mut sum = 0.0f32;
+        let mut widest = 0.0f32;
+        let mut item_count = 0usize;
+        for child in &layout_box.children {
+            if child.style.display == Display::None || is_out_of_flow(child) {
+                continue;
+            }
+            if let BoxType::Text(t) = &child.box_type {
+                if t.trim().is_empty() {
+                    continue;
+                }
+            }
+            let outer = estimate_max_content_width(child) + horizontal_margins(&child.style);
+            sum += outer;
+            widest = widest.max(outer);
+            item_count += 1;
+        }
+        let content = if is_row {
+            sum + main_gap * item_count.saturating_sub(1) as f32
+        } else {
+            widest
+        };
+        return content + padding_border;
+    }
+
+    let mut max_contribution = 0.0f32;
+    let mut inline_run = 0.0f32;
+    for child in &layout_box.children {
+        if child.style.display == Display::None || is_out_of_flow(child) {
+            continue;
+        }
+        let inline_level =
+            child.style.display.is_inline_level() || matches!(child.box_type, BoxType::Text(_));
+        let outer = estimate_max_content_width(child) + horizontal_margins(&child.style);
+        if inline_level {
+            inline_run += outer;
+        } else {
+            max_contribution = max_contribution.max(inline_run);
+            inline_run = 0.0;
+            max_contribution = max_contribution.max(outer);
+        }
+    }
+    max_contribution = max_contribution.max(inline_run);
+
+    max_contribution + padding_border
+}
+
+
+#[cfg(test)]
+mod intrinsic_width_estimation {
+    //! FEATURE receipts for the intrinsic estimators.
+    //!
+    //! There is deliberately no T-RED here, and that is not a gap. These helpers
+    //! did not exist on this tree before this change, so there is no prior
+    //! behaviour to make fail — writing the px-only version first purely to
+    //! watch it go red would be manufacturing a "before" that never shipped.
+    //! The reference tree's #81 WAS a bugfix with a real T-RED, because it had
+    //! the helpers already and they dropped relative units. Same defect class,
+    //! different receipt, because the trees are in different states.
+    //!
+    //! What these assert instead is that the helpers are relative-unit-aware
+    //! from their first line, with element font-size deliberately != 16 so a
+    //! correct implementation and a hardcoded-16 one cannot agree.
+    use super::*;
+    use rustkit_css::Length;
+
+    fn text_box(text: &str, font_px: f32) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.font_size = Length::Px(font_px);
+        LayoutBox::new(BoxType::Text(text.to_string()), s)
+    }
+
+    fn block_with_text(text: &str, font_px: f32, style: impl Fn(&mut ComputedStyle)) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.font_size = Length::Px(font_px);
+        style(&mut s);
+        let mut b = LayoutBox::new(BoxType::Block, s);
+        b.children.push(text_box(text, font_px));
+        b
+    }
+
+    #[test]
+    fn baseline_a_bare_text_run_has_a_nonzero_min_content_width() {
+        // Guards against a vacuous fixture: if this were 0, every padding
+        // assertion below would be measuring padding against nothing and would
+        // pass for the wrong reason.
+        let w = estimate_min_content_width(&text_box("Ctrl", 12.0));
+        assert!(w > 0.0, "a non-empty text run must measure > 0, got {w}");
+    }
+
+    #[test]
+    fn empty_and_whitespace_text_contribute_nothing() {
+        assert_eq!(estimate_min_content_width(&text_box("", 12.0)), 0.0);
+        assert_eq!(estimate_min_content_width(&text_box("   \n ", 12.0)), 0.0);
+    }
+
+    #[test]
+    fn px_padding_is_counted() {
+        // CONTROL for the relative-unit tests: proves padding reaches the
+        // contribution at all, so a relative-unit failure means "unit dropped"
+        // rather than "padding ignored entirely".
+        let bare = estimate_min_content_width(&block_with_text("Ctrl", 12.0, |_| {}));
+        let padded = estimate_min_content_width(&block_with_text("Ctrl", 12.0, |s| {
+            s.padding_left = Length::Px(10.0);
+            s.padding_right = Length::Px(10.0);
+        }));
+        assert_eq!(padded, bare + 20.0, "px padding must be counted");
+    }
+
+    #[test]
+    fn rem_padding_is_counted_against_the_root_constant() {
+        // font-size is 12, NOT 16: if rem were wired to the element font size
+        // this would be bare + 24 instead of bare + 32.
+        let bare = estimate_min_content_width(&block_with_text("Ctrl", 12.0, |_| {}));
+        let padded = estimate_min_content_width(&block_with_text("Ctrl", 12.0, |s| {
+            s.padding_left = Length::Rem(1.0);
+            s.padding_right = Length::Rem(1.0);
+        }));
+        assert_eq!(
+            padded, bare + 32.0,
+            "1rem padding each side must contribute 2 x 16 regardless of the element font size"
+        );
+    }
+
+    #[test]
+    fn em_padding_is_counted_against_the_element_font_size() {
+        // font-size 20, so 2em = 40 per side. A hardcoded 16 would give 32.
+        let bare = estimate_min_content_width(&block_with_text("Ctrl", 20.0, |_| {}));
+        let padded = estimate_min_content_width(&block_with_text("Ctrl", 20.0, |s| {
+            s.padding_left = Length::Em(2.0);
+            s.padding_right = Length::Em(2.0);
+        }));
+        assert_eq!(
+            padded, bare + 80.0,
+            "2em padding each side at font-size 20 must contribute 2 x 40, not 2 x 32"
+        );
+    }
+
+    #[test]
+    fn borders_count_the_same_way() {
+        let bare = estimate_min_content_width(&block_with_text("Ctrl", 20.0, |_| {}));
+        let bordered = estimate_min_content_width(&block_with_text("Ctrl", 20.0, |s| {
+            s.border_left_width = Length::Em(1.0);
+            s.border_right_width = Length::Em(1.0);
+        }));
+        assert_eq!(bordered, bare + 40.0, "em borders contribute at the element font size");
+    }
+
+    #[test]
+    fn percentages_contribute_zero_as_stated_policy() {
+        // Not a silent fallback: there is no containing block at intrinsic
+        // sizing time, so a percentage has nothing to resolve against. Pinned
+        // so the 0 is visibly a decision rather than the old "drop everything
+        // that isn't px" behaviour it superficially resembles.
+        let bare = estimate_min_content_width(&block_with_text("Ctrl", 12.0, |_| {}));
+        let pct = estimate_min_content_width(&block_with_text("Ctrl", 12.0, |s| {
+            s.padding_left = Length::Percent(50.0);
+            s.padding_right = Length::Percent(50.0);
+        }));
+        assert_eq!(pct, bare, "percentage padding contributes 0 at intrinsic time");
+    }
+
+    #[test]
+    fn display_none_and_out_of_flow_children_contribute_nothing() {
+        let mut s = ComputedStyle::new();
+        s.font_size = Length::Px(12.0);
+        let mut parent = LayoutBox::new(BoxType::Block, s.clone());
+        let mut hidden_style = s.clone();
+        hidden_style.display = Display::None;
+        let mut hidden = LayoutBox::new(BoxType::Block, hidden_style);
+        hidden.children.push(text_box("ThisIsAVeryWideString", 12.0));
+        parent.children.push(hidden);
+        assert_eq!(
+            estimate_min_content_width(&parent), 0.0,
+            "a display:none subtree must not contribute an intrinsic width"
+        );
+    }
+
+    #[test]
+    fn min_content_takes_the_widest_word_and_max_content_the_whole_run() {
+        // The two estimators must genuinely differ: min-content may break at
+        // spaces, max-content may not. If these were equal, one of them is
+        // measuring the wrong thing.
+        let b = text_box("aaa bbbbbbbbbb", 12.0);
+        let min = estimate_min_content_width(&b);
+        let max = estimate_max_content_width(&b);
+        assert!(min > 0.0 && max > min, "expected min < max, got min={min} max={max}");
+    }
+
+}
