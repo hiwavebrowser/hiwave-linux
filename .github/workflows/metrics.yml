@@ -100,6 +100,16 @@ jobs:
         shell: bash
         run: python scripts/dead_emit_check.py
 
+      # Same source-only placement again. Catches the #56 shape: two
+      # constructors for a value that is supposed to be canonical, where only
+      # one is maintained. ComputedStyle::default() is the derived door and
+      # holds Length::default() (Zero) for min-width, while new() holds the
+      # Flexbox 4.5 initial (Auto) -- a flex item built through the wrong door
+      # silently loses its content floor and the suite stays green.
+      - name: Canonical constructor check
+        shell: bash
+        run: python scripts/canonical_constructor_check.py
+
       - name: Collect metrics
         shell: bash
         run: |
