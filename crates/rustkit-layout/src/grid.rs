@@ -384,8 +384,10 @@ pub fn layout_grid_container(
     );
 
     // Compute gaps
-    let column_gap = style.column_gap.to_px(16.0, 16.0, container_width);
-    let row_gap = style.row_gap.to_px(16.0, 16.0, container_height);
+    // Gaps are a property of the grid CONTAINER, so `em` resolves against the
+    // container's own font size -- not the items', and not a hardcoded 16.
+    let column_gap = crate::resolve_length_px(&style.column_gap, style, container_width);
+    let row_gap = crate::resolve_length_px(&style.row_gap, style, container_height);
 
     // Create grid layout
     let mut grid = GridLayout::new(
