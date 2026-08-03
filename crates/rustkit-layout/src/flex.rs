@@ -709,17 +709,20 @@ fn apply_positions(
     }
 }
 
-/// Resolve a Length to pixels.
+/// Resolve a Length to pixels against a flex box's own style.
 ///
-/// CONSOLIDATED into `Length::to_px` (= Windows #42): this was a hand-written
-/// duplicate that had already drifted (hardcoded 16px font, no viewport), and
-/// `Min`/`Max`/`Clamp` made it untenable — resolving them requires recursively
-/// resolving operands with the same context, i.e. re-implementing the
-/// resolver. Behaviour is identical for every pre-existing variant:
-/// `to_px(16.0, 16.0, container)` yields Em*16, Rem*16, Percent of container,
-/// viewport units → 0.0 (no viewport in scope), Auto/Zero → 0.0. The
-/// equivalence is PROVEN by `test_resolve_length_pins_previous_behaviour`
-/// below, which keeps the previous arms verbatim.
+/// Delegates to [`crate::resolve_length_px`], the single length resolver shared
+/// with the block and grid paths: `em` uses the element's font size, `rem` uses
+/// [`crate::ROOT_FONT_SIZE_PX`], percentages use `container_size`, viewport
+/// units resolve to 0.0 (no viewport in scope here) and `Auto`/`Zero` to 0.0.
+///
+/// This was previously a hand-written duplicate that resolved `em` against a
+/// hardcoded 16 while the block oracle used the real font size, so a flex item
+/// with `margin-left: 2em` at `font-size: 20px` was placed at x=32 while its
+/// own text child was placed at x=40. Delegating rather than keeping a local
+/// match is what makes the paths agree by construction; see
+/// `test_flex_resolver_agrees_with_the_shared_crate_resolver`, which fails if
+/// they drift apart again.
 fn resolve_length(length: &Length, style: &ComputedStyle, container_size: f32) -> f32 {
     crate::resolve_length_px(length, style, container_size)
 }
