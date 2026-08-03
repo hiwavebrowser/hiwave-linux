@@ -1,0 +1,4 @@
+{
+  "_comment": "Accepted production uses of ComputedStyle::default(). Entries may only LEAVE this list; adding one is a regression and CI fails. Empty is the goal state and the current state - production builds styles through ComputedStyle::new(). Format: [path, line, text].",
+  "allowed": []
+}
