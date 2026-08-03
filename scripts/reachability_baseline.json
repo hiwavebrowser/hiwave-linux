@@ -3,8 +3,6 @@
   "unreachable_fields": [
     "justify_items",
     "justify_self",
-    "overflow_x",
-    "overflow_y",
     "text_decoration_thickness"
   ]
 }
