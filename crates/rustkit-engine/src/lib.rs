@@ -838,8 +838,14 @@ impl Engine {
         // Layout
         root_box.layout(&containing_block);
 
-        // Generate display list
-        let display_list = DisplayList::build(&root_box);
+        // Generate display list. The canvas (root background) must fill the
+        // VIEWPORT, not just the content height — hence the bounds, not the
+        // root box.
+        let display_list = DisplayList::build_with_viewport(
+            &root_box,
+            bounds.width as f32,
+            bounds.height as f32,
+        );
 
         // Count command types for debugging
         let mut solid_count = 0;
@@ -984,9 +990,18 @@ impl Engine {
             }
         }
 
-        // Create root layout box for the document
+        // Create root layout box for the document.
+        //
+        // TRANSPARENT, deliberately. This synthetic root used to hardcode
+        // WHITE as a stand-in for the page canvas — which worked while nothing
+        // implemented canvas propagation, and then silently BLOCKED it once
+        // something did: the display-list builder saw an opaque root and never
+        // fell through to the document's real background (css-backgrounds-3
+        // §2.11.2, html→body donation). A white page behind a dark-background
+        // document was this line. The compositor's clear color remains the
+        // final fallback for documents with no background at all.
         let mut root_style = ComputedStyle::new();
-        root_style.background_color = rustkit_css::Color::WHITE;
+        root_style.background_color = rustkit_css::Color::TRANSPARENT;
         let mut root_box = LayoutBox::new(BoxType::Block, root_style);
 
         // Debug: print root children to understand DOM structure
@@ -6463,5 +6478,53 @@ mod x11_content_path {
             .expect("load_html into an X11-backed view");
 
         engine.render_view(view).expect("render_view must paint via the wgpu surface");
+    }
+}
+
+#[cfg(test)]
+mod canvas_background_propagation {
+    //! css-backgrounds-3 §2.11.2: the document background fills the CANVAS
+    //! (whole viewport), not just the content's border box.
+    use super::*;
+
+    fn first_command(html: &str) -> String {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine { config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx) };
+        let doc = Document::parse_html(html).expect("parse");
+        let mut l = e.build_layout_from_document(&doc);
+        l.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 1024.0, 768.0),
+            ..Default::default()
+        });
+        let dl = rustkit_layout::DisplayList::build_with_viewport(&l, 1024.0, 768.0);
+        format!("{:?}", dl.commands.first().expect("at least one command"))
+    }
+
+    #[test]
+    fn body_background_fills_the_viewport() {
+        let cmd = first_command(
+            r#"<html><head><style>body{margin:0;background:#101820}</style></head>
+               <body><div style="width:100px;height:50px">x</div></body></html>"#);
+        assert!(cmd.contains("r: 16, g: 24, b: 32"), "canvas must be the BODY color, got {cmd}");
+        assert!(cmd.contains("width: 1024") && cmd.contains("height: 768"),
+                "canvas must be VIEWPORT-sized, got {cmd}");
+    }
+
+    #[test]
+    fn a_backgroundless_document_gets_the_ua_white_canvas() {
+        // First written asserting NO canvas fill — wrong premise, caught by the
+        // test itself: the UA default sheet paints `body` white, so a document
+        // with no author background donates UA-white to the canvas, exactly as
+        // real browsers do. The assertion now states the true contract, and
+        // still catches both failure directions: no canvas at all, and a
+        // non-white donor leaking through.
+        let cmd = first_command(
+            r#"<html><body><div style="width:100px;height:50px;background:#00a3a3">x</div></body></html>"#);
+        assert!(cmd.contains("r: 255, g: 255, b: 255"), "canvas must be UA white, got {cmd}");
+        assert!(cmd.contains("width: 1024") && cmd.contains("height: 768"),
+                "UA white must fill the viewport too, got {cmd}");
     }
 }
