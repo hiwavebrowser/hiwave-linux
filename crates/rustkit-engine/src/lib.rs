@@ -6321,3 +6321,114 @@ mod flexbox_45_automatic_minimum {
         );
     }
 }
+
+#[cfg(test)]
+mod grid_intrinsic_track_sizing {
+    //! `auto`, `min-content` and `max-content` grid tracks must be sized from
+    //! their items' content, not pinned to zero.
+    //!
+    //! Before this change all three collapsed: `GridTrack::new` gives them
+    //! `base_size = 0`, and the constructor then clamps a non-flexible track's
+    //! `INFINITY` growth limit back down to `base_size` — so an `auto` track
+    //! could never grow, and every item inside one rendered at zero width.
+    //!
+    //! The intrinsic estimators landed in #56 are the producer these tracks
+    //! needed; track sizing was the missing consumer.
+    use super::*;
+
+    /// Widths of the grid items, in tree order, with custom item text.
+    fn item_xs_with_text(grid_css: &str, text: &str) -> Vec<f32> {
+        item_xs_inner(grid_css, text)
+    }
+
+    /// Widths of the grid items, in tree order.
+    fn item_xs(grid_css: &str) -> Vec<f32> {
+        item_xs_inner(grid_css, "AAAA")
+    }
+
+    fn item_xs_inner(grid_css: &str, text: &str) -> Vec<f32> {
+        let html = format!(
+            r#"<html><head><style>body{{margin:0;padding:0}}
+               #g{{display:grid;width:900px;{grid_css}}}
+               #g>div{{font-size:16px}}</style></head>
+               <body><div id=g><div>{text}</div><div>{text}</div></div></body></html>"#
+        );
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        };
+        let doc = Document::parse_html(&html).expect("parse");
+        let mut layout = e.build_layout_from_document(&doc);
+        layout.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 900.0, 800.0),
+            ..Default::default()
+        });
+        fn find(b: &LayoutBox) -> Option<Vec<f32>> {
+            if b.style.display == rustkit_css::Display::Grid {
+                return Some(b.children.iter().map(|c| c.dimensions.content.width).collect());
+            }
+            for c in &b.children { if let Some(v) = find(c) { return Some(v); } }
+            None
+        }
+        find(&layout).expect("a grid container")
+    }
+
+    #[test]
+    fn control_explicit_px_tracks_are_unaffected() {
+        // Load-bearing: proves the harness lays out grids at all, so a zero
+        // below means "this track type collapses" rather than "grids are dead".
+        assert_eq!(item_xs("grid-template-columns:120px 120px"), vec![120.0, 120.0]);
+    }
+
+    #[test]
+    fn auto_tracks_are_sized_from_content_not_zero() {
+        let w = item_xs("grid-template-columns:auto auto");
+        assert!(
+            w[0] > 0.0 && w[1] > 0.0,
+            "an `auto` track must size to its content; got {w:?}              (0.0 means the growth limit was clamped to base_size)"
+        );
+    }
+
+    #[test]
+    fn max_content_tracks_are_sized_from_content_not_zero() {
+        let w = item_xs("grid-template-columns:max-content max-content");
+        assert!(w[0] > 0.0 && w[1] > 0.0, "max-content track collapsed: {w:?}");
+    }
+
+    #[test]
+    fn min_content_tracks_are_sized_from_content_not_zero() {
+        let w = item_xs("grid-template-columns:min-content min-content");
+        assert!(w[0] > 0.0 && w[1] > 0.0, "min-content track collapsed: {w:?}");
+    }
+
+    #[test]
+    fn max_content_is_strictly_wider_than_min_content_for_wrappable_text() {
+        // The two estimators must not be wired to the same thing.
+        //
+        // The item text is TWO words, deliberately: min-content is the widest
+        // single word, max-content is the whole run on one line, so they must
+        // DIFFER. With one word they coincide and this test would pass while
+        // proving nothing -- and before the fix it passed as 0 >= 0, which is
+        // the same emptiness in a louder disguise.
+        let mn = item_xs_with_text("grid-template-columns:min-content", "AAAA BBBBBBBB")[0];
+        let mx = item_xs_with_text("grid-template-columns:max-content", "AAAA BBBBBBBB")[0];
+        assert!(mn > 0.0, "min-content collapsed: {mn}");
+        assert!(
+            mx > mn,
+            "max-content ({mx}) must be STRICTLY wider than min-content ({mn}) \
+             for text with a wrap opportunity; equal means both are wired to the same estimator"
+        );
+    }
+
+    #[test]
+    fn an_auto_track_still_respects_an_explicit_sibling() {
+        // auto next to a fixed track must not eat the fixed track's space.
+        let w = item_xs("grid-template-columns:100px auto");
+        assert_eq!(w[0], 100.0, "explicit px track must stay exactly 100; got {w:?}");
+        assert!(w[1] > 0.0, "the auto sibling must still be content-sized; got {w:?}");
+    }
+}
+
