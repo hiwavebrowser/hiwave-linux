@@ -327,6 +327,17 @@ impl ViewHost {
         })
     }
 
+    /// Pump pending X11 events (non-blocking). Returns false when the host is
+    /// gone (no display), so a caller's loop terminates instead of spinning on
+    /// a dead connection.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn pump_messages(&self) -> bool {
+        match self.x11.as_ref() {
+            Some(h) => h.pump_messages(),
+            None => false,
+        }
+    }
+
     /// Create a top-level X11 window usable as a parent for views.
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn create_main_window(&self, config: MainWindowConfig) -> Result<u64, ViewHostError> {

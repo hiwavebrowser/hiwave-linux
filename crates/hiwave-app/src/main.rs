@@ -74,8 +74,12 @@ mod webview;
 mod webview_rustkit;
 #[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
 mod shield_adapter;
+#[cfg(not(feature = "native-linux"))]
 mod content_webview_trait;
+#[cfg(not(feature = "native-linux"))]
 mod content_webview_enum;
+#[cfg(not(feature = "native-linux"))]
+#[allow(unused_imports)]
 use content_webview_enum::ContentWebView as UnifiedContentWebView;
 // mod shield_adapter;
 

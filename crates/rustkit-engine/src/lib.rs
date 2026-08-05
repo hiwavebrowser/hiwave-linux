@@ -491,6 +491,13 @@ impl Engine {
         ))
     }
 
+    /// The viewhost (window system layer). Public so a native shell can create
+    /// the parent window and pump its event loop without the engine having to
+    /// re-export every windowing call.
+    pub fn viewhost(&self) -> &ViewHost {
+        &self.viewhost
+    }
+
     /// Destroy a view.
     pub fn destroy_view(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let view = self
