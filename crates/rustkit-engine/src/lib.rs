@@ -401,13 +401,94 @@ impl Engine {
         Ok(id)
     }
 
-    #[cfg(not(windows))]
+    /// Create a new view on X11.
+    ///
+    /// `parent` is the X11 window id of the host window.
+    ///
+    /// This used to be a stub returning "create_view is only supported on
+    /// Windows", which meant the engine could parse, style and lay out a full
+    /// page on Linux and then had nowhere to draw it — the largest
+    /// producer-without-consumer in the tree. The compositor was already
+    /// portable (wgpu: Vulkan/GL here, D3D there); only the surface handle was
+    /// Windows-bound.
+    ///
+    /// Mirrors the Windows path step for step: viewhost view -> native window
+    /// -> compositor surface -> view state -> initial paint. Kept in the same
+    /// order deliberately so the two can be diffed.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn create_view(
+        &mut self,
+        parent: u64,
+        bounds: Bounds,
+    ) -> Result<EngineViewId, EngineError> {
+        let id = EngineViewId::new();
+
+        debug!(?id, ?bounds, parent, "Creating view (X11)");
+
+        let viewhost_id = self
+            .viewhost
+            .create_view(parent, bounds)
+            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+
+        let x11_window = self
+            .viewhost
+            .get_x11_window(viewhost_id)
+            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+
+        unsafe {
+            self.compositor
+                .create_surface_for_x11(
+                    viewhost_id,
+                    self.viewhost.display_ptr() as *mut std::ffi::c_void,
+                    x11_window,
+                    self.viewhost.screen_number(),
+                    bounds.width,
+                    bounds.height,
+                )
+                .map_err(|e| EngineError::RenderError(e.to_string()))?;
+        }
+
+        let (nav_tx, nav_rx) = mpsc::unbounded_channel();
+        let navigation = NavigationStateMachine::new(nav_tx);
+
+        let view_state = ViewState {
+            id,
+            viewhost_id,
+            url: None,
+            title: None,
+            document: None,
+            layout: None,
+            display_list: None,
+            bindings: None,
+            navigation,
+            nav_event_rx: nav_rx,
+            focused_node: None,
+            view_focused: false,
+            external_css: String::new(),
+        };
+
+        self.views.insert(id, view_state);
+
+        self.compositor
+            .render_solid_color(viewhost_id, self.config.background_color)
+            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+
+        info!(?id, "View created (X11)");
+        Ok(id)
+    }
+
+    /// Fallback for platforms with no view backend yet (currently macOS in this
+    /// tree). Kept explicit so an unsupported platform fails loudly rather than
+    /// silently producing a view that cannot paint.
+    #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
     pub fn create_view(
         &mut self,
         _parent: usize,
         _bounds: Bounds,
     ) -> Result<EngineViewId, EngineError> {
-        Err(EngineError::RenderError("create_view is only supported on Windows".to_string()))
+        Err(EngineError::RenderError(
+            "create_view has no backend on this platform".to_string(),
+        ))
     }
 
     /// Destroy a view.
@@ -6319,5 +6400,61 @@ mod flexbox_45_automatic_minimum {
             w > 0.0,
             "overflow-y must not suppress the minimum on a HORIZONTAL main axis, got {w}"
         );
+    }
+}
+
+#[cfg(test)]
+mod x11_content_path {
+    //! The engine must be able to create a real X11-backed view and paint into
+    //! it. Until this existed, `create_view` on Linux returned
+    //! "create_view is only supported on Windows" — the engine could parse,
+    //! style and lay out a whole page and had nowhere to draw it.
+    //!
+    //! Requires a live X server. On a headless machine `X11ViewHost::new` fails
+    //! and the test SKIPS rather than failing: a missing display is an
+    //! environment fact, not a defect, and a test that goes red on CI for
+    //! having no monitor teaches everyone to ignore it.
+    use super::*;
+
+    fn have_display() -> bool {
+        std::env::var("DISPLAY").map(|d| !d.is_empty()).unwrap_or(false)
+    }
+
+    #[test]
+    fn rustkit_creates_an_x11_view_and_paints_a_page() {
+        if !have_display() {
+            eprintln!("SKIP: no DISPLAY; X11 content path not exercised");
+            return;
+        }
+        let mut engine = EngineBuilder::new().build().expect("engine");
+
+        let parent = engine
+            .viewhost
+            .create_main_window(rustkit_viewhost::MainWindowConfig {
+                title: "rustkit x11 content path".to_string(),
+                width: 800,
+                height: 600,
+                resizable: true,
+                centered: true,
+            })
+            .expect("X11 main window");
+        assert_ne!(parent, 0, "main window id must be a real X11 window, not 0");
+
+        let view = engine
+            .create_view(
+                parent,
+                rustkit_viewhost::Bounds { x: 0, y: 0, width: 800, height: 600 },
+            )
+            .expect("create_view must succeed on X11");
+
+        // A view with no native window would fail here rather than at creation,
+        // which is the failure mode the old stub produced: it returned Ok with
+        // hwnd_raw = 0 and the problem surfaced much later, somewhere else.
+        engine
+            .load_html(view, "<html><body><div style='width:200px;height:100px;\
+                              background:#0aa'>x</div></body></html>")
+            .expect("load_html into an X11-backed view");
+
+        engine.render_view(view).expect("render_view must paint via the wgpu surface");
     }
 }

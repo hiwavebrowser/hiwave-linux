@@ -276,6 +276,18 @@ pub struct ViewHost {
     /// Main window HWND (if created via create_main_window).
     #[cfg(windows)]
     main_hwnd: RwLock<Option<isize>>,
+    /// X11 backend.
+    ///
+    /// `None` when no X server is reachable (headless CI, no DISPLAY). Held as
+    /// an Option rather than constructed eagerly so that merely creating a
+    /// ViewHost cannot fail on a machine with no display — the failure surfaces
+    /// at create_view, where it is actionable, instead of at startup.
+    ///
+    /// Before this field existed, `linux::X11ViewHost` was 278 lines of working
+    /// X11 code with ZERO callers outside a comment: the backend existed and
+    /// was unreachable.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    x11: Option<crate::linux::X11ViewHost>,
 }
 
 impl ViewHost {
@@ -289,11 +301,82 @@ impl ViewHost {
             }
         }
 
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let x11 = match crate::linux::X11ViewHost::new() {
+            Ok(host) => Some(host),
+            Err(e) => {
+                tracing::warn!(error = %e, "No X11 display available; views cannot be created");
+                None
+            }
+        };
+
         Self {
             views: RwLock::new(HashMap::new()),
             #[cfg(windows)]
             main_hwnd: RwLock::new(None),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            x11,
         }
+    }
+
+    /// X11 backend accessor, erroring when no display is available.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn x11(&self) -> Result<&crate::linux::X11ViewHost, ViewHostError> {
+        self.x11.as_ref().ok_or_else(|| {
+            ViewHostError::WindowCreation("no X11 display available".to_string())
+        })
+    }
+
+    /// Create a top-level X11 window usable as a parent for views.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn create_main_window(&self, config: MainWindowConfig) -> Result<u64, ViewHostError> {
+        self.x11()?.create_main_window(config)
+    }
+
+    /// Create a child view under an X11 parent window.
+    ///
+    /// Registers the view in BOTH the X11 backend and `self.views`. The first
+    /// attempt at this delegated to X11 only, and every ViewHost method that
+    /// reads `self.views` then reported "view not found" for a view that
+    /// demonstrably existed — two maps for one thing, one of them maintained.
+    /// The X11 id is the single source of truth for the native window; this
+    /// mirror exists so the shared, platform-independent accessors keep working.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn create_view(&self, parent: u64, bounds: Bounds) -> Result<ViewId, ViewHostError> {
+        let id = self.x11()?.create_view(parent, bounds)?;
+        let window = self.x11()?.get_x11_window(id)?;
+
+        let state = Arc::new(Mutex::new(ViewState {
+            id,
+            hwnd_raw: window as isize,
+            bounds,
+            dpi: 96,
+            visible: true,
+            focused: false,
+        }));
+        self.views.write().unwrap().insert(id, state);
+        Ok(id)
+    }
+
+    /// Native X11 window id for a view.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn get_x11_window(&self, id: ViewId) -> Result<u64, ViewHostError> {
+        self.x11()?.get_x11_window(id)
+    }
+
+    /// Raw X11 display pointer.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn display_ptr(&self) -> *mut std::ffi::c_void {
+        self.x11
+            .as_ref()
+            .map(|h| h.display_ptr() as *mut std::ffi::c_void)
+            .unwrap_or(std::ptr::null_mut())
+    }
+
+    /// X11 screen number.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn screen_number(&self) -> i32 {
+        self.x11.as_ref().map(|h| h.screen_number()).unwrap_or(0)
     }
 
     /// Create a top-level main window.
@@ -622,25 +705,11 @@ impl ViewHost {
         Ok(view_id)
     }
 
-    /// Create a new view (non-Windows stub).
-    #[cfg(not(windows))]
-    pub fn create_view(
-        &self,
-        _parent: (),
-        initial_bounds: Bounds,
-    ) -> Result<ViewId, ViewHostError> {
-        let view_id = ViewId::new();
-        let state = Arc::new(Mutex::new(ViewState {
-            id: view_id,
-            hwnd_raw: 0,
-            bounds: initial_bounds,
-            dpi: 96,
-            visible: true,
-            focused: false,
-        }));
-        self.views.write().unwrap().insert(view_id, state);
-        Ok(view_id)
-    }
+    // The non-Windows `create_view` stub that used to live here RETURNED Ok
+    // with `hwnd_raw: 0` — a view with no native window, indistinguishable to
+    // the caller from a real one. That is worse than an error: it succeeded.
+    // Replaced by the real X11 implementation above.
+
 
     /// Set the bounds of a view.
     pub fn set_bounds(&self, view_id: ViewId, bounds: Bounds) -> Result<(), ViewHostError> {
@@ -1283,13 +1352,36 @@ mod tests {
         assert_eq!(host.view_count(), 0);
     }
 
-    #[cfg(not(windows))]
+    /// View lifecycle over a REAL X11 window.
+    ///
+    /// This replaces `test_view_lifecycle_stub`, which exercised the removed
+    /// non-Windows stub — the one that returned Ok with `hwnd_raw: 0`. That
+    /// test passed for a view that had no native window at all, so it asserted
+    /// the bookkeeping of a fiction. Same lifecycle assertions, real window.
+    ///
+    /// Skips without a display: no X server is an environment fact, not a
+    /// defect, and a suite that goes red for having no monitor gets ignored.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn test_view_lifecycle_stub() {
+    fn test_view_lifecycle_on_x11() {
+        if std::env::var("DISPLAY").map(|d| d.is_empty()).unwrap_or(true) {
+            eprintln!("SKIP: no DISPLAY");
+            return;
+        }
         let host = ViewHost::new();
         let bounds = Bounds::new(0, 0, 800, 600);
 
-        let view_id = host.create_view((), bounds).unwrap();
+        let parent = host
+            .create_main_window(MainWindowConfig {
+                title: "viewhost lifecycle".to_string(),
+                width: 800,
+                height: 600,
+                resizable: true,
+                centered: false,
+            })
+            .expect("X11 main window");
+
+        let view_id = host.create_view(parent, bounds).unwrap();
         assert_eq!(host.view_count(), 1);
 
         assert_eq!(host.get_bounds(view_id).unwrap(), bounds);

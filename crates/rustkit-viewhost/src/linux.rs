@@ -126,6 +126,28 @@ impl X11ViewHost {
         }
     }
 
+    /// Native X11 window id for a view.
+    ///
+    /// The compositor needs this to build a surface. Without an accessor the
+    /// viewhost could create views that nothing could ever draw into — the
+    /// window existed and was unreachable.
+    pub fn get_x11_window(&self, id: ViewId) -> Result<Window, ViewHostError> {
+        let views = self.views.read().unwrap();
+        let state = views.get(&id).ok_or(ViewHostError::ViewNotFound(id))?;
+        let state = state.lock().unwrap();
+        Ok(state.window)
+    }
+
+    /// Raw X11 display pointer for this host.
+    pub fn display_ptr(&self) -> *mut Display {
+        self.display
+    }
+
+    /// X11 screen number for this host.
+    pub fn screen_number(&self) -> i32 {
+        self.screen
+    }
+
     /// Create a child view in the given parent.
     pub fn create_view(&self, parent: Window, bounds: Bounds) -> Result<ViewId, ViewHostError> {
         let view_id = ViewId::new();

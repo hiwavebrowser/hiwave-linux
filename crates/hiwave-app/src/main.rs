@@ -67,7 +67,16 @@ mod ipc;
 mod webview;
 
 // RustKit integration (not yet implemented for Linux - placeholder for future X11/Wayland support)
-// mod webview_rustkit;
+// RustKit content path. Present only when the rustkit feature is on and the
+// WebKit fallback is off -- the two are mutually exclusive by construction, so
+// a build cannot silently link both content engines.
+#[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
+mod webview_rustkit;
+#[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
+mod shield_adapter;
+mod content_webview_trait;
+mod content_webview_enum;
+use content_webview_enum::ContentWebView as UnifiedContentWebView;
 // mod shield_adapter;
 
 #[cfg(not(feature = "native-linux"))]

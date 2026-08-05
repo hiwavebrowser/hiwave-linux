@@ -77,6 +77,42 @@ pub fn set_webview_bounds(webview: &WebView, x: f64, y: f64, width: f64, height:
 /// Note: This trait is NOT Send because WebView handles are not thread-safe.
 /// All WebView operations must be performed on the main/UI thread.
 #[allow(dead_code)]
+use hiwave_core::HiWaveResult;
+use url::Url;
+
+/// Content-pane operations, independent of which engine paints it.
+///
+/// Ported from the reference tree so the RustKit content view and the WRY
+/// fallback present the same surface to the app shell. This is the seam that
+/// lets the content engine be swapped without the shell knowing which one it
+/// is talking to -- and therefore the seam that makes removing WRY possible
+/// rather than merely desirable.
+pub trait IWebContent {
+    /// Navigate to a URL
+    fn navigate(&mut self, url: &Url) -> HiWaveResult<()>;
+
+    /// Execute JavaScript in the page context
+    fn execute_script(&self, script: &str) -> HiWaveResult<String>;
+
+    /// Get the current URL
+    fn get_url(&self) -> Option<Url>;
+
+    /// Check if navigation back is possible
+    fn can_go_back(&self) -> bool;
+
+    /// Check if navigation forward is possible
+    fn can_go_forward(&self) -> bool;
+
+    /// Navigate back in history
+    fn go_back(&mut self) -> HiWaveResult<()>;
+
+    /// Navigate forward in history
+    fn go_forward(&mut self) -> HiWaveResult<()>;
+
+    /// Reload the current page
+    fn reload(&mut self) -> HiWaveResult<()>;
+}
+
 pub trait IWebView {
     /// Load a URL in the WebView
     fn load_url(&self, url: &str);
