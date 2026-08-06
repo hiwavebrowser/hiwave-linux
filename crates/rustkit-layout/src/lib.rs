@@ -868,6 +868,31 @@ impl LayoutBox {
             _ => self.length_to_px(&style.width, containing_block.content.width),
         };
 
+        // css2 §10.3.3: with a definite width, `margin: auto` absorbs the
+        // leftover space — both sides auto splits it (this is `margin: 0 auto`
+        // centering), one side auto takes all of it. `length_to_px` maps Auto
+        // to 0, which is correct for the WIDTH computation above but loses the
+        // distinction here, so the auto-ness is re-checked on the style.
+        let (margin_left, margin_right) = if !matches!(style.width, Length::Auto) {
+            let leftover = (containing_block.content.width
+                - content_width
+                - border_left - border_right
+                - padding_left - padding_right
+                - margin_left - margin_right)
+                .max(0.0);
+            match (
+                matches!(style.margin_left, Length::Auto),
+                matches!(style.margin_right, Length::Auto),
+            ) {
+                (true, true) => (leftover / 2.0, leftover / 2.0),
+                (true, false) => (leftover, margin_right),
+                (false, true) => (margin_left, leftover),
+                (false, false) => (margin_left, margin_right),
+            }
+        } else {
+            (margin_left, margin_right)
+        };
+
         self.dimensions.content.width = content_width;
         self.dimensions.margin.left = margin_left;
         self.dimensions.margin.right = margin_right;

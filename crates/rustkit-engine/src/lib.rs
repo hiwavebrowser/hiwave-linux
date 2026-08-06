@@ -3395,26 +3395,46 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                     }
                 }
                 "margin" => {
-                    if let Some(length) = parse_length(value) {
-                        // Length is not Copy: clone for all but the last
-                        // assignment, which still moves (= Windows #42).
-                        style.margin_top = length.clone();
-                        style.margin_right = length.clone();
-                        style.margin_bottom = length.clone();
-                        style.margin_left = length;
+                    if let Some((t, r, b, l)) = parse_box_shorthand(value) {
+                        style.margin_top = t;
+                        style.margin_right = r;
+                        style.margin_bottom = b;
+                        style.margin_left = l;
                     }
                 }
                 "padding" => {
-                    if let Some(length) = parse_length(value) {
-                        style.padding_top = length.clone();
-                        style.padding_right = length.clone();
-                        style.padding_bottom = length.clone();
-                        style.padding_left = length;
+                    if let Some((t, r, b, l)) = parse_box_shorthand(value) {
+                        style.padding_top = t;
+                        style.padding_right = r;
+                        style.padding_bottom = b;
+                        style.padding_left = l;
                     }
                 }
                 _ => {}
             }
         }
+    }
+}
+
+/// Expand a 1–4 value margin/padding shorthand per CSS box rules.
+///
+/// Returns (top, right, bottom, left), or None if any token fails to parse —
+/// an invalid declaration is DROPPED whole, never half-applied.
+///
+/// The old `"margin"` arm called `parse_length(value)` on the ENTIRE value
+/// string, so any multi-value form ("80px auto", "0 auto", "1px 2px 3px 4px")
+/// failed the parse and was silently dropped — `margin: 80px auto` set
+/// NOTHING, not even the 80px. Which is why `margin: 0 auto` centering could
+/// never work regardless of what layout did with Auto.
+fn parse_box_shorthand(value: &str) -> Option<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Length, rustkit_css::Length)> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    let lens: Vec<rustkit_css::Length> = parts.iter().map(|p| parse_length(p)).collect::<Option<_>>()?;
+    match lens.as_slice() {
+        [a] => Some((a.clone(), a.clone(), a.clone(), a.clone())),
+        [v, h] => Some((v.clone(), h.clone(), v.clone(), h.clone())),
+        [t, h, b] => Some((t.clone(), h.clone(), b.clone(), h.clone())),
+        [t, r, b, l] => Some((t.clone(), r.clone(), b.clone(), l.clone())),
+        _ => None,
     }
 }
 
@@ -6526,5 +6546,83 @@ mod canvas_background_propagation {
         assert!(cmd.contains("r: 255, g: 255, b: 255"), "canvas must be UA white, got {cmd}");
         assert!(cmd.contains("width: 1024") && cmd.contains("height: 768"),
                 "UA white must fill the viewport too, got {cmd}");
+    }
+}
+
+#[cfg(test)]
+mod box_shorthand_and_auto_margins {
+    //! `margin: 0 auto` centering needs BOTH halves: the shorthand must parse
+    //! multi-value forms, and layout must give leftover space to auto margins.
+    //! Each was broken independently, so fixing either alone changed nothing
+    //! visible — which is why the card stayed pinned left after the layout fix.
+    use super::*;
+    use rustkit_css::Length;
+
+    fn applied(decls: &str) -> ComputedStyle {
+        let mut s = ComputedStyle::default();
+        apply_inline_style_decls(&mut s, decls);
+        s
+    }
+
+    #[test]
+    fn two_value_shorthand_no_longer_drops_everything() {
+        // Before: parse_length() was called on the WHOLE value string, so
+        // "80px auto" failed to parse and NOTHING was set — not even the 80px.
+        let s = applied("margin: 80px auto");
+        assert_eq!(s.margin_top, Length::Px(80.0));
+        assert_eq!(s.margin_bottom, Length::Px(80.0));
+        assert_eq!(s.margin_left, Length::Auto);
+        assert_eq!(s.margin_right, Length::Auto);
+    }
+
+    #[test]
+    fn one_three_and_four_value_forms() {
+        let one = applied("padding: 10px");
+        assert_eq!((one.padding_top, one.padding_left), (Length::Px(10.0), Length::Px(10.0)));
+
+        let three = applied("margin: 1px 2px 3px");
+        assert_eq!(three.margin_top, Length::Px(1.0));
+        assert_eq!(three.margin_right, Length::Px(2.0));
+        assert_eq!(three.margin_bottom, Length::Px(3.0));
+        assert_eq!(three.margin_left, Length::Px(2.0), "left mirrors right in the 3-value form");
+
+        let four = applied("margin: 1px 2px 3px 4px");
+        assert_eq!(four.margin_left, Length::Px(4.0));
+    }
+
+    #[test]
+    fn an_invalid_token_drops_the_whole_declaration() {
+        // Half-applying a shorthand is worse than ignoring it.
+        let mut s = ComputedStyle::default();
+        s.margin_top = Length::Px(5.0);
+        apply_inline_style_decls(&mut s, "margin: 10px nonsense");
+        assert_eq!(s.margin_top, Length::Px(5.0), "invalid shorthand must not partially apply");
+    }
+
+    #[test]
+    fn auto_margins_center_a_definite_width_block() {
+        let html = r#"<html><head><style>body{margin:0}
+            #c{width:400px;height:50px;margin:0 auto}</style></head>
+            <body><div id=c>x</div></body></html>"#;
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine { config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx) };
+        let doc = Document::parse_html(html).expect("parse");
+        let mut l = e.build_layout_from_document(&doc);
+        l.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 1000.0, 600.0),
+            ..Default::default()
+        });
+        fn find(b: &LayoutBox, out: &mut Vec<(f32, f32)>) {
+            if b.dimensions.content.width == 400.0 { out.push((b.dimensions.content.x, b.dimensions.content.width)); }
+            for c in &b.children { find(c, out); }
+        }
+        let mut hits = Vec::new();
+        find(&l, &mut hits);
+        let (x, w) = *hits.first().expect("the 400px block");
+        assert_eq!(w, 400.0);
+        assert_eq!(x, 300.0, "(1000-400)/2 = 300; a left-pinned box reports 0");
     }
 }
