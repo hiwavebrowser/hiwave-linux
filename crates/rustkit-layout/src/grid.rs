@@ -44,11 +44,35 @@ pub struct GridTrack {
     pub position: f32,
     /// Line names before this track.
     pub line_names: Vec<String>,
+    /// Which content-based sizing function this track uses, if any.
+    ///
+    /// Needed because `auto`, `min-content` and `max-content` all arrive here
+    /// as `base_size: 0.0` and are indistinguishable afterwards. Without this
+    /// the sizing pass cannot tell a track that should hug its content from one
+    /// the author genuinely asked to be zero.
+    pub intrinsic: Option<IntrinsicSizing>,
+}
+
+/// The content-based sizing function a track was declared with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntrinsicSizing {
+    /// `min-content` — the largest unbreakable unit.
+    MinContent,
+    /// `max-content` — the whole content on one line.
+    MaxContent,
+    /// `auto` — min-content floor, max-content ceiling.
+    Auto,
 }
 
 impl GridTrack {
     /// Create a new track with default sizing.
     pub fn new(size: &TrackSize) -> Self {
+        let intrinsic = match size {
+            TrackSize::MinContent => Some(IntrinsicSizing::MinContent),
+            TrackSize::MaxContent => Some(IntrinsicSizing::MaxContent),
+            TrackSize::Auto => Some(IntrinsicSizing::Auto),
+            _ => None,
+        };
         let (base_size, growth_limit, flex_factor) = match size {
             TrackSize::Px(v) => (*v, *v, 0.0),
             TrackSize::Percent(_) => (0.0, f32::INFINITY, 0.0),
@@ -75,8 +99,18 @@ impl GridTrack {
 
         Self {
             base_size,
+            intrinsic,
             // For flexible tracks, keep growth_limit as INFINITY
             // For non-flexible tracks with INFINITY growth limit, clamp to base_size
+            //
+            // NOTE: this clamp is left EXACTLY as it was. Changing it to preserve
+            // the INFINITY ceiling for content-based tracks looks like part of
+            // this fix and is measurably inert -- resolve_intrinsic_column_sizes
+            // assigns growth_limit directly, so the constructor's value never
+            // survives for any track it touches, and for tracks it skips (empty
+            // ones) the observable layout is identical either way. Measured both
+            // ways across auto/auto+px/multi-track fixtures: byte-identical
+            // output. Not shipping a plausible no-op alongside a real fix.
             growth_limit: if flex_factor > 0.0 {
                 f32::INFINITY
             } else if growth_limit == f32::INFINITY {
@@ -525,6 +559,10 @@ pub fn layout_grid_container(
     }
 
     // Phase 3: Size tracks
+    //
+    // Content-based column tracks get their base size from their items first;
+    // the template alone cannot know it.
+    resolve_intrinsic_column_sizes(&mut grid.columns, &items);
     size_grid_tracks(&mut grid.columns, container_width, column_gap);
     size_grid_tracks(&mut grid.rows, container_height, row_gap);
 
@@ -625,6 +663,69 @@ pub fn layout_grid_container(
 }
 
 /// Size grid tracks using the track sizing algorithm.
+/// Fill in base sizes for content-based COLUMN tracks from the items in them.
+///
+/// `auto`, `min-content` and `max-content` all arrive from the template with
+/// `base_size: 0.0` — the template says *how* to size the track, not how big it
+/// is, because that depends on content the template has never seen. Until this
+/// ran, nothing ever supplied the missing number, so those tracks stayed at
+/// zero and their items rendered invisible.
+///
+/// css-grid-2 §12.4, restricted to the single-span case:
+///   min-content track -> max of its items' min-content contributions
+///   max-content track -> max of its items' max-content contributions
+///   auto track        -> min-content floor, max-content ceiling
+///
+/// DECLARED LIMIT — SPANNING ITEMS ARE NOT DISTRIBUTED. An item spanning
+/// several intrinsic tracks contributes to none of them, exactly as before this
+/// change. The spec distributes such an item's contribution across the tracks
+/// it spans (§12.5); the reference tree implements that and this tree does not.
+/// The restriction is deliberate and visible rather than silently partial: a
+/// spanning item leaves its tracks at their previous size, which is the old
+/// behaviour, not a new wrong number.
+///
+/// DECLARED LIMIT — COLUMNS ONLY. Rows would need a min-content HEIGHT
+/// estimator, which does not exist on this tree (the same gap that leaves the
+/// flex vertical main axis at 0.0 in the §4.5 rule). Inventing one here would
+/// be a fabricated number; row tracks keep their existing behaviour.
+fn resolve_intrinsic_column_sizes(tracks: &mut [GridTrack], items: &[GridItem]) {
+    for (index, track) in tracks.iter_mut().enumerate() {
+        let Some(kind) = track.intrinsic else { continue };
+        let line = index as i32 + 1;
+
+        let mut min_content = 0.0f32;
+        let mut max_content = 0.0f32;
+        let mut contributors = 0usize;
+
+        for item in items {
+            // Single-span only — see the spanning limit above.
+            if item.column_start != line || item.column_end != line + 1 {
+                continue;
+            }
+            let outer = horizontal_margins(&item.layout_box.style);
+            min_content = min_content.max(estimate_min_content_width(item.layout_box) + outer);
+            max_content = max_content.max(estimate_max_content_width(item.layout_box) + outer);
+            contributors += 1;
+        }
+
+        if contributors == 0 {
+            // An empty intrinsic track is legitimately zero-sized. Leave it,
+            // rather than letting a later step invent a size for a track with
+            // nothing in it.
+            continue;
+        }
+
+        let (base, limit) = match kind {
+            IntrinsicSizing::MinContent => (min_content, min_content),
+            IntrinsicSizing::MaxContent => (max_content, max_content),
+            IntrinsicSizing::Auto => (min_content, max_content),
+        };
+        track.base_size = base;
+        track.growth_limit = limit.max(base);
+        track.size = base;
+    }
+}
+
 fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
     if tracks.is_empty() {
         return;
