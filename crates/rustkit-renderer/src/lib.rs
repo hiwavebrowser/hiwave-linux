@@ -124,6 +124,22 @@ pub struct ColorVertex {
     pub color: [f32; 4],
 }
 
+/// Convert one 8-bit sRGB channel to LINEAR light, which is what an
+/// `*Srgb`-format render target expects from the shader.
+///
+/// The surface is `Bgra8UnormSrgb`: the GPU applies the linear→sRGB transfer
+/// on WRITE. Feeding it raw `byte / 255` — already-encoded sRGB — applies the
+/// encoding twice, which brightens everything and crushes darks:
+/// css `#101820` rgb(16,24,32) came out on screen as slate rgb(~73,87,99).
+/// Every dark color on every page was wrong; bright colors distorted less,
+/// which is exactly why it survived visual inspection until a near-black
+/// canvas made it obvious.
+#[inline]
+fn srgb_u8_to_linear(c: u8) -> f32 {
+    let x = c as f32 / 255.0;
+    if x <= 0.04045 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+}
+
 impl ColorVertex {
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<ColorVertex>() as wgpu::BufferAddress,
@@ -649,9 +665,9 @@ impl Renderer {
                     let ny = dx / len * width * 0.5;
                     
                     let c = [
-                        color.r as f32 / 255.0,
-                        color.g as f32 / 255.0,
-                        color.b as f32 / 255.0,
+                        srgb_u8_to_linear(color.r),
+                        srgb_u8_to_linear(color.g),
+                        srgb_u8_to_linear(color.b),
                         color.a,
                     ];
                     
@@ -686,9 +702,9 @@ impl Renderer {
                 // Simple triangle fan for convex polygons
                 if points.len() >= 3 {
                     let c = [
-                        color.r as f32 / 255.0,
-                        color.g as f32 / 255.0,
-                        color.b as f32 / 255.0,
+                        srgb_u8_to_linear(color.r),
+                        srgb_u8_to_linear(color.g),
+                        srgb_u8_to_linear(color.b),
                         color.a,
                     ];
                     
@@ -1014,9 +1030,9 @@ impl Renderer {
         };
 
         let c = [
-            color.r as f32 / 255.0,
-            color.g as f32 / 255.0,
-            color.b as f32 / 255.0,
+            srgb_u8_to_linear(color.r),
+            srgb_u8_to_linear(color.g),
+            srgb_u8_to_linear(color.b),
             color.a,
         ];
 
@@ -1084,9 +1100,9 @@ impl Renderer {
     ) {
         let mut cursor_x = x;
         let c = [
-            color.r as f32 / 255.0,
-            color.g as f32 / 255.0,
-            color.b as f32 / 255.0,
+            srgb_u8_to_linear(color.r),
+            srgb_u8_to_linear(color.g),
+            srgb_u8_to_linear(color.b),
             color.a,
         ];
 
@@ -1442,3 +1458,38 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod srgb_transfer {
+    use super::srgb_u8_to_linear;
+
+    /// Encode linear back to an sRGB byte — the exact inverse the GPU applies
+    /// on write to an `*Srgb` target.
+    fn linear_to_srgb_u8(x: f32) -> u8 {
+        let e = if x <= 0.0031308 { x * 12.92 } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 };
+        (e * 255.0).round() as u8
+    }
+
+    #[test]
+    fn every_byte_round_trips_through_the_surface_transfer() {
+        // If decode is right, GPU-encode returns the original byte for all 256
+        // values. The old code skipped the decode, so the surface's encode ran
+        // on already-encoded values: 16 -> 73, 24 -> 87, 32 -> 99 — the slate
+        // canvas the screenshot showed where #101820 belonged.
+        for b in 0..=255u8 {
+            assert_eq!(linear_to_srgb_u8(srgb_u8_to_linear(b)), b, "byte {b}");
+        }
+    }
+
+    #[test]
+    fn the_bug_shape_is_pinned() {
+        // What the OLD path produced for #101820's red channel: treat the byte
+        // as linear and let the surface encode it. Kept as a named number so
+        // regressions are recognizable on sight in a diff. (First pinned as 73
+        // from an eyeball read of the old screenshot; the transfer function
+        // says 71, and the formula outranks my eye.)
+        let old_wrong = linear_to_srgb_u8(16.0 / 255.0);
+        assert_eq!(old_wrong, 71, "double-encoding 16 must give the washed-out value");
+        assert_ne!(linear_to_srgb_u8(srgb_u8_to_linear(16)), old_wrong);
+    }
+}
