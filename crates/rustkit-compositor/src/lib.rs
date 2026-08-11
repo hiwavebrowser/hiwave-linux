@@ -169,6 +169,51 @@ impl Compositor {
         })
     }
 
+    /// Create a surface for a view backed by an X11 window.
+    ///
+    /// This is the Linux counterpart of `create_surface_for_hwnd`. The heavy
+    /// lifting is wgpu's: the compositor is already portable (Vulkan/GL on
+    /// Linux, D3D on Windows) and the only thing that was ever Windows-bound
+    /// was constructing the raw handle. Before this existed, `create_surface_*`
+    /// was `#[cfg(windows)]` ONLY, so the engine could lay out a full page on
+    /// Linux and had nowhere to draw it.
+    ///
+    /// # Safety
+    ///
+    /// `display` must be a valid `*mut Display` for the X server connection and
+    /// `window` a valid window on it, both outliving the surface.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub unsafe fn create_surface_for_x11(
+        &self,
+        view_id: ViewId,
+        display: *mut std::ffi::c_void,
+        window: u64,
+        screen: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CompositorError> {
+        use raw_window_handle::{
+            RawDisplayHandle, RawWindowHandle, XlibDisplayHandle, XlibWindowHandle,
+        };
+
+        debug!(?view_id, width, height, window, "Creating X11 surface");
+
+        let display_handle = XlibDisplayHandle::new(std::ptr::NonNull::new(display), screen);
+        let window_handle = XlibWindowHandle::new(window);
+
+        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: RawDisplayHandle::Xlib(display_handle),
+            raw_window_handle: RawWindowHandle::Xlib(window_handle),
+        };
+
+        let surface = self
+            .instance
+            .create_surface_unsafe(target)
+            .map_err(|e| CompositorError::SurfaceCreation(e.to_string()))?;
+
+        self.configure_and_store_surface(view_id, surface, width, height)
+    }
+
     /// Create a surface for a view.
     ///
     /// # Safety
@@ -208,14 +253,44 @@ impl Compositor {
             .create_surface_unsafe(target)
             .map_err(|e| CompositorError::SurfaceCreation(e.to_string()))?;
 
-        // Configure the surface
+        self.configure_and_store_surface(view_id, surface, width, height)
+    }
+
+    /// Configure a freshly created surface and record it.
+    ///
+    /// Shared by every platform entry point. The ONLY thing that differs
+    /// per-platform is building the raw window/display handle; format
+    /// selection, present mode and surface config are identical, so they live
+    /// here once. Duplicating this per platform is how two backends silently
+    /// drift into rendering differently.
+    fn configure_and_store_surface(
+        &self,
+        view_id: ViewId,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CompositorError> {
         let surface_caps = surface.get_capabilities(&self.adapter);
-        let format = surface_caps
+        // An empty format list is possible when the surface is not actually
+        // usable (an invalid window, or an adapter that cannot present to it).
+        // Indexing [0] here panicked with "index out of bounds: the len is 0"
+        // instead of reporting a surface problem -- a crash where an error
+        // belongs, and it hid WHICH stage failed.
+        let format = match surface_caps
             .formats
             .iter()
             .find(|f| **f == self.config.format)
             .copied()
-            .unwrap_or(surface_caps.formats[0]);
+        {
+            Some(f) => f,
+            None => *surface_caps.formats.first().ok_or_else(|| {
+                CompositorError::SurfaceCreation(
+                    "surface reports no supported texture formats (invalid window or \
+                     adapter cannot present to it)"
+                        .to_string(),
+                )
+            })?,
+        };
 
         let present_mode = if self.config.vsync {
             wgpu::PresentMode::AutoVsync

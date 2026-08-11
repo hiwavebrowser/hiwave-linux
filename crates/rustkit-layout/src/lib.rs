@@ -868,6 +868,31 @@ impl LayoutBox {
             _ => self.length_to_px(&style.width, containing_block.content.width),
         };
 
+        // css2 §10.3.3: with a definite width, `margin: auto` absorbs the
+        // leftover space — both sides auto splits it (this is `margin: 0 auto`
+        // centering), one side auto takes all of it. `length_to_px` maps Auto
+        // to 0, which is correct for the WIDTH computation above but loses the
+        // distinction here, so the auto-ness is re-checked on the style.
+        let (margin_left, margin_right) = if !matches!(style.width, Length::Auto) {
+            let leftover = (containing_block.content.width
+                - content_width
+                - border_left - border_right
+                - padding_left - padding_right
+                - margin_left - margin_right)
+                .max(0.0);
+            match (
+                matches!(style.margin_left, Length::Auto),
+                matches!(style.margin_right, Length::Auto),
+            ) {
+                (true, true) => (leftover / 2.0, leftover / 2.0),
+                (true, false) => (leftover, margin_right),
+                (false, true) => (margin_left, leftover),
+                (false, false) => (margin_left, margin_right),
+            }
+        } else {
+            (margin_left, margin_right)
+        };
+
         self.dimensions.content.width = content_width;
         self.dimensions.margin.left = margin_left;
         self.dimensions.margin.right = margin_right;
@@ -1586,6 +1611,9 @@ impl PaintItem {
 #[derive(Debug, Default)]
 pub struct DisplayList {
     pub commands: Vec<DisplayCommand>,
+    /// The box whose background was promoted to the canvas; its own background
+    /// emission is skipped so a translucent color is not painted twice.
+    canvas_donor: *const LayoutBox,
 }
 
 impl DisplayList {
@@ -1593,12 +1621,62 @@ impl DisplayList {
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
+            canvas_donor: std::ptr::null(),
         }
     }
 
     /// Build display list from a layout box with proper stacking order.
+    ///
+    /// Kept for callers (and tests) that have no viewport in hand: uses the
+    /// root's own border box as the canvas, which reproduces the old behaviour
+    /// exactly when the root fills the window and degrades to "background only
+    /// behind content" when it does not.
     pub fn build(root: &LayoutBox) -> Self {
+        let b = root.dimensions.border_box();
+        Self::build_with_viewport(root, b.width.max(0.0), b.height.max(0.0))
+    }
+
+    /// Build a display list, painting the CANVAS first.
+    ///
+    /// css-backgrounds-3 §2.11.2: the root element's background propagates to
+    /// the canvas — it must fill the whole viewport, not just the root's
+    /// border box. Before this, `body { background: … }` painted only as tall
+    /// as the content, and the rest of the window stayed whatever color the
+    /// compositor cleared to. The first native Linux screenshot showed exactly
+    /// that: a dark band behind the content, white below it.
+    ///
+    /// The donor is the root box; if the root's background is fully
+    /// transparent, its first element child donates instead (the html→body
+    /// propagation rule — this tree sometimes roots the layout at html and
+    /// sometimes at body, so both shapes must work). The donor's own
+    /// background emission is suppressed to avoid double-painting a
+    /// translucent color darker than the author asked for.
+    pub fn build_with_viewport(root: &LayoutBox, viewport_w: f32, viewport_h: f32) -> Self {
         let mut list = DisplayList::new();
+
+        let mut donor: *const LayoutBox = std::ptr::null();
+        let mut canvas_color = root.style.background_color;
+        if canvas_color.a > 0.0 {
+            donor = root as *const _;
+        } else if let Some(child) = root
+            .children
+            .iter()
+            .find(|c| !matches!(c.box_type, BoxType::Text(_)))
+        {
+            if child.style.background_color.a > 0.0 {
+                canvas_color = child.style.background_color;
+                donor = child as *const _;
+            }
+        }
+
+        if !donor.is_null() && viewport_w > 0.0 && viewport_h > 0.0 {
+            list.commands.push(DisplayCommand::SolidColor(
+                canvas_color,
+                Rect::new(0.0, 0.0, viewport_w, viewport_h),
+            ));
+            list.canvas_donor = donor;
+        }
+
         list.render_stacking_context(root, 0, &mut 0);
         list
     }
@@ -1746,6 +1824,11 @@ impl DisplayList {
     }
 
     fn render_background(&mut self, layout_box: &LayoutBox) {
+        // Canvas donor already painted at viewport size; painting it again at
+        // border-box size would double-blend any translucent color.
+        if std::ptr::eq(layout_box as *const _, self.canvas_donor) {
+            return;
+        }
         let color = layout_box.style.background_color;
         if color.a > 0.0 {
             let rect = layout_box.dimensions.border_box();

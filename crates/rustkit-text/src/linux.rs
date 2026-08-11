@@ -118,6 +118,79 @@ impl LinuxTextBackend {
     }
 }
 
+/// A CPU-rasterized glyph: 8-bit coverage bitmap plus placement metrics.
+///
+/// Exists so the GPU renderer can draw REAL glyphs on Linux. Until this API
+/// existed, rustkit-text could measure and shape text here (Fontconfig +
+/// FreeType were fully wired) but exposed no way to get pixels out — so the
+/// renderer's non-Windows path drew a filled rectangle per character, which is
+/// exactly what the first native screenshot showed: white blocks where words
+/// belong. The capability existed one crate away from its only consumer.
+#[derive(Debug, Clone)]
+pub struct RasterizedGlyph {
+    /// 8-bit alpha coverage, row-major, `width * height` bytes.
+    pub bitmap: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// Horizontal offset from pen position to bitmap left edge.
+    pub bearing_x: i32,
+    /// Vertical offset from BASELINE up to bitmap top edge.
+    pub bearing_y: i32,
+    /// Pen advance to the next glyph, in pixels.
+    pub advance: f32,
+    /// Typographic ascent of the face at this size, in pixels. Callers that
+    /// receive a TOP-anchored y (as the display list does) place the baseline
+    /// at `y + ascent`, then the bitmap top at `baseline - bearing_y`.
+    pub ascent: f32,
+}
+
+impl LinuxTextBackend {
+    /// Rasterize one character to an alpha coverage bitmap.
+    pub fn rasterize_glyph(
+        &mut self,
+        ch: char,
+        descriptor: &FontDescriptor,
+    ) -> Result<RasterizedGlyph, TextError> {
+        let face = self.get_face(descriptor)?;
+
+        face.load_char(ch as usize, freetype::face::LoadFlag::RENDER)
+            .map_err(|e| TextError::ShapingFailed(format!("load_char {ch:?}: {e:?}")))?;
+
+        let glyph = face.glyph();
+        let bmp = glyph.bitmap();
+        let width = bmp.width() as u32;
+        let height = bmp.rows() as u32;
+
+        // FreeType rows may be padded; copy row-by-row honoring pitch.
+        let pitch = bmp.pitch();
+        let src = bmp.buffer();
+        let mut bitmap = vec![0u8; (width * height) as usize];
+        for row in 0..height as usize {
+            let start = row * pitch.unsigned_abs() as usize;
+            let end = start + width as usize;
+            if end <= src.len() {
+                bitmap[row * width as usize..(row + 1) * width as usize]
+                    .copy_from_slice(&src[start..end]);
+            }
+        }
+
+        let ascent = face
+            .size_metrics()
+            .map(|m| (m.ascender >> 6) as f32)
+            .unwrap_or(descriptor.size * 0.8);
+
+        Ok(RasterizedGlyph {
+            bitmap,
+            width,
+            height,
+            bearing_x: glyph.bitmap_left(),
+            bearing_y: glyph.bitmap_top(),
+            advance: (glyph.advance().x >> 6) as f32,
+            ascent,
+        })
+    }
+}
+
 impl Default for LinuxTextBackend {
     fn default() -> Self {
         Self::new().expect("Failed to create Linux text backend")

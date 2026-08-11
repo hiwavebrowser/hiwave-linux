@@ -401,13 +401,101 @@ impl Engine {
         Ok(id)
     }
 
-    #[cfg(not(windows))]
+    /// Create a new view on X11.
+    ///
+    /// `parent` is the X11 window id of the host window.
+    ///
+    /// This used to be a stub returning "create_view is only supported on
+    /// Windows", which meant the engine could parse, style and lay out a full
+    /// page on Linux and then had nowhere to draw it — the largest
+    /// producer-without-consumer in the tree. The compositor was already
+    /// portable (wgpu: Vulkan/GL here, D3D there); only the surface handle was
+    /// Windows-bound.
+    ///
+    /// Mirrors the Windows path step for step: viewhost view -> native window
+    /// -> compositor surface -> view state -> initial paint. Kept in the same
+    /// order deliberately so the two can be diffed.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn create_view(
+        &mut self,
+        parent: u64,
+        bounds: Bounds,
+    ) -> Result<EngineViewId, EngineError> {
+        let id = EngineViewId::new();
+
+        debug!(?id, ?bounds, parent, "Creating view (X11)");
+
+        let viewhost_id = self
+            .viewhost
+            .create_view(parent, bounds)
+            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+
+        let x11_window = self
+            .viewhost
+            .get_x11_window(viewhost_id)
+            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+
+        unsafe {
+            self.compositor
+                .create_surface_for_x11(
+                    viewhost_id,
+                    self.viewhost.display_ptr() as *mut std::ffi::c_void,
+                    x11_window,
+                    self.viewhost.screen_number(),
+                    bounds.width,
+                    bounds.height,
+                )
+                .map_err(|e| EngineError::RenderError(e.to_string()))?;
+        }
+
+        let (nav_tx, nav_rx) = mpsc::unbounded_channel();
+        let navigation = NavigationStateMachine::new(nav_tx);
+
+        let view_state = ViewState {
+            id,
+            viewhost_id,
+            url: None,
+            title: None,
+            document: None,
+            layout: None,
+            display_list: None,
+            bindings: None,
+            navigation,
+            nav_event_rx: nav_rx,
+            focused_node: None,
+            view_focused: false,
+            external_css: String::new(),
+        };
+
+        self.views.insert(id, view_state);
+
+        self.compositor
+            .render_solid_color(viewhost_id, self.config.background_color)
+            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+
+        info!(?id, "View created (X11)");
+        Ok(id)
+    }
+
+    /// Fallback for platforms with no view backend yet (currently macOS in this
+    /// tree). Kept explicit so an unsupported platform fails loudly rather than
+    /// silently producing a view that cannot paint.
+    #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
     pub fn create_view(
         &mut self,
         _parent: usize,
         _bounds: Bounds,
     ) -> Result<EngineViewId, EngineError> {
-        Err(EngineError::RenderError("create_view is only supported on Windows".to_string()))
+        Err(EngineError::RenderError(
+            "create_view has no backend on this platform".to_string(),
+        ))
+    }
+
+    /// The viewhost (window system layer). Public so a native shell can create
+    /// the parent window and pump its event loop without the engine having to
+    /// re-export every windowing call.
+    pub fn viewhost(&self) -> &ViewHost {
+        &self.viewhost
     }
 
     /// Destroy a view.
@@ -750,8 +838,14 @@ impl Engine {
         // Layout
         root_box.layout(&containing_block);
 
-        // Generate display list
-        let display_list = DisplayList::build(&root_box);
+        // Generate display list. The canvas (root background) must fill the
+        // VIEWPORT, not just the content height — hence the bounds, not the
+        // root box.
+        let display_list = DisplayList::build_with_viewport(
+            &root_box,
+            bounds.width as f32,
+            bounds.height as f32,
+        );
 
         // Count command types for debugging
         let mut solid_count = 0;
@@ -896,9 +990,18 @@ impl Engine {
             }
         }
 
-        // Create root layout box for the document
+        // Create root layout box for the document.
+        //
+        // TRANSPARENT, deliberately. This synthetic root used to hardcode
+        // WHITE as a stand-in for the page canvas — which worked while nothing
+        // implemented canvas propagation, and then silently BLOCKED it once
+        // something did: the display-list builder saw an opaque root and never
+        // fell through to the document's real background (css-backgrounds-3
+        // §2.11.2, html→body donation). A white page behind a dark-background
+        // document was this line. The compositor's clear color remains the
+        // final fallback for documents with no background at all.
         let mut root_style = ComputedStyle::new();
-        root_style.background_color = rustkit_css::Color::WHITE;
+        root_style.background_color = rustkit_css::Color::TRANSPARENT;
         let mut root_box = LayoutBox::new(BoxType::Block, root_style);
 
         // Debug: print root children to understand DOM structure
@@ -3292,26 +3395,46 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                     }
                 }
                 "margin" => {
-                    if let Some(length) = parse_length(value) {
-                        // Length is not Copy: clone for all but the last
-                        // assignment, which still moves (= Windows #42).
-                        style.margin_top = length.clone();
-                        style.margin_right = length.clone();
-                        style.margin_bottom = length.clone();
-                        style.margin_left = length;
+                    if let Some((t, r, b, l)) = parse_box_shorthand(value) {
+                        style.margin_top = t;
+                        style.margin_right = r;
+                        style.margin_bottom = b;
+                        style.margin_left = l;
                     }
                 }
                 "padding" => {
-                    if let Some(length) = parse_length(value) {
-                        style.padding_top = length.clone();
-                        style.padding_right = length.clone();
-                        style.padding_bottom = length.clone();
-                        style.padding_left = length;
+                    if let Some((t, r, b, l)) = parse_box_shorthand(value) {
+                        style.padding_top = t;
+                        style.padding_right = r;
+                        style.padding_bottom = b;
+                        style.padding_left = l;
                     }
                 }
                 _ => {}
             }
         }
+    }
+}
+
+/// Expand a 1–4 value margin/padding shorthand per CSS box rules.
+///
+/// Returns (top, right, bottom, left), or None if any token fails to parse —
+/// an invalid declaration is DROPPED whole, never half-applied.
+///
+/// The old `"margin"` arm called `parse_length(value)` on the ENTIRE value
+/// string, so any multi-value form ("80px auto", "0 auto", "1px 2px 3px 4px")
+/// failed the parse and was silently dropped — `margin: 80px auto` set
+/// NOTHING, not even the 80px. Which is why `margin: 0 auto` centering could
+/// never work regardless of what layout did with Auto.
+fn parse_box_shorthand(value: &str) -> Option<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Length, rustkit_css::Length)> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    let lens: Vec<rustkit_css::Length> = parts.iter().map(|p| parse_length(p)).collect::<Option<_>>()?;
+    match lens.as_slice() {
+        [a] => Some((a.clone(), a.clone(), a.clone(), a.clone())),
+        [v, h] => Some((v.clone(), h.clone(), v.clone(), h.clone())),
+        [t, h, b] => Some((t.clone(), h.clone(), b.clone(), h.clone())),
+        [t, r, b, l] => Some((t.clone(), r.clone(), b.clone(), l.clone())),
+        _ => None,
     }
 }
 
@@ -6322,6 +6445,187 @@ mod flexbox_45_automatic_minimum {
     }
 }
 
+#[cfg(test)]
+mod x11_content_path {
+    //! The engine must be able to create a real X11-backed view and paint into
+    //! it. Until this existed, `create_view` on Linux returned
+    //! "create_view is only supported on Windows" — the engine could parse,
+    //! style and lay out a whole page and had nowhere to draw it.
+    //!
+    //! Requires a live X server. On a headless machine `X11ViewHost::new` fails
+    //! and the test SKIPS rather than failing: a missing display is an
+    //! environment fact, not a defect, and a test that goes red on CI for
+    //! having no monitor teaches everyone to ignore it.
+    use super::*;
+
+    fn have_display() -> bool {
+        std::env::var("DISPLAY").map(|d| !d.is_empty()).unwrap_or(false)
+    }
+
+    #[test]
+    fn rustkit_creates_an_x11_view_and_paints_a_page() {
+        if !have_display() {
+            eprintln!("SKIP: no DISPLAY; X11 content path not exercised");
+            return;
+        }
+        let mut engine = EngineBuilder::new().build().expect("engine");
+
+        let parent = engine
+            .viewhost
+            .create_main_window(rustkit_viewhost::MainWindowConfig {
+                title: "rustkit x11 content path".to_string(),
+                width: 800,
+                height: 600,
+                resizable: true,
+                centered: true,
+            })
+            .expect("X11 main window");
+        assert_ne!(parent, 0, "main window id must be a real X11 window, not 0");
+
+        let view = engine
+            .create_view(
+                parent,
+                rustkit_viewhost::Bounds { x: 0, y: 0, width: 800, height: 600 },
+            )
+            .expect("create_view must succeed on X11");
+
+        // A view with no native window would fail here rather than at creation,
+        // which is the failure mode the old stub produced: it returned Ok with
+        // hwnd_raw = 0 and the problem surfaced much later, somewhere else.
+        engine
+            .load_html(view, "<html><body><div style='width:200px;height:100px;\
+                              background:#0aa'>x</div></body></html>")
+            .expect("load_html into an X11-backed view");
+
+        engine.render_view(view).expect("render_view must paint via the wgpu surface");
+    }
+}
+
+#[cfg(test)]
+mod canvas_background_propagation {
+    //! css-backgrounds-3 §2.11.2: the document background fills the CANVAS
+    //! (whole viewport), not just the content's border box.
+    use super::*;
+
+    fn first_command(html: &str) -> String {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine { config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx) };
+        let doc = Document::parse_html(html).expect("parse");
+        let mut l = e.build_layout_from_document(&doc);
+        l.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 1024.0, 768.0),
+            ..Default::default()
+        });
+        let dl = rustkit_layout::DisplayList::build_with_viewport(&l, 1024.0, 768.0);
+        format!("{:?}", dl.commands.first().expect("at least one command"))
+    }
+
+    #[test]
+    fn body_background_fills_the_viewport() {
+        let cmd = first_command(
+            r#"<html><head><style>body{margin:0;background:#101820}</style></head>
+               <body><div style="width:100px;height:50px">x</div></body></html>"#);
+        assert!(cmd.contains("r: 16, g: 24, b: 32"), "canvas must be the BODY color, got {cmd}");
+        assert!(cmd.contains("width: 1024") && cmd.contains("height: 768"),
+                "canvas must be VIEWPORT-sized, got {cmd}");
+    }
+
+    #[test]
+    fn a_backgroundless_document_gets_the_ua_white_canvas() {
+        // First written asserting NO canvas fill — wrong premise, caught by the
+        // test itself: the UA default sheet paints `body` white, so a document
+        // with no author background donates UA-white to the canvas, exactly as
+        // real browsers do. The assertion now states the true contract, and
+        // still catches both failure directions: no canvas at all, and a
+        // non-white donor leaking through.
+        let cmd = first_command(
+            r#"<html><body><div style="width:100px;height:50px;background:#00a3a3">x</div></body></html>"#);
+        assert!(cmd.contains("r: 255, g: 255, b: 255"), "canvas must be UA white, got {cmd}");
+        assert!(cmd.contains("width: 1024") && cmd.contains("height: 768"),
+                "UA white must fill the viewport too, got {cmd}");
+    }
+}
+
+#[cfg(test)]
+mod box_shorthand_and_auto_margins {
+    //! `margin: 0 auto` centering needs BOTH halves: the shorthand must parse
+    //! multi-value forms, and layout must give leftover space to auto margins.
+    //! Each was broken independently, so fixing either alone changed nothing
+    //! visible — which is why the card stayed pinned left after the layout fix.
+    use super::*;
+    use rustkit_css::Length;
+
+    fn applied(decls: &str) -> ComputedStyle {
+        let mut s = ComputedStyle::default();
+        apply_inline_style_decls(&mut s, decls);
+        s
+    }
+
+    #[test]
+    fn two_value_shorthand_no_longer_drops_everything() {
+        // Before: parse_length() was called on the WHOLE value string, so
+        // "80px auto" failed to parse and NOTHING was set — not even the 80px.
+        let s = applied("margin: 80px auto");
+        assert_eq!(s.margin_top, Length::Px(80.0));
+        assert_eq!(s.margin_bottom, Length::Px(80.0));
+        assert_eq!(s.margin_left, Length::Auto);
+        assert_eq!(s.margin_right, Length::Auto);
+    }
+
+    #[test]
+    fn one_three_and_four_value_forms() {
+        let one = applied("padding: 10px");
+        assert_eq!((one.padding_top, one.padding_left), (Length::Px(10.0), Length::Px(10.0)));
+
+        let three = applied("margin: 1px 2px 3px");
+        assert_eq!(three.margin_top, Length::Px(1.0));
+        assert_eq!(three.margin_right, Length::Px(2.0));
+        assert_eq!(three.margin_bottom, Length::Px(3.0));
+        assert_eq!(three.margin_left, Length::Px(2.0), "left mirrors right in the 3-value form");
+
+        let four = applied("margin: 1px 2px 3px 4px");
+        assert_eq!(four.margin_left, Length::Px(4.0));
+    }
+
+    #[test]
+    fn an_invalid_token_drops_the_whole_declaration() {
+        // Half-applying a shorthand is worse than ignoring it.
+        let mut s = ComputedStyle::default();
+        s.margin_top = Length::Px(5.0);
+        apply_inline_style_decls(&mut s, "margin: 10px nonsense");
+        assert_eq!(s.margin_top, Length::Px(5.0), "invalid shorthand must not partially apply");
+    }
+
+    #[test]
+    fn auto_margins_center_a_definite_width_block() {
+        let html = r#"<html><head><style>body{margin:0}
+            #c{width:400px;height:50px;margin:0 auto}</style></head>
+            <body><div id=c>x</div></body></html>"#;
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine { config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx) };
+        let doc = Document::parse_html(html).expect("parse");
+        let mut l = e.build_layout_from_document(&doc);
+        l.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 1000.0, 600.0),
+            ..Default::default()
+        });
+        fn find(b: &LayoutBox, out: &mut Vec<(f32, f32)>) {
+            if b.dimensions.content.width == 400.0 { out.push((b.dimensions.content.x, b.dimensions.content.width)); }
+            for c in &b.children { find(c, out); }
+        }
+        let mut hits = Vec::new();
+        find(&l, &mut hits);
+        let (x, w) = *hits.first().expect("the 400px block");
+        assert_eq!(w, 400.0);
+        assert_eq!(x, 300.0, "(1000-400)/2 = 300; a left-pinned box reports 0");
+    }
+}
 #[cfg(test)]
 mod grid_intrinsic_track_sizing {
     //! `auto`, `min-content` and `max-content` grid tracks must be sized from

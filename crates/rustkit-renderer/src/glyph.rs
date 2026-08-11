@@ -45,6 +45,12 @@ pub struct GlyphCache {
     next_x: u32,
     next_y: u32,
     row_height: u32,
+    /// FreeType-backed rasterizer (Linux). Lazily initialized; `ft_failed`
+    /// remembers a failed init so we do not retry per glyph.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    ft_backend: Option<rustkit_text::linux::LinuxTextBackend>,
+    #[cfg(all(unix, not(target_os = "macos")))]
+    ft_failed: bool,
 }
 
 impl GlyphCache {
@@ -134,6 +140,10 @@ impl GlyphCache {
             next_x: 1, // Start at 1 to avoid edge artifacts
             next_y: 1,
             row_height: 0,
+            #[cfg(all(unix, not(target_os = "macos")))]
+            ft_backend: None,
+            #[cfg(all(unix, not(target_os = "macos")))]
+            ft_failed: false,
         })
     }
 
@@ -229,8 +239,17 @@ impl GlyphCache {
             return self.rasterize_glyph_directwrite(queue, key);
         }
         
-        // Fallback for non-Windows platforms
-        #[cfg(not(windows))]
+        // Real glyphs via FreeType on Linux; the rect fallback only remains for
+        // the case where no font backend could be initialized at all.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            if let Some(entry) = self.rasterize_glyph_freetype(queue, key) {
+                return Some(entry);
+            }
+            return self.rasterize_glyph_fallback(queue, key);
+        }
+
+        #[cfg(all(not(windows), not(all(unix, not(target_os = "macos")))))]
         {
             return self.rasterize_glyph_fallback(queue, key);
         }
@@ -530,6 +549,110 @@ impl GlyphCache {
     }
     
     /// Fallback glyph rasterization (creates placeholder rectangles).
+    /// Rasterize via FreeType (rustkit-text Linux backend) and upload real
+    /// coverage to the atlas.
+    ///
+    /// Until this existed, rustkit-text could MEASURE text on Linux (all the
+    /// layout intrinsics use it) but the renderer drew a filled rectangle per
+    /// character — measurement and paint disagreed about what a glyph is, and
+    /// the first native screenshot showed exactly that: correctly-sized white
+    /// blocks where words belong.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn rasterize_glyph_freetype(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: &GlyphKey,
+    ) -> Option<GlyphEntry> {
+        use rustkit_text::linux::LinuxTextBackend;
+        use rustkit_text::{FontDescriptor, FontStyle, FontWeight};
+
+        if self.ft_failed {
+            return None;
+        }
+        if self.ft_backend.is_none() {
+            match LinuxTextBackend::new() {
+                Ok(b) => self.ft_backend = Some(b),
+                Err(e) => {
+                    tracing::warn!("FreeType backend init failed; using rect fallback: {e:?}");
+                    self.ft_failed = true;
+                    return None;
+                }
+            }
+        }
+        let backend = self.ft_backend.as_mut()?;
+
+        let descriptor = FontDescriptor {
+            family: key.font_family.clone(),
+            weight: FontWeight(key.font_weight as u32),
+            style: match key.font_style {
+                1 => FontStyle::Italic,
+                2 => FontStyle::Oblique,
+                _ => FontStyle::Normal,
+            },
+            size: key.font_size as f32 / 10.0,
+        };
+
+        let glyph = match backend.rasterize_glyph(key.codepoint, &descriptor) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::debug!("rasterize_glyph {:?} failed: {e:?}", key.codepoint);
+                return None;
+            }
+        };
+
+        // Whitespace and other empty glyphs: no bitmap to upload, but the
+        // advance is real. A degenerate quad (u0==u1) draws nothing.
+        if glyph.width == 0 || glyph.height == 0 {
+            let entry = GlyphEntry {
+                tex_coords: [0.0, 0.0, 0.0, 0.0],
+                offset: [0.0, 0.0],
+                advance: glyph.advance,
+            };
+            self.entries.insert(key.clone(), entry.clone());
+            return Some(entry);
+        }
+
+        let (atlas_x, atlas_y) = self.allocate_space(glyph.width + 2, glyph.height + 2)?;
+
+        self.maybe_dump_glyph_bitmap(key, glyph.width, glyph.height, &glyph.bitmap);
+        self.blit_into_cpu_atlas(atlas_x + 1, atlas_y + 1, glyph.width, glyph.height, &glyph.bitmap);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: atlas_x + 1, y: atlas_y + 1, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &glyph.bitmap,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(glyph.width),
+                rows_per_image: Some(glyph.height),
+            },
+            wgpu::Extent3d {
+                width: glyph.width,
+                height: glyph.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let u0 = (atlas_x + 1) as f32 / self.atlas_size as f32;
+        let v0 = (atlas_y + 1) as f32 / self.atlas_size as f32;
+        let u1 = (atlas_x + 1 + glyph.width) as f32 / self.atlas_size as f32;
+        let v1 = (atlas_y + 1 + glyph.height) as f32 / self.atlas_size as f32;
+
+        // draw_text anchors at the text-line TOP: baseline sits at y + ascent,
+        // and the bitmap top at baseline - bearing_y.
+        let entry = GlyphEntry {
+            tex_coords: [u0, v0, u1, v1],
+            offset: [glyph.bearing_x as f32, glyph.ascent - glyph.bearing_y as f32],
+            advance: glyph.advance,
+        };
+
+        self.entries.insert(key.clone(), entry.clone());
+        Some(entry)
+    }
+
     fn rasterize_glyph_fallback(
         &mut self,
         queue: &wgpu::Queue,
