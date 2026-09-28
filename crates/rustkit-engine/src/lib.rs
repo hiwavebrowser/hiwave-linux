@@ -2762,9 +2762,24 @@ fn parse_transform_origin(value: &str) -> Option<rustkit_css::TransformOrigin> {
 /// (= Athena's Windows #52 `test_compositor`.)
 #[cfg(test)]
 fn test_compositor() -> Compositor {
-    static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
     Compositor::new().expect("failed to create compositor for test")
+}
+
+/// Serialize an ENTIRE GPU-touching test, not just compositor creation.
+///
+/// The old ENGINE_INIT mutex inside test_compositor covered Compositor::new
+/// and released at return, so twenty tests still CREATED and DROPPED wgpu
+/// instances concurrently — and the drop of a Vulkan device racing the
+/// x11_content_path swapchain segfaulted inside libvulkan/lavapipe about one
+/// run in three (gdb: crash on the x11 test thread in libvulkan.so with a
+/// "WSI swapchain" thread live; present on master BEFORE the 2026-09 port
+/// waves; XInitThreads narrowed it but could not close it, because the race
+/// is in the Vulkan loader, not Xlib). Tests take this guard as their FIRST
+/// binding, so it drops LAST and instance teardown happens under the lock.
+#[cfg(test)]
+fn gpu_serial() -> std::sync::MutexGuard<'static, ()> {
+    static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GPU.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Apply the declarations in an inline `style="..."` attribute to a
@@ -3332,10 +3347,33 @@ fn apply_inline_style_decls(style: &mut ComputedStyle, style_attr: &str) {
                     };
                 }
                 "line-height" => {
-                    if let Ok(n) = value.trim().parse::<f32>() {
-                        style.line_height = n;
-                    } else if let Some(rustkit_css::Length::Px(px)) = parse_length(value) {
-                        style.line_height = px;
+                    // Ported verbatim from the macOS reference engine (its
+                    // line-height arm), matching the LineHeight enum the
+                    // adopted rustkit-css now carries: Normal / unitless
+                    // Number (font-size multiplier) / absolute Px. The old
+                    // f32 field collapsed 1.5 and 24px into one number, so
+                    // whichever unit a page used, the other was wrong.
+                    let value = value.trim();
+                    if value == "normal" {
+                        style.line_height = rustkit_css::LineHeight::Normal;
+                    } else if let Ok(lh) = value.parse::<f32>() {
+                        style.line_height = rustkit_css::LineHeight::Number(lh);
+                    } else if let Some(length) = parse_length(value) {
+                        match length {
+                            rustkit_css::Length::Px(px) => {
+                                style.line_height = rustkit_css::LineHeight::Px(px);
+                            }
+                            rustkit_css::Length::Em(em) => {
+                                style.line_height = rustkit_css::LineHeight::Number(em);
+                            }
+                            rustkit_css::Length::Percent(pct) => {
+                                style.line_height = rustkit_css::LineHeight::Number(pct / 100.0);
+                            }
+                            rustkit_css::Length::Rem(rem) => {
+                                style.line_height = rustkit_css::LineHeight::Px(rem * 16.0);
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 "font-family" => {
@@ -3636,6 +3674,7 @@ mod tests {
 
     #[test]
     fn test_engine_view_id_uniqueness() {
+        let _gpu = gpu_serial();
         let id1 = EngineViewId::new();
         let id2 = EngineViewId::new();
         assert_ne!(id1, id2);
@@ -3643,6 +3682,7 @@ mod tests {
 
     #[test]
     fn test_engine_config_default() {
+        let _gpu = gpu_serial();
         let config = EngineConfig::default();
         assert!(config.javascript_enabled);
         assert!(config.cookies_enabled);
@@ -3650,6 +3690,7 @@ mod tests {
 
     #[test]
     fn test_engine_builder() {
+        let _gpu = gpu_serial();
         let builder = EngineBuilder::new()
             .user_agent("Test/1.0")
             .javascript_enabled(false);
@@ -3660,6 +3701,7 @@ mod tests {
 
     #[test]
     fn test_layout_tree_from_document() {
+        let _gpu = gpu_serial();
         // Parse a simple HTML document
         let html = r#"<!DOCTYPE html>
             <html>
@@ -3718,6 +3760,7 @@ mod tests {
 
     #[test]
     fn test_display_list_generation() {
+        let _gpu = gpu_serial();
         // Parse a document with styled content
         let html = r#"<!DOCTYPE html>
             <html>
@@ -3760,6 +3803,7 @@ mod tests {
 
     #[test]
     fn test_parse_color() {
+        let _gpu = gpu_serial();
         // Test named colors
         assert_eq!(parse_color("black"), Some(rustkit_css::Color::BLACK));
         assert_eq!(parse_color("white"), Some(rustkit_css::Color::WHITE));
@@ -3775,6 +3819,7 @@ mod tests {
 
     #[test]
     fn test_parse_length() {
+        let _gpu = gpu_serial();
         assert_eq!(parse_length("0"), Some(rustkit_css::Length::Zero));
         assert_eq!(parse_length("auto"), Some(rustkit_css::Length::Auto));
         assert_eq!(parse_length("10px"), Some(rustkit_css::Length::Px(10.0)));
@@ -4412,15 +4457,19 @@ mod props_tier1_tests {
         let s = applied("text-align: center; line-height: 1.5; font-family: Georgia, serif; \
                          font-style: italic");
         assert_eq!(s.text_align, TextAlign::Center);
-        assert_eq!(s.line_height, 1.5);
+        assert_eq!(s.line_height, rustkit_css::LineHeight::Number(1.5));
         assert_eq!(s.font_family, "Georgia", "first family wins, quotes/space trimmed");
         assert_eq!(s.font_style, rustkit_css::FontStyle::Italic);
     }
 
     #[test]
     fn line_height_accepts_both_a_number_and_a_length() {
-        assert_eq!(applied("line-height: 2").line_height, 2.0);
-        assert_eq!(applied("line-height: 24px").line_height, 24.0);
+        // The enum (adopted with macOS rustkit-css) makes this test STRONGER:
+        // the old f32 field collapsed a multiplier and a pixel length into
+        // one number, so this test could never have caught the engine
+        // parsing "24px" as Number(24) — a 24x line height.
+        assert_eq!(applied("line-height: 2").line_height, rustkit_css::LineHeight::Number(2.0));
+        assert_eq!(applied("line-height: 24px").line_height, rustkit_css::LineHeight::Px(24.0));
     }
 
     #[test]
@@ -4491,6 +4540,7 @@ mod inheritance_tests {
 
     #[test]
     fn multi_property_inheritance_reaches_a_deep_descendant() {
+        let _gpu = gpu_serial();
         // THE RECEIPT: three inherited properties set once on <body>, asserted
         // on a nested element through the real layout build. Before this unit
         // every element started from ComputedStyle::new() with a forced BLACK,
@@ -4509,6 +4559,7 @@ mod inheritance_tests {
 
     #[test]
     fn a_non_inherited_property_does_NOT_leak_to_descendants() {
+        let _gpu = gpu_serial();
         // The other half of the claim, and the one a naive "copy parent style"
         // implementation gets wrong: width is NOT an inherited property.
         let root = layout(
@@ -4527,6 +4578,7 @@ mod inheritance_tests {
 
     #[test]
     fn a_descendant_rule_overrides_the_inherited_value() {
+        let _gpu = gpu_serial();
         let root = layout(
             r#"<html><head><style>
                  body { color: #ff0000; }
@@ -4540,6 +4592,7 @@ mod inheritance_tests {
 
     #[test]
     fn text_nodes_inherit_from_their_containing_element() {
+        let _gpu = gpu_serial();
         // Text is where inheritance is actually visible to a user: colouring a
         // <p> must colour the words in it, not just the box.
         let root = layout(
@@ -4552,6 +4605,7 @@ mod inheritance_tests {
 
     #[test]
     fn text_align_inherits_portably() {
+        let _gpu = gpu_serial();
         let root = layout(
             r#"<html><head><style>body { text-align: center; }</style></head>
                <body><div><p>c</p></div></body></html>"#,
@@ -4562,6 +4616,7 @@ mod inheritance_tests {
 
     #[test]
     fn default_colour_is_still_black_without_any_author_rule() {
+        let _gpu = gpu_serial();
         // Regression guard: dropping the unconditional BLACK must not leave
         // text colourless. The root seeds it once instead.
         let root = layout(r#"<html><body><p>plain</p></body></html>"#);
@@ -4571,6 +4626,7 @@ mod inheritance_tests {
 
     #[test]
     fn ua_defaults_win_over_an_inherited_value() {
+        let _gpu = gpu_serial();
         // Prometheus N-ua-stub: this test previously asserted only
         // find_depth(..).is_some() while its NAME promised UA-beats-inherited
         // ordering. A test that names an invariant it does not check makes the
@@ -4590,6 +4646,7 @@ mod inheritance_tests {
 
     #[test]
     fn inheriting_does_not_make_elements_zero_sized_black_or_invisible() {
+        let _gpu = gpu_serial();
         // REGRESSION GUARD for the defect this unit nearly shipped. Linux's
         // inherit_from fell through to ..Default::default() for width/height/
         // background/opacity, whose DERIVED defaults are Zero / opaque BLACK /
@@ -4622,6 +4679,7 @@ mod external_stylesheet_tests {
 
     #[test]
     fn relative_href_resolves_against_the_document_url() {
+        let _gpu = gpu_serial();
         let d = doc(r#"<html><head><link rel="stylesheet" href="site.css"></head><body></body></html>"#);
         let urls = Engine::discover_external_stylesheets(&d, Some(&base()));
         assert_eq!(urls.len(), 1);
@@ -4630,6 +4688,7 @@ mod external_stylesheet_tests {
 
     #[test]
     fn root_relative_and_absolute_hrefs_both_resolve() {
+        let _gpu = gpu_serial();
         let d = doc(
             r#"<html><head>
                <link rel="stylesheet" href="/a.css">
@@ -4644,6 +4703,7 @@ mod external_stylesheet_tests {
 
     #[test]
     fn non_stylesheet_links_are_ignored() {
+        let _gpu = gpu_serial();
         // <link> is also used for icons, preconnect and manifests. Treating
         // every <link href> as CSS would fetch the favicon and parse it as CSS.
         let d = doc(
@@ -4658,6 +4718,7 @@ mod external_stylesheet_tests {
 
     #[test]
     fn rel_is_a_token_set_and_case_insensitive() {
+        let _gpu = gpu_serial();
         let d = doc(
             r#"<html><head>
                <link rel="alternate stylesheet" href="alt.css">
@@ -4674,6 +4735,7 @@ mod external_stylesheet_tests {
 
     #[test]
     fn an_unparseable_href_is_skipped_not_guessed() {
+        let _gpu = gpu_serial();
         let d = doc(r#"<html><head><link rel="stylesheet" href="ht!tp://[[bad"></head><body></body></html>"#);
         // With no base there is nothing to resolve against; a bad href must be
         // dropped rather than turned into some invented URL.
@@ -4682,6 +4744,7 @@ mod external_stylesheet_tests {
 
     #[test]
     fn empty_and_missing_href_are_skipped() {
+        let _gpu = gpu_serial();
         let d = doc(
             r#"<html><head>
                <link rel="stylesheet" href="">
@@ -4693,6 +4756,7 @@ mod external_stylesheet_tests {
 
     #[test]
     fn external_css_cascades_and_inline_style_element_wins_at_equal_specificity() {
+        let _gpu = gpu_serial();
         // THE WIRE RECEIPT, through the real layout build: external CSS must
         // reach a descendant, and the <style> block must win at equal
         // specificity because external is placed first.
@@ -4782,6 +4846,7 @@ mod external_stylesheet_tests {
 
     #[test]
     fn attaching_a_document_clears_the_previous_documents_external_css() {
+        let _gpu = gpu_serial();
         // The robust door: the reset lives at the point a document is
         // attached, so a load path that never calls the stylesheet loader at
         // all - load_html does not - still gets it. Testing the loader alone
@@ -4800,6 +4865,7 @@ mod external_stylesheet_tests {
 
     #[test]
     fn stylesheet_discovery_does_not_collect_style_elements_or_vice_versa() {
+        let _gpu = gpu_serial();
         // Both passes now run over the same document. If EITHER matched on
         // "element has a URL attribute" rather than on tag name, the page would
         // cross-contaminate. Neither pass's own tests would reveal it - the bug
@@ -5001,11 +5067,13 @@ mod child_combinator_tests {
 
     #[test]
     fn child_combinator_matches_an_immediate_child() {
+        let _gpu = gpu_serial();
         assert!(m("ul > li", "li", &[], &[("body", ""), ("ul", "")]).is_some());
     }
 
     #[test]
     fn child_combinator_rejects_a_deeper_descendant() {
+        let _gpu = gpu_serial();
         // THE BUG. `>` was stripped from the token list, so this relation was
         // silently relaxed to descendant and `.nav > li` also styled every li
         // nested any depth below - the exact shape used to style one menu
@@ -5027,6 +5095,7 @@ mod child_combinator_tests {
 
     #[test]
     fn descendant_combinator_still_matches_at_any_depth() {
+        let _gpu = gpu_serial();
         // The fix must not overshoot: plain descendant is unchanged.
         assert!(m("ul li", "li", &[], &[("ul", ""), ("li", ""), ("ul", "")]).is_some());
         assert!(m(".card p", "p", &[], &[("div", "card"), ("div", ""), ("section", "")]).is_some());
@@ -5034,6 +5103,7 @@ mod child_combinator_tests {
 
     #[test]
     fn child_combinator_parses_without_surrounding_whitespace() {
+        let _gpu = gpu_serial();
         // THE SECOND BUG, opposite direction. Whitespace-only splitting left
         // `ul>li` as one compound whose type part was the literal "ul>li",
         // which matched no tag, so the rule was silently DEAD rather than
@@ -5052,11 +5122,13 @@ mod child_combinator_tests {
 
     #[test]
     fn child_at_the_root_has_no_parent_to_match() {
+        let _gpu = gpu_serial();
         assert!(m("body > div", "div", &[], &[]).is_none());
     }
 
     #[test]
     fn mixed_child_and_descendant_chain() {
+        let _gpu = gpu_serial();
         // `.page .card > p`: p's immediate parent is .card, and .card has some
         // .page ancestor.
         assert!(m(".page .card > p", "p", &[],
@@ -5068,6 +5140,7 @@ mod child_combinator_tests {
 
     #[test]
     fn specificity_still_sums_across_the_chain() {
+        let _gpu = gpu_serial();
         // `>` must not change how specific a selector is; only which elements
         // it reaches. Both forms are one class + one type.
         assert_eq!(m(".card > p", "p", &[], &[("div", "card")]),
@@ -5077,6 +5150,7 @@ mod child_combinator_tests {
 
     #[test]
     fn malformed_combinators_match_nothing_rather_than_guessing() {
+        let _gpu = gpu_serial();
         // Refusing is the safe read: applying a selector we cannot parse would
         // style the wrong elements, which is worse than styling none.
         for sel in ["> p", "div >", "div > > p", ">"] {
@@ -5089,6 +5163,7 @@ mod child_combinator_tests {
 
     #[test]
     fn child_combinator_takes_effect_through_the_real_layout_build() {
+        let _gpu = gpu_serial();
         // The unit tests above prove the MATCHER. This proves the matcher is
         // what the cascade actually consults - a correct matcher nothing calls
         // would pass every test above and change nothing on screen.
@@ -5135,6 +5210,7 @@ mod child_combinator_tests {
 
     #[test]
     fn known_limit_greedy_matching_does_not_backtrack() {
+        let _gpu = gpu_serial();
         // DOCUMENTED, NOT ASSERTED-CORRECT. The nearest matching ancestor is
         // taken and never reconsidered, so a chain that needs backtracking
         // gives a FALSE NEGATIVE: here .b matches the inner div, and .a is not
@@ -5183,6 +5259,7 @@ mod position_wire_tests {
 
     #[test]
     fn a_every_position_keyword_parses() {
+        let _gpu = gpu_serial();
         assert_eq!(st("position: relative").position, Position::Relative);
         assert_eq!(st("position: absolute").position, Position::Absolute);
         assert_eq!(st("position: fixed").position, Position::Fixed);
@@ -5193,6 +5270,7 @@ mod position_wire_tests {
 
     #[test]
     fn a_offsets_parse_and_unset_stays_auto() {
+        let _gpu = gpu_serial();
         let s = st("position: absolute; top: 10px; left: 0");
         assert_eq!(s.top, Some(Length::Px(10.0)));
         // `left: 0` is Some(0) - PINNED to the containing block edge.
@@ -5207,6 +5285,7 @@ mod position_wire_tests {
 
     #[test]
     fn a_percentage_offsets_are_kept_as_percentages_not_flattened() {
+        let _gpu = gpu_serial();
         // The COMPUTED value keeps the percentage - that is the honest record
         // of what the author wrote, and matches the reference. The refusal
         // happens later, at the layout wire, where pixels are demanded and the
@@ -5220,6 +5299,7 @@ mod position_wire_tests {
 
     #[test]
     fn a_z_index_garbage_is_ignored_not_flattened() {
+        let _gpu = gpu_serial();
         assert_eq!(st("z-index: 7").z_index, 7);
         assert_eq!(st("z-index: -3").z_index, -3);
         let mut s = ComputedStyle::new();
@@ -5230,6 +5310,7 @@ mod position_wire_tests {
 
     #[test]
     fn a_offsets_do_not_inherit() {
+        let _gpu = gpu_serial();
         let mut parent = ComputedStyle::new();
         parent.top = Some(Length::Px(40.0));
         parent.z_index = 9;
@@ -5242,6 +5323,7 @@ mod position_wire_tests {
 
     #[test]
     fn b_position_reaches_the_layout_box() {
+        let _gpu = gpu_serial();
         use rustkit_layout::Position as LP;
         assert_eq!(boxed("position: absolute").position, LP::Absolute);
         assert_eq!(boxed("position: fixed").position, LP::Fixed);
@@ -5250,6 +5332,7 @@ mod position_wire_tests {
 
     #[test]
     fn b_offsets_reach_the_layout_box_in_pixels() {
+        let _gpu = gpu_serial();
         let b = boxed("position: absolute; top: 10px; left: 20px");
         assert_eq!(b.offsets.top, Some(10.0), "top must reach the box");
         assert_eq!(b.offsets.left, Some(20.0), "left must reach the box");
@@ -5258,6 +5341,7 @@ mod position_wire_tests {
 
     #[test]
     fn b_relative_units_are_resolved_against_the_element_font_size() {
+        let _gpu = gpu_serial();
         // rem is always 16px; em follows the element's own font-size. If these
         // arrived unresolved the box would be offset by 2 pixels instead of 64.
         let b = boxed("position: absolute; font-size: 32px; top: 2em; left: 2rem");
@@ -5267,6 +5351,7 @@ mod position_wire_tests {
 
     #[test]
     fn b_percentage_offsets_are_refused_at_the_wire_not_invented() {
+        let _gpu = gpu_serial();
         // THE TWIN of the group-A test above, and the one that matters. A
         // percentage resolves against the containing block, which is not known
         // while the tree is built. The box must get None (auto) rather than an
@@ -5279,11 +5364,13 @@ mod position_wire_tests {
 
     #[test]
     fn b_z_index_reaches_the_layout_box() {
+        let _gpu = gpu_serial();
         assert_eq!(boxed("z-index: 4").z_index, 4);
     }
 
     #[test]
     fn b_a_static_box_gets_no_offsets_even_if_they_are_declared() {
+        let _gpu = gpu_serial();
         // Offsets on a static box must not displace it - that is the CSS rule,
         // and it is also what stops a stray `top:` in a stylesheet from
         // shifting unpositioned content.
@@ -5294,6 +5381,7 @@ mod position_wire_tests {
 
     #[test]
     fn b_relative_and_sticky_map_to_static_deliberately() {
+        let _gpu = gpu_serial();
         // Mirrors the macOS reference. Entering the positioned paint path for
         // these wrecks pages whose relative boxes are only z-index anchors,
         // until the stacking pipeline matures. Pinned so a future change is a
@@ -5305,6 +5393,7 @@ mod position_wire_tests {
 
     #[test]
     fn b_position_reaches_a_box_through_the_real_document_build() {
+        let _gpu = gpu_serial();
         // Group B above calls the helper directly. This drives the whole path
         // - author stylesheet, cascade, layout build - so the receipt is not
         // resting on my own helper being called.
@@ -5376,6 +5465,7 @@ mod text_decoration_tests {
 
     #[test]
     fn a_shorthand_token_order_does_not_matter() {
+        let _gpu = gpu_serial();
         assert!(st("text-decoration: underline red").text_decoration_line.underline);
         assert!(st("text-decoration: red underline").text_decoration_line.underline);
         let multi = st("text-decoration: underline line-through").text_decoration_line;
@@ -5384,6 +5474,7 @@ mod text_decoration_tests {
 
     #[test]
     fn a_none_clears_but_a_colour_only_value_does_not() {
+        let _gpu = gpu_serial();
         let mut s = ComputedStyle::new();
         apply_inline_style_decls(&mut s, "text-decoration: underline");
         apply_inline_style_decls(&mut s, "text-decoration: goldenrod");
@@ -5395,6 +5486,7 @@ mod text_decoration_tests {
 
     #[test]
     fn a_longhands_parse() {
+        let _gpu = gpu_serial();
         assert_eq!(st("text-decoration-style: wavy").text_decoration_style,
                    rustkit_css::TextDecorationStyle::Wavy);
         assert!(st("text-decoration-color: #ff0000").text_decoration_color.is_some());
@@ -5404,6 +5496,7 @@ mod text_decoration_tests {
 
     #[test]
     fn b_underline_reaches_the_display_list() {
+        let _gpu = gpu_serial();
         let with = display_list_for(
             r#"<html><head><style>p { text-decoration: underline; }</style></head>
                <body><p>hello</p></body></html>"#,
@@ -5418,6 +5511,7 @@ mod text_decoration_tests {
 
     #[test]
     fn b_an_undecorated_page_emits_no_decoration_commands() {
+        let _gpu = gpu_serial();
         // The propagation copy is GATED on the parent having a line. Without
         // the gate every text run would carry decoration it never asked for.
         // Asserting the negative so the gate is a decision, not a leftover.
@@ -5428,6 +5522,7 @@ mod text_decoration_tests {
 
     #[test]
     fn b_line_through_and_colour_reach_the_display_list_distinctly() {
+        let _gpu = gpu_serial();
         let plain_ul = display_list_for(
             r#"<html><head><style>p{text-decoration:underline}</style></head>
                <body><p>hi</p></body></html>"#);
@@ -5598,6 +5693,7 @@ mod box_shadow_paint_tests {
 
     #[test]
     fn a_box_shadow_parses_into_computed_style() {
+        let _gpu = gpu_serial();
         let mut s = ComputedStyle::new();
         apply_inline_style_decls(&mut s, "box-shadow: 2px 4px 6px rgba(0,0,0,0.5)");
         assert_eq!(s.box_shadows.len(), 1);
@@ -5607,6 +5703,7 @@ mod box_shadow_paint_tests {
 
     #[test]
     fn a_none_clears_the_shadow_list() {
+        let _gpu = gpu_serial();
         let mut s = ComputedStyle::new();
         apply_inline_style_decls(&mut s, "box-shadow: 2px 2px 2px black");
         apply_inline_style_decls(&mut s, "box-shadow: none");
@@ -5617,6 +5714,7 @@ mod box_shadow_paint_tests {
 
     #[test]
     fn b_box_shadow_reaches_the_display_list() {
+        let _gpu = gpu_serial();
         // THE RECEIPT. Group A has passed since A2 while nothing was ever
         // drawn - a shadow that parses and never paints is indistinguishable,
         // on screen, from no support at all.
@@ -5651,6 +5749,7 @@ mod box_shadow_paint_tests {
 
     #[test]
     fn b_an_unshadowed_page_emits_no_shadow_commands() {
+        let _gpu = gpu_serial();
         let plain = display_list_for(r#"<html><body><div>x</div></body></html>"#);
         assert!(!plain.contains("BoxShadow"),
                 "a page with no box-shadow must emit no shadow commands");
@@ -5658,6 +5757,7 @@ mod box_shadow_paint_tests {
 
     #[test]
     fn b_a_fully_transparent_shadow_is_not_emitted() {
+        let _gpu = gpu_serial();
         // is_visible() gates on alpha. Emitting a fully transparent shadow
         // would cost a draw call per box for something nobody can see.
         let t = display_list_for(
@@ -5710,6 +5810,7 @@ mod flex_column_cross_stretch {
 
     #[test]
     fn column_flex_children_fill_the_cross_axis() {
+        let _gpu = gpu_serial();
         // align-items defaults to stretch, so every element box in a 1000px
         // column container must be 1000px wide.
         let boxes = laid_out(
@@ -5799,6 +5900,7 @@ mod font_size_cascade_absolutise {
 
     #[test]
     fn g1_relative_units_are_stored_as_px() {
+        let _gpu = gpu_serial();
         for decl in ["font-size:2rem", "font-size:1.5em", "font-size:200%"] {
             assert!(
                 matches!(p_font_size("", decl), Length::Px(_)),
@@ -5811,6 +5913,7 @@ mod font_size_cascade_absolutise {
 
     #[test]
     fn g2_the_text_box_carries_the_absolute_size() {
+        let _gpu = gpu_serial();
         let e = engine();
         let doc = Document::parse_html(
             r#"<html><head><style>html{font-size:16px}body{font-size:20px}p{font-size:2rem}</style></head><body><p>x</p></body></html>"#
@@ -5828,6 +5931,7 @@ mod font_size_cascade_absolutise {
 
     #[test]
     fn g3_values_are_right_in_every_context() {
+        let _gpu = gpu_serial();
         // The four numbers Atlas specified, across the five paths Prometheus
         // named. `em` resolves against the PARENT (20px), `rem` against the
         // ROOT (16px) - a resolver that used the root for both would pass
@@ -5844,6 +5948,7 @@ mod font_size_cascade_absolutise {
 
     #[test]
     fn g3_inline_style_attribute_path() {
+        let _gpu = gpu_serial();
         // The fifth path. Inline style is applied AFTER author rules, so the
         // absolutise block has to sit after it - if it ran earlier this would
         // still be Rem(2.0).
@@ -5861,6 +5966,7 @@ mod font_size_cascade_absolutise {
 
     #[test]
     fn g3_em_chains_compound() {
+        let _gpu = gpu_serial();
         // Athena flagged this as unverified on her side: 2em inside 2em must
         // compound, which only works if the parent's font_size was already
         // absolutised when the child reads it. Root 16 -> outer 32 -> inner 64.
@@ -5909,6 +6015,7 @@ mod html_root_inheritance {
 
     #[test]
     fn every_inherited_property_on_html_reaches_the_text() {
+        let _gpu = gpu_serial();
         // All five were dropped before this unit. Asserting them together
         // because the defect was not per-property - the whole inherited set
         // was discarded at one seam.
@@ -5917,13 +6024,14 @@ mod html_root_inheritance {
         );
         assert_eq!(s.font_size, Length::Px(20.0), "font-size on html must reach text");
         assert_eq!((s.color.r, s.color.g, s.color.b), (255, 0, 0), "color on html must reach text");
-        assert_eq!(s.line_height, 1.5, "line-height on html must reach text");
+        assert_eq!(s.line_height, rustkit_css::LineHeight::Number(1.5), "line-height on html must reach text");
         assert_eq!(s.font_family, "Georgia", "font-family on html must reach text");
         assert_eq!(s.text_align, rustkit_css::TextAlign::Center, "text-align on html must reach text");
     }
 
     #[test]
     fn em_on_body_resolves_against_the_html_font_size() {
+        let _gpu = gpu_serial();
         // The value test, not just the reaching test. html 20px + body 2em
         // must be 40. If html's size never arrives, body resolves 2em against
         // the 16px initial and yields 32 - a plausible-looking wrong number.
@@ -5936,6 +6044,7 @@ mod html_root_inheritance {
 
     #[test]
     fn body_still_overrides_html() {
+        let _gpu = gpu_serial();
         // Inheritance must not become imposition: a property set on BOTH must
         // take body's value, or this fix would have traded one bug for another.
         let s = text_style(
@@ -5947,6 +6056,7 @@ mod html_root_inheritance {
 
     #[test]
     fn a_document_without_an_html_element_still_builds() {
+        let _gpu = gpu_serial();
         // Fragment parsing and malformed documents must not panic or regress.
         let s = text_style(r#"<body><p>x</p></body>"#);
         assert_eq!(s.font_size, Length::Px(16.0), "no html element: the initial size still applies");
@@ -6005,6 +6115,7 @@ mod rounded_rect_tests {
 
     #[test]
     fn a_shorthand_arities_follow_the_css_fill_in_rules() {
+        let _gpu = gpu_serial();
         // NOT intuitive, and each arity is its own bug: 2 values means
         // [TL+BR, TR+BL]; 3 means [TL, TR+BL, BR]. Getting these wrong rounds
         // the wrong corners while the box still looks plausible.
@@ -6022,6 +6133,7 @@ mod rounded_rect_tests {
 
     #[test]
     fn a_longhands_set_one_corner_each() {
+        let _gpu = gpu_serial();
         let s = st("border-top-left-radius: 7px; border-bottom-right-radius: 9px");
         assert_eq!(s.border_top_left_radius, Length::Px(7.0));
         assert_eq!(s.border_bottom_right_radius, Length::Px(9.0));
@@ -6031,6 +6143,7 @@ mod rounded_rect_tests {
 
     #[test]
     fn a_a_malformed_value_leaves_the_previous_radii_alone() {
+        let _gpu = gpu_serial();
         let mut s = ComputedStyle::new();
         apply_inline_style_decls(&mut s, "border-radius: 8px");
         apply_inline_style_decls(&mut s, "border-radius: banana");
@@ -6042,6 +6155,7 @@ mod rounded_rect_tests {
 
     #[test]
     fn b_radii_reach_the_display_list_per_corner() {
+        let _gpu = gpu_serial();
         let r = rounded(
             r#"<html><head><style>div{background:#f00;width:100px;height:100px;border-radius:1px 2px 3px 4px}</style></head><body><div></div></body></html>"#,
         );
@@ -6053,6 +6167,7 @@ mod rounded_rect_tests {
 
     #[test]
     fn b_a_square_box_still_emits_a_plain_rect() {
+        let _gpu = gpu_serial();
         // The fallback is load-bearing: emitting RoundedRect for every box
         // would put every page on the SDF path for nothing.
         let html = r#"<html><head><style>div{background:#f00;width:100px;height:100px}</style></head><body><div></div></body></html>"#;
@@ -6062,6 +6177,7 @@ mod rounded_rect_tests {
 
     #[test]
     fn b_em_radii_resolve_against_the_elements_font_size() {
+        let _gpu = gpu_serial();
         // Relies on the cascade absolutising font-size (#46): 2em at 32px is
         // 64, not 32. If font-size were still relative here this would be 32.
         let r = rounded(
@@ -6127,6 +6243,7 @@ mod l1_live_relative_units_reach_flex_and_grid {
 
     #[test]
     fn baseline_unmargined_flex_item_sits_at_zero() {
+        let _gpu = gpu_serial();
         // If this is ever non-zero, every number below is measuring something
         // other than the margin and the whole module is worthless.
         let x = item_x(
@@ -6137,6 +6254,7 @@ mod l1_live_relative_units_reach_flex_and_grid {
 
     #[test]
     fn control_px_margin_reaches_flex_layout() {
+        let _gpu = gpu_serial();
         // CONTROL, and it is load-bearing: it separates "relative units resolve
         // wrongly" from "margins never reach flex layout at all". Without it a
         // red below is ambiguous.
@@ -6150,6 +6268,7 @@ mod l1_live_relative_units_reach_flex_and_grid {
 
     #[test]
     fn flex_em_margin_uses_the_element_font_size() {
+        let _gpu = gpu_serial();
         // 2em at font-size 20px = 40px. A hardcoded 16 yields 32.
         let x = item_x(
             r#"<html><head><style>body{margin:0;padding:0;display:flex;width:1000px}
@@ -6169,6 +6288,7 @@ mod l1_live_relative_units_reach_flex_and_grid {
     /// written to measure.
     #[test]
     fn flex_em_gap_uses_the_container_font_size() {
+        let _gpu = gpu_serial();
         // Container font-size 20px, gap 2em = 40px, so the SECOND item starts at
         // 40 (first item has zero width in this tree).
         let xs = element_xs(
@@ -6187,6 +6307,7 @@ mod l1_live_relative_units_reach_flex_and_grid {
 
     #[test]
     fn flex_rem_margin_uses_the_root_constant_not_the_element_font_size() {
+        let _gpu = gpu_serial();
         // rem is pinned fleet-wide to the engine root constant 16, NOT the
         // element font size. 2rem = 32 even though the element is 20px. This
         // guards the opposite error from the em case: a fix that naively passes
@@ -6205,6 +6326,7 @@ mod l1_live_relative_units_reach_flex_and_grid {
 
     #[test]
     fn grid_em_column_gap_uses_the_container_font_size() {
+        let _gpu = gpu_serial();
         // Two 100px columns, container font-size 20px, column-gap 2em = 40px.
         // Second column therefore starts at 140.
         let xs = element_xs(
@@ -6223,6 +6345,7 @@ mod l1_live_relative_units_reach_flex_and_grid {
 
     #[test]
     fn grid_rem_column_gap_uses_the_root_constant() {
+        let _gpu = gpu_serial();
         let xs = element_xs(
             r#"<html><head><style>body{margin:0;padding:0}
                #g{display:grid;grid-template-columns:100px 100px;font-size:20px;
@@ -6374,6 +6497,7 @@ mod flexbox_45_automatic_minimum {
 
     #[test]
     fn control_the_harness_reaches_computed_style() {
+        let _gpu = gpu_serial();
         // Load-bearing: without it, every zero below is ambiguous between
         // "the rule correctly declined to apply" and "nothing in this fixture
         // works at all".
@@ -6384,6 +6508,7 @@ mod flexbox_45_automatic_minimum {
 
     #[test]
     fn positive_unset_min_floors_the_item_at_its_content() {
+        let _gpu = gpu_serial();
         // The item is in a 40px container with content wider than that. With
         // `min-width: auto` (the initial) and visible overflow, §4.5 floors it
         // at its min-content width instead of letting shrink squeeze it away.
@@ -6397,6 +6522,7 @@ mod flexbox_45_automatic_minimum {
 
     #[test]
     fn negative_an_authored_zero_is_still_honoured() {
+        let _gpu = gpu_serial();
         // §4.5 applies only when the SPECIFIED minimum is `auto`. An author who
         // writes 0 is asking to be shrinkable to nothing and must keep getting
         // it — this is the distinction that required the initial value to
@@ -6409,6 +6535,7 @@ mod flexbox_45_automatic_minimum {
 
     #[test]
     fn negative_overflow_hidden_suppresses_the_automatic_minimum() {
+        let _gpu = gpu_serial();
         // THE DISCRIMINATOR. An item that can clip its own content stops being
         // floored by that content. This test was IMPOSSIBLE to write until
         // `overflow` became parseable: `overflow_x` was permanently Visible, so
@@ -6422,6 +6549,7 @@ mod flexbox_45_automatic_minimum {
 
     #[test]
     fn negative_scroll_and_auto_also_suppress_it() {
+        let _gpu = gpu_serial();
         // `hidden` alone would leave "not visible" tested through a single
         // keyword while the rule is written against every non-visible value.
         for keyword in ["scroll", "auto", "clip"] {
@@ -6434,6 +6562,7 @@ mod flexbox_45_automatic_minimum {
 
     #[test]
     fn overflow_y_does_not_suppress_a_horizontal_main_axis() {
+        let _gpu = gpu_serial();
         // The gate is per-AXIS: a row flex container's main axis is horizontal,
         // so clipping vertically must not affect the horizontal floor. If both
         // axes were consulted, this would wrongly collapse to 0.
@@ -6464,6 +6593,7 @@ mod x11_content_path {
 
     #[test]
     fn rustkit_creates_an_x11_view_and_paints_a_page() {
+        let _gpu = gpu_serial();
         if !have_display() {
             eprintln!("SKIP: no DISPLAY; X11 content path not exercised");
             return;
@@ -6525,6 +6655,7 @@ mod canvas_background_propagation {
 
     #[test]
     fn body_background_fills_the_viewport() {
+        let _gpu = gpu_serial();
         let cmd = first_command(
             r#"<html><head><style>body{margin:0;background:#101820}</style></head>
                <body><div style="width:100px;height:50px">x</div></body></html>"#);
@@ -6535,6 +6666,7 @@ mod canvas_background_propagation {
 
     #[test]
     fn a_backgroundless_document_gets_the_ua_white_canvas() {
+        let _gpu = gpu_serial();
         // First written asserting NO canvas fill — wrong premise, caught by the
         // test itself: the UA default sheet paints `body` white, so a document
         // with no author background donates UA-white to the canvas, exactly as
@@ -6566,6 +6698,7 @@ mod box_shorthand_and_auto_margins {
 
     #[test]
     fn two_value_shorthand_no_longer_drops_everything() {
+        let _gpu = gpu_serial();
         // Before: parse_length() was called on the WHOLE value string, so
         // "80px auto" failed to parse and NOTHING was set — not even the 80px.
         let s = applied("margin: 80px auto");
@@ -6577,6 +6710,7 @@ mod box_shorthand_and_auto_margins {
 
     #[test]
     fn one_three_and_four_value_forms() {
+        let _gpu = gpu_serial();
         let one = applied("padding: 10px");
         assert_eq!((one.padding_top, one.padding_left), (Length::Px(10.0), Length::Px(10.0)));
 
@@ -6592,6 +6726,7 @@ mod box_shorthand_and_auto_margins {
 
     #[test]
     fn an_invalid_token_drops_the_whole_declaration() {
+        let _gpu = gpu_serial();
         // Half-applying a shorthand is worse than ignoring it.
         let mut s = ComputedStyle::default();
         s.margin_top = Length::Px(5.0);
@@ -6601,6 +6736,7 @@ mod box_shorthand_and_auto_margins {
 
     #[test]
     fn auto_margins_center_a_definite_width_block() {
+        let _gpu = gpu_serial();
         let html = r#"<html><head><style>body{margin:0}
             #c{width:400px;height:50px;margin:0 auto}</style></head>
             <body><div id=c>x</div></body></html>"#;
@@ -6682,6 +6818,7 @@ mod grid_intrinsic_track_sizing {
 
     #[test]
     fn control_explicit_px_tracks_are_unaffected() {
+        let _gpu = gpu_serial();
         // Load-bearing: proves the harness lays out grids at all, so a zero
         // below means "this track type collapses" rather than "grids are dead".
         assert_eq!(item_xs("grid-template-columns:120px 120px"), vec![120.0, 120.0]);
@@ -6689,6 +6826,7 @@ mod grid_intrinsic_track_sizing {
 
     #[test]
     fn auto_tracks_are_sized_from_content_not_zero() {
+        let _gpu = gpu_serial();
         let w = item_xs("grid-template-columns:auto auto");
         assert!(
             w[0] > 0.0 && w[1] > 0.0,
@@ -6698,18 +6836,21 @@ mod grid_intrinsic_track_sizing {
 
     #[test]
     fn max_content_tracks_are_sized_from_content_not_zero() {
+        let _gpu = gpu_serial();
         let w = item_xs("grid-template-columns:max-content max-content");
         assert!(w[0] > 0.0 && w[1] > 0.0, "max-content track collapsed: {w:?}");
     }
 
     #[test]
     fn min_content_tracks_are_sized_from_content_not_zero() {
+        let _gpu = gpu_serial();
         let w = item_xs("grid-template-columns:min-content min-content");
         assert!(w[0] > 0.0 && w[1] > 0.0, "min-content track collapsed: {w:?}");
     }
 
     #[test]
     fn max_content_is_strictly_wider_than_min_content_for_wrappable_text() {
+        let _gpu = gpu_serial();
         // The two estimators must not be wired to the same thing.
         //
         // The item text is TWO words, deliberately: min-content is the widest
@@ -6729,6 +6870,7 @@ mod grid_intrinsic_track_sizing {
 
     #[test]
     fn an_auto_track_still_respects_an_explicit_sibling() {
+        let _gpu = gpu_serial();
         // auto next to a fixed track must not eat the fixed track's space.
         let w = item_xs("grid-template-columns:100px auto");
         assert_eq!(w[0], 100.0, "explicit px track must stay exactly 100; got {w:?}");

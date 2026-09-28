@@ -265,11 +265,25 @@ impl ColorF32 {
     }
 }
 
+impl Default for ColorF32 {
+    fn default() -> Self {
+        Self::BLACK
+    }
+}
+
+impl From<Color> for ColorF32 {
+    fn from(c: Color) -> Self {
+        ColorF32::from_color(c)
+    }
+}
+
+impl From<ColorF32> for Color {
+    fn from(c: ColorF32) -> Self {
+        c.to_color()
+    }
+}
+
 /// A CSS length value.
-///
-/// NOTE: `Length` is deliberately NOT `Copy` — the `Min`/`Max`/`Clamp` math
-/// variants hold `Box`ed operands (mirrors hiwave-macos / Windows #42). Every
-/// former implicit copy is now an explicit `.clone()` or a borrow.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Length {
     /// Pixels.
@@ -303,16 +317,13 @@ pub enum Length {
 
 impl Length {
     /// Compute the absolute pixel value.
-    ///
-    /// vw/vh/vmin/vmax resolve to 0.0 through this entry point (no viewport
-    /// context); use [`Length::to_px_with_viewport`] when viewport dimensions
-    /// are known. Signature preserved so existing call sites are unaffected.
+    /// 
+    /// For viewport units, pass viewport dimensions via `viewport_width` and `viewport_height`.
     pub fn to_px(&self, font_size: f32, root_font_size: f32, container_size: f32) -> f32 {
         self.to_px_with_viewport(font_size, root_font_size, container_size, 0.0, 0.0)
     }
-
-    /// Compute the absolute pixel value with viewport dimensions for
-    /// vw/vh/vmin/vmax units.
+    
+    /// Compute the absolute pixel value with viewport dimensions for vh/vw units.
     pub fn to_px_with_viewport(
         &self,
         font_size: f32,
@@ -332,25 +343,488 @@ impl Length {
             Length::Vmax(vmax) => vmax / 100.0 * viewport_width.max(viewport_height),
             Length::Auto => 0.0, // Context-dependent
             Length::Zero => 0.0,
-            // Math functions resolve their operands recursively with the SAME
-            // context (font/root/container/viewport) before combining.
-            Length::Min(b) => {
-                let a = b.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                let c = b.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                a.min(c)
+            Length::Min(pair) => {
+                let a = pair.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let b = pair.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                a.min(b)
             }
-            Length::Max(b) => {
-                let a = b.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                let c = b.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                a.max(c)
+            Length::Max(pair) => {
+                let a = pair.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let b = pair.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                a.max(b)
             }
-            Length::Clamp(b) => {
-                let mn = b.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                let pref = b.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                let mx = b.2.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                pref.clamp(mn, mx)
+            Length::Clamp(triple) => {
+                let min_val = triple.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let pref = triple.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let max_val = triple.2.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                pref.clamp(min_val, max_val)
             }
         }
+    }
+}
+
+/// A CSS box-shadow value.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BoxShadow {
+    /// Horizontal offset (positive = right).
+    pub offset_x: f32,
+    /// Vertical offset (positive = down).
+    pub offset_y: f32,
+    /// Blur radius (0 = sharp edge).
+    pub blur_radius: f32,
+    /// Spread radius (positive = larger shadow).
+    pub spread_radius: f32,
+    /// Shadow color.
+    pub color: Color,
+    /// Whether this is an inset shadow.
+    pub inset: bool,
+}
+
+impl BoxShadow {
+    /// Create a new box shadow with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Create a simple drop shadow.
+    pub fn drop_shadow(offset_x: f32, offset_y: f32, blur: f32, color: Color) -> Self {
+        Self {
+            offset_x,
+            offset_y,
+            blur_radius: blur,
+            spread_radius: 0.0,
+            color,
+            inset: false,
+        }
+    }
+    
+    /// Check if this shadow is visible (non-zero offset, blur, or spread with non-transparent color).
+    pub fn is_visible(&self) -> bool {
+        self.color.a > 0.0 && 
+        (self.offset_x != 0.0 || self.offset_y != 0.0 || self.blur_radius > 0.0 || self.spread_radius != 0.0)
+    }
+}
+
+/// A filter function that can be applied to the backdrop.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum BackdropFilter {
+    /// No backdrop filter.
+    #[default]
+    None,
+    /// Gaussian blur with the specified radius in pixels.
+    Blur(f32),
+    /// Grayscale filter (0.0 = no effect, 1.0 = fully grayscale).
+    Grayscale(f32),
+    /// Brightness adjustment (1.0 = no change).
+    Brightness(f32),
+    /// Contrast adjustment (1.0 = no change).
+    Contrast(f32),
+    /// Saturate adjustment (1.0 = no change, 0.0 = grayscale, >1 = oversaturated).
+    Saturate(f32),
+    /// Sepia filter (0.0 = no effect, 1.0 = fully sepia).
+    Sepia(f32),
+}
+
+impl BackdropFilter {
+    /// Check if this filter has any effect.
+    pub fn is_none(&self) -> bool {
+        matches!(self, BackdropFilter::None)
+    }
+
+    /// Check if this filter requires blur (most expensive operation).
+    pub fn needs_blur(&self) -> bool {
+        matches!(self, BackdropFilter::Blur(r) if *r > 0.0)
+    }
+}
+
+/// Position along a gradient stop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StopPosition {
+    /// Percentage position (0.0 to 1.0).
+    Percent(f32),
+    /// Pixel position along the gradient line.
+    Pixels(f32),
+}
+
+impl StopPosition {
+    /// Convert to a normalized 0-1 position given the gradient line length in pixels.
+    /// For percentage values, returns the percentage directly.
+    /// For pixel values, divides by the gradient line length.
+    pub fn to_normalized(&self, gradient_length: f32) -> f32 {
+        match self {
+            StopPosition::Percent(p) => *p,
+            StopPosition::Pixels(px) => {
+                if gradient_length > 0.0 {
+                    *px / gradient_length
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// Get the raw value (for calculating repeat length in pixels).
+    pub fn raw_value(&self) -> f32 {
+        match self {
+            StopPosition::Percent(p) => *p,
+            StopPosition::Pixels(px) => *px,
+        }
+    }
+
+    /// Check if this is a pixel-based position.
+    pub fn is_pixels(&self) -> bool {
+        matches!(self, StopPosition::Pixels(_))
+    }
+}
+
+/// A color stop for gradients.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorStop {
+    /// The color at this stop.
+    pub color: Color,
+    /// Position along the gradient (percentage 0.0-1.0, pixels, or None for auto).
+    pub position: Option<StopPosition>,
+}
+
+impl ColorStop {
+    pub fn new(color: Color, position: Option<f32>) -> Self {
+        Self {
+            color,
+            position: position.map(StopPosition::Percent),
+        }
+    }
+
+    /// Create a color stop with a pixel position.
+    pub fn with_pixels(color: Color, pixels: f32) -> Self {
+        Self {
+            color,
+            position: Some(StopPosition::Pixels(pixels)),
+        }
+    }
+
+    /// Create a color stop with a percentage position.
+    pub fn with_percent(color: Color, percent: f32) -> Self {
+        Self {
+            color,
+            position: Some(StopPosition::Percent(percent)),
+        }
+    }
+}
+
+/// Direction for linear gradients.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum GradientDirection {
+    /// Angle in degrees (0 = to top, 90 = to right, 180 = to bottom, 270 = to left).
+    Angle(f32),
+    /// To top (0deg).
+    #[default]
+    ToTop,
+    /// To right (90deg).
+    ToRight,
+    /// To bottom (180deg).
+    ToBottom,
+    /// To left (270deg).
+    ToLeft,
+    /// To top-right (45deg).
+    ToTopRight,
+    /// To top-left (315deg).
+    ToTopLeft,
+    /// To bottom-right (135deg).
+    ToBottomRight,
+    /// To bottom-left (225deg).
+    ToBottomLeft,
+}
+
+impl GradientDirection {
+    /// Convert to angle in degrees.
+    pub fn to_degrees(&self) -> f32 {
+        match self {
+            GradientDirection::Angle(deg) => *deg,
+            GradientDirection::ToTop => 0.0,
+            GradientDirection::ToRight => 90.0,
+            GradientDirection::ToBottom => 180.0,
+            GradientDirection::ToLeft => 270.0,
+            GradientDirection::ToTopRight => 45.0,
+            GradientDirection::ToTopLeft => 315.0,
+            GradientDirection::ToBottomRight => 135.0,
+            GradientDirection::ToBottomLeft => 225.0,
+        }
+    }
+}
+
+/// A CSS linear gradient.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearGradient {
+    /// Direction of the gradient.
+    pub direction: GradientDirection,
+    /// Color stops.
+    pub stops: Vec<ColorStop>,
+    /// Whether this is a repeating gradient.
+    pub repeating: bool,
+}
+
+impl LinearGradient {
+    pub fn new(direction: GradientDirection, stops: Vec<ColorStop>) -> Self {
+        Self { direction, stops, repeating: false }
+    }
+
+    pub fn new_repeating(direction: GradientDirection, stops: Vec<ColorStop>) -> Self {
+        Self { direction, stops, repeating: true }
+    }
+}
+
+/// A CSS radial gradient.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RadialGradient {
+    /// Shape: "circle" or "ellipse".
+    pub shape: RadialShape,
+    /// Size of the gradient.
+    pub size: RadialSize,
+    /// Center position (0.0 to 1.0, default 0.5).
+    pub center: (f32, f32),
+    /// Color stops.
+    pub stops: Vec<ColorStop>,
+    /// Whether this is a repeating gradient.
+    pub repeating: bool,
+}
+
+impl RadialGradient {
+    pub fn new(shape: RadialShape, size: RadialSize, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
+        Self { shape, size, center, stops, repeating: false }
+    }
+
+    pub fn new_repeating(shape: RadialShape, size: RadialSize, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
+        Self { shape, size, center, stops, repeating: true }
+    }
+}
+
+/// A CSS conic gradient.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConicGradient {
+    /// Starting angle in degrees (default 0, pointing up).
+    pub from_angle: f32,
+    /// Center position (0.0 to 1.0, default 0.5).
+    pub center: (f32, f32),
+    /// Color stops (positions are in degrees or percentages).
+    pub stops: Vec<ColorStop>,
+    /// Whether this is a repeating gradient.
+    pub repeating: bool,
+}
+
+impl ConicGradient {
+    pub fn new(from_angle: f32, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
+        Self { from_angle, center, stops, repeating: false }
+    }
+
+    pub fn new_repeating(from_angle: f32, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
+        Self { from_angle, center, stops, repeating: true }
+    }
+}
+
+/// Shape of a radial gradient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RadialShape {
+    /// Circle (equal radius in all directions).
+    Circle,
+    /// Ellipse (can stretch in one direction).
+    #[default]
+    Ellipse,
+}
+
+/// Size of a radial gradient.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum RadialSize {
+    /// Closest side.
+    ClosestSide,
+    /// Farthest side.
+    #[default]
+    FarthestSide,
+    /// Closest corner.
+    ClosestCorner,
+    /// Farthest corner.
+    FarthestCorner,
+    /// Explicit radius (for circles) or radii (for ellipses).
+    Explicit(f32, f32),
+}
+
+/// A CSS gradient (linear, radial, or conic).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Gradient {
+    Linear(LinearGradient),
+    Radial(RadialGradient),
+    Conic(ConicGradient),
+}
+
+// ==================== Background Layer Types ====================
+
+/// The image source for a background layer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundImage {
+    /// No image (transparent).
+    None,
+    /// A gradient.
+    Gradient(Gradient),
+    /// A URL reference to an image.
+    Url(String),
+}
+
+impl Default for BackgroundImage {
+    fn default() -> Self {
+        BackgroundImage::None
+    }
+}
+
+/// Background size specification.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundSize {
+    /// Stretch to cover the entire area.
+    Cover,
+    /// Scale to fit within the area.
+    Contain,
+    /// Explicit width and height (None = auto for that dimension).
+    Explicit { width: Option<f32>, height: Option<f32> },
+    /// Auto sizing (use intrinsic dimensions).
+    Auto,
+}
+
+impl Default for BackgroundSize {
+    fn default() -> Self {
+        BackgroundSize::Auto
+    }
+}
+
+/// Background repeat specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundRepeat {
+    /// Repeat in both directions.
+    Repeat,
+    /// Repeat horizontally only.
+    RepeatX,
+    /// Repeat vertically only.
+    RepeatY,
+    /// No repeat.
+    NoRepeat,
+    /// Space evenly to fill.
+    Space,
+    /// Round to fill without clipping.
+    Round,
+}
+
+impl Default for BackgroundRepeat {
+    fn default() -> Self {
+        BackgroundRepeat::Repeat
+    }
+}
+
+/// Background position specification.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundPosition {
+    /// Horizontal position (0.0 = left, 0.5 = center, 1.0 = right, or pixel offset).
+    pub x: BackgroundPositionValue,
+    /// Vertical position (0.0 = top, 0.5 = center, 1.0 = bottom, or pixel offset).
+    pub y: BackgroundPositionValue,
+}
+
+impl Default for BackgroundPosition {
+    fn default() -> Self {
+        BackgroundPosition {
+            x: BackgroundPositionValue::Percent(0.0),
+            y: BackgroundPositionValue::Percent(0.0),
+        }
+    }
+}
+
+/// A single dimension of background position.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundPositionValue {
+    /// Percentage (0.0 = start, 1.0 = end).
+    Percent(f32),
+    /// Pixel offset from the start.
+    Px(f32),
+}
+
+impl Default for BackgroundPositionValue {
+    fn default() -> Self {
+        BackgroundPositionValue::Percent(0.0)
+    }
+}
+
+impl BackgroundPositionValue {
+    /// Convert to a pixel offset given the container size and image size.
+    pub fn to_px(&self, container_size: f32, image_size: f32) -> f32 {
+        match self {
+            BackgroundPositionValue::Percent(pct) => {
+                // CSS background-position: percentage positions the image such that
+                // X% of the image aligns with X% of the container
+                (container_size - image_size) * pct
+            }
+            BackgroundPositionValue::Px(px) => *px,
+        }
+    }
+}
+
+/// Background origin - where the background positioning area starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundOrigin {
+    /// Position relative to the border box.
+    #[default]
+    PaddingBox,
+    /// Position relative to the border box.
+    BorderBox,
+    /// Position relative to the content box.
+    ContentBox,
+}
+
+/// A single background layer combining image, position, size, and repeat.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundLayer {
+    /// The background image (gradient or url).
+    pub image: BackgroundImage,
+    /// Positioning within the element.
+    pub position: BackgroundPosition,
+    /// How the background is sized.
+    pub size: BackgroundSize,
+    /// How the background repeats.
+    pub repeat: BackgroundRepeat,
+    /// Where the background positioning area starts.
+    pub origin: BackgroundOrigin,
+    /// Where the background is clipped.
+    pub clip: BackgroundClip,
+}
+
+impl Default for BackgroundLayer {
+    fn default() -> Self {
+        BackgroundLayer {
+            image: BackgroundImage::None,
+            position: BackgroundPosition::default(),
+            size: BackgroundSize::Auto,
+            repeat: BackgroundRepeat::Repeat,
+            origin: BackgroundOrigin::PaddingBox,
+            clip: BackgroundClip::BorderBox,
+        }
+    }
+}
+
+impl BackgroundLayer {
+    /// Create a new background layer with a gradient.
+    pub fn from_gradient(gradient: Gradient) -> Self {
+        BackgroundLayer {
+            image: BackgroundImage::Gradient(gradient),
+            ..Default::default()
+        }
+    }
+
+    /// Create a new background layer with a URL.
+    pub fn from_url(url: String) -> Self {
+        BackgroundLayer {
+            image: BackgroundImage::Url(url),
+            ..Default::default()
+        }
+    }
+
+    /// Check if this layer has a visible image.
+    pub fn has_image(&self) -> bool {
+        !matches!(self.image, BackgroundImage::None)
     }
 }
 
@@ -367,6 +841,7 @@ pub enum Display {
     InlineGrid,
     None,
 }
+
 
 impl Display {
     /// Check if this is a flex container.
@@ -631,6 +1106,69 @@ impl GridTemplate {
     pub fn track_count(&self) -> usize {
         self.tracks.len()
     }
+
+    /// Expand repeat() patterns into a flat list of track definitions.
+    ///
+    /// This handles `repeat(N, ...)` patterns by expanding them inline.
+    /// For `auto-fill` and `auto-fit`, returns them unexpanded (handled at layout time
+    /// when container size is known).
+    ///
+    /// # Returns
+    /// A tuple of (expanded_tracks, has_auto_repeat) where:
+    /// - expanded_tracks: All tracks with Count repeats expanded
+    /// - has_auto_repeat: Whether an auto-fill/auto-fit needs layout-time expansion
+    pub fn expand_tracks(&self) -> (Vec<TrackDefinition>, Option<&TrackRepeat>) {
+        if self.repeats.is_empty() {
+            return (self.tracks.clone(), None);
+        }
+
+        let mut result = Vec::new();
+        let mut auto_repeat = None;
+        let mut track_idx = 0;
+
+        // Sort repeats by insert position
+        let mut sorted_repeats: Vec<_> = self.repeats.iter().collect();
+        sorted_repeats.sort_by_key(|(pos, _)| *pos);
+
+        for (insert_pos, repeat) in &sorted_repeats {
+            // Add any tracks before this repeat position
+            while track_idx < *insert_pos && track_idx < self.tracks.len() {
+                result.push(self.tracks[track_idx].clone());
+                track_idx += 1;
+            }
+
+            match repeat {
+                TrackRepeat::Count(count, tracks) => {
+                    // Expand: repeat(N, track1 track2...) → N copies of the track list
+                    for _ in 0..*count {
+                        for track in tracks {
+                            result.push(track.clone());
+                        }
+                    }
+                }
+                TrackRepeat::AutoFill(_) | TrackRepeat::AutoFit(_) => {
+                    // Auto-fill/auto-fit need container size to expand
+                    // Store for layout-time handling
+                    auto_repeat = Some(repeat);
+                }
+            }
+        }
+
+        // Add remaining tracks after last repeat
+        while track_idx < self.tracks.len() {
+            result.push(self.tracks[track_idx].clone());
+            track_idx += 1;
+        }
+
+        (result, auto_repeat)
+    }
+
+    /// Get the number of tracks after repeat expansion.
+    /// For auto-fill/auto-fit, returns the count with repeat not expanded.
+    pub fn expanded_track_count(&self) -> usize {
+        let (expanded, _) = self.expand_tracks();
+        expanded.len()
+    }
 }
 
 /// Named grid area.
@@ -874,6 +1412,78 @@ pub enum FontStyle {
     Oblique,
 }
 
+/// Line height values.
+///
+/// CSS line-height can be:
+/// - `normal` - use font metrics (typically ~1.2)
+/// - a number (unitless multiplier of font-size)
+/// - a length (absolute value like `24px`)
+/// - a percentage (of font-size)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LineHeight {
+    /// Normal line height (use font metrics, typically ~1.2).
+    Normal,
+    /// Unitless number (multiplier of font-size).
+    Number(f32),
+    /// Absolute length in pixels.
+    Px(f32),
+}
+
+impl Default for LineHeight {
+    fn default() -> Self {
+        LineHeight::Normal
+    }
+}
+
+/// Fallback ratio for `line-height: normal` when no font metrics are available.
+///
+/// CSS says `normal` is derived from the font (ascent + descent + line-gap);
+/// this constant is only a stand-in for callers that cannot shape text. Layout
+/// must use [`LineHeight::to_px_with_normal`] instead — see its docs.
+pub const NORMAL_LINE_HEIGHT_FALLBACK_RATIO: f32 = 1.2;
+
+impl LineHeight {
+    /// Compute the line height in pixels, with no font metrics available.
+    ///
+    /// `Normal` falls back to a flat 1.2 x font-size, which is NOT what the
+    /// spec (or Chrome) does. Any caller that can shape text should call
+    /// [`LineHeight::to_px_with_normal`] and pass the font's own metrics.
+    pub fn to_px(&self, font_size: f32) -> f32 {
+        self.to_px_with_normal(font_size, font_size * NORMAL_LINE_HEIGHT_FALLBACK_RATIO)
+    }
+
+    /// Compute the line height in pixels, given the font's own `normal` height.
+    ///
+    /// `normal_px` is the font's ascent + descent + line-gap at this font-size
+    /// (rustkit-layout's `TextMetrics::height`). Only `Normal` consults it;
+    /// `Number`/`Px` are font-independent by definition.
+    ///
+    /// The flat-1.2 model this replaces was wrong by up to ~1.2px per line on
+    /// the common 16px system-ui case, and the error compounds down the page.
+    pub fn to_px_with_normal(&self, font_size: f32, normal_px: f32) -> f32 {
+        match self {
+            LineHeight::Normal => normal_px,
+            LineHeight::Number(n) => font_size * n,
+            LineHeight::Px(px) => *px,
+        }
+    }
+
+    /// Check if this represents a multiplier (Normal or Number).
+    pub fn is_multiplier(&self) -> bool {
+        matches!(self, LineHeight::Normal | LineHeight::Number(_))
+    }
+
+    /// Get the multiplier value, if this is a multiplier type.
+    /// Returns None for absolute Px values.
+    pub fn as_multiplier(&self) -> Option<f32> {
+        match self {
+            LineHeight::Normal => Some(1.2),
+            LineHeight::Number(n) => Some(*n),
+            LineHeight::Px(_) => None,
+        }
+    }
+}
+
 /// Text alignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextAlign {
@@ -1083,477 +1693,8 @@ pub enum Direction {
     Rtl,
 }
 
-/// Computed style for an element.
-#[derive(Debug, Clone, Default)]
-pub struct ComputedStyle {
-    // Transform (wire PR: the TransformList/TransformOrigin types landed
-    // INERT in Linux #10; these fields are what make the properties COMPUTE).
-    pub transform: TransformList,
-    pub transform_origin: TransformOrigin,
-    // Shadow/Filter wire: BoxShadow landed INERT in Linux #11; this field is
-    // what makes box-shadow compute. Vec because box-shadow takes a comma list.
-    pub box_shadows: Vec<BoxShadow>,
-    // Animation/transition wire (Cluster A3). The enums landed INERT in Linux
-    // #12; these fields are what make the properties compute. Durations are in
-    // SECONDS, matching the macOS tree - parse_time converts ms for us.
-    pub transition_property: String,
-    pub transition_duration: f32,
-    pub transition_timing_function: TimingFunction,
-    pub transition_delay: f32,
-    pub animation_name: String,
-    pub animation_duration: f32,
-    pub animation_timing_function: TimingFunction,
-    pub animation_delay: f32,
-    pub animation_iteration_count: AnimationIterationCount,
-    pub animation_direction: AnimationDirection,
-    pub animation_fill_mode: AnimationFillMode,
-    pub animation_play_state: AnimationPlayState,
-    // Box model
-    pub display: Display,
-    pub position: Position,
-    /// Box offsets. `Option` rather than a plain `Length`, deliberately:
-    /// CSS `auto` and `0` are DIFFERENT. `auto` keeps the element's static
-    /// flow position on that axis; `0` pins that edge to the containing
-    /// block. `Length::default()` is `Zero`, so storing a bare `Length` would
-    /// silently mean "pinned" for every element that never set an offset -
-    /// i.e. every element on the page. `Option::default()` is `None`, which
-    /// is `auto`, which is correct.
-    pub top: Option<Length>,
-    pub right: Option<Length>,
-    pub bottom: Option<Length>,
-    pub left: Option<Length>,
-    pub z_index: i32,
-    pub width: Length,
-    pub height: Length,
-    pub min_width: Length,
-    pub min_height: Length,
-    pub max_width: Length,
-    pub max_height: Length,
+// ==================== Transform Types ====================
 
-    // Margin
-    pub margin_top: Length,
-    pub margin_right: Length,
-    pub margin_bottom: Length,
-    pub margin_left: Length,
-
-    // Padding
-    pub padding_top: Length,
-    pub padding_right: Length,
-    pub padding_bottom: Length,
-    pub padding_left: Length,
-
-    // Border
-    pub border_top_width: Length,
-    pub border_right_width: Length,
-    pub border_bottom_width: Length,
-    pub border_left_width: Length,
-    pub border_top_color: Color,
-    pub border_right_color: Color,
-    pub border_bottom_color: Color,
-    /// Corner radii. Stored as Length so `border-radius: 1em` survives the
-    /// cascade; resolved to px at the paint boundary, like every other length.
-    pub border_top_left_radius: Length,
-    pub border_top_right_radius: Length,
-    pub border_bottom_right_radius: Length,
-    pub border_bottom_left_radius: Length,
-    pub border_left_color: Color,
-
-    // Colors
-    pub color: Color,
-    pub background_color: Color,
-
-    // Typography - Basic
-    pub font_size: Length,
-    pub font_weight: FontWeight,
-    pub font_style: FontStyle,
-    pub font_family: String,
-    pub line_height: f32,
-    pub text_align: TextAlign,
-
-    // Typography - Advanced
-    pub font_stretch: FontStretch,
-    pub letter_spacing: Length,
-    pub word_spacing: Length,
-    pub text_indent: Length,
-    pub text_decoration_line: TextDecorationLine,
-    pub text_decoration_color: Option<Color>,
-    pub text_decoration_style: TextDecorationStyle,
-    pub text_decoration_thickness: Length,
-    pub text_transform: TextTransform,
-    pub white_space: WhiteSpace,
-    pub word_break: WordBreak,
-    pub vertical_align: VerticalAlign,
-    pub writing_mode: WritingMode,
-    pub direction: Direction,
-
-    // Visual
-    pub opacity: f32,
-    pub overflow_x: Overflow,
-    pub overflow_y: Overflow,
-
-    // Flexbox Container
-    pub flex_direction: FlexDirection,
-    pub flex_wrap: FlexWrap,
-    pub justify_content: JustifyContent,
-    pub align_items: AlignItems,
-    pub align_content: AlignContent,
-    pub row_gap: Length,
-    pub column_gap: Length,
-
-    // Flexbox Item
-    pub order: i32,
-    pub flex_grow: f32,
-    pub flex_shrink: f32,
-    pub flex_basis: FlexBasis,
-    pub align_self: AlignSelf,
-
-    // Scrolling
-    pub scroll_behavior: ScrollBehavior,
-    pub overscroll_behavior_x: OverscrollBehavior,
-    pub overscroll_behavior_y: OverscrollBehavior,
-    pub scrollbar_width: ScrollbarWidth,
-    pub scrollbar_gutter: ScrollbarGutter,
-    pub scrollbar_color: Option<(Color, Color)>, // (thumb, track)
-
-    // Grid Container
-    pub grid_template_columns: GridTemplate,
-    pub grid_template_rows: GridTemplate,
-    pub grid_template_areas: Option<GridTemplateAreas>,
-    pub grid_auto_columns: TrackSize,
-    pub grid_auto_rows: TrackSize,
-    pub grid_auto_flow: GridAutoFlow,
-
-    // Grid Item
-    pub grid_column_start: GridLine,
-    pub grid_column_end: GridLine,
-    pub grid_row_start: GridLine,
-    pub grid_row_end: GridLine,
-
-    // Grid Alignment (also used by Flexbox)
-    pub justify_items: JustifyItems,
-    pub justify_self: JustifySelf,
-}
-
-impl ComputedStyle {
-    /// Create default style.
-    pub fn new() -> Self {
-        Self {
-            font_size: Length::Px(16.0),
-            line_height: 1.2,
-            opacity: 1.0,
-            color: Color::BLACK,
-            background_color: Color::TRANSPARENT,
-            font_family: "sans-serif".to_string(),
-            text_decoration_line: TextDecorationLine::NONE,
-            text_decoration_color: None,
-            text_decoration_thickness: Length::Auto,
-            // Flexbox item defaults
-            flex_shrink: 1.0, // Default is 1, not 0
-            // Width/height default to auto (fill available space), matching
-            // hiwave-macos ComputedStyle::new. Deriving these from
-            // Length::default() (Zero) makes every unstyled element 0x0 and
-            // suppresses parent/last-child margin collapsing (height != auto).
-            width: Length::Auto,
-            height: Length::Auto,
-            // CSS 2.1 said the initial value of min-width/min-height is 0.
-            // CSS Flexbox §4.5 supersedes that for flex items: the initial is
-            // `auto`, which on a flex item means "floor me at my content-based
-            // minimum", not "zero".
-            //
-            // The distinction is invisible almost everywhere — Length::Auto and
-            // Length::Zero both resolve to 0.0 — but it is the ONLY thing that
-            // lets flex tell an author who wrote `min-width: 0` ("you may shrink
-            // me to nothing") apart from an author who wrote nothing at all
-            // ("floor me at content"). Defaulting to Zero collapsed those two
-            // into one, so every flex item was shrinkable to zero and text was
-            // squeezed below the width it actually paints at.
-            min_width: Length::Auto,
-            min_height: Length::Auto,
-            max_width: Length::Auto, // No max constraint
-            max_height: Length::Auto,
-            ..Default::default()
-        }
-    }
-
-    /// Create style with inheritance from parent.
-    pub fn inherit_from(parent: &ComputedStyle) -> Self {
-        Self {
-            // Inherited properties
-            color: parent.color,
-            // Length is no longer Copy: clone the Length-typed inherited
-            // fields, matching the font_family precedent below.
-            font_size: parent.font_size.clone(),
-            font_weight: parent.font_weight,
-            font_style: parent.font_style,
-            font_stretch: parent.font_stretch,
-            font_family: parent.font_family.clone(),
-            line_height: parent.line_height,
-            text_align: parent.text_align,
-            letter_spacing: parent.letter_spacing.clone(),
-            word_spacing: parent.word_spacing.clone(),
-            text_indent: parent.text_indent.clone(),
-            text_transform: parent.text_transform,
-            white_space: parent.white_space,
-            word_break: parent.word_break,
-            direction: parent.direction,
-            writing_mode: parent.writing_mode,
-
-            // Text decoration is NOT inherited (each element sets its own)
-            text_decoration_line: TextDecorationLine::NONE,
-            text_decoration_color: None,
-            text_decoration_style: TextDecorationStyle::Solid,
-            text_decoration_thickness: Length::Auto,
-
-            // NON-INHERITED PROPERTIES WHOSE DERIVED DEFAULT IS WRONG.
-            //
-            // These SIX must be spelled out because `..Default::default()`
-            // below does NOT give the CSS initial value for them, and the
-            // failure is invisible in tests that only check inherited props:
-            //
-            //   * Length::default() is Zero, not Auto (the #[default] sits on
-            //     the Zero variant). Falling through makes every inheriting
-            //     element 0x0 - the exact defect fixed for ComputedStyle::new
-            //     in PR #4, which would have returned here through a different
-            //     door the moment the engine started calling inherit_from.
-            //   * Color::default() is opaque BLACK, so every inheriting
-            //     element would paint a black box over the page.
-            //   * f32::default() is 0.0, so every inheriting element would be
-            //     fully transparent - i.e. the whole page renders invisible.
-            //
-            // Measured on this tree, not assumed: before this change
-            // inherit_from(new()) yielded width=Zero, background=BLACK(a=1.0),
-            // opacity=0. (= the 11 explicit re-initialisations Athena measured
-            // in the Windows inherit_from; her note that the comment there is
-            // "a scar, not decoration" is exactly right.)
-            width: Length::Auto,
-            height: Length::Auto,
-            max_width: Length::Auto,
-            max_height: Length::Auto,
-            // min-width/min-height joined this list when the initial value
-            // became `auto` (Flexbox §4.5). The comment above predicted this
-            // exact return: the door was left open, and the moment §4.5 needed
-            // Auto, `..Default::default()` handed back Zero for every element
-            // that inherits — which is every element except the root. The
-            // symptom was a flex automatic minimum that worked in a unit test
-            // built from `ComputedStyle::new()` and did nothing whatsoever in
-            // the engine.
-            min_width: Length::Auto,
-            min_height: Length::Auto,
-            background_color: Color::TRANSPARENT,
-            opacity: 1.0,
-            flex_shrink: 1.0,
-
-            // Everything genuinely non-inherited whose derived default IS the
-            // CSS initial value. min_width/min_height are NO LONGER in this
-            // group — see above.
-            ..Default::default()
-        }
-    }
-}
-
-/// CSS property value (unparsed or parsed).
-#[derive(Debug, Clone)]
-pub enum PropertyValue {
-    /// Inherit from parent.
-    Inherit,
-    /// Initial value.
-    Initial,
-    /// Specific value.
-    Specified(String),
-}
-
-/// A CSS declaration (property: value).
-#[derive(Debug, Clone)]
-pub struct Declaration {
-    pub property: String,
-    pub value: PropertyValue,
-    pub important: bool,
-}
-
-/// A CSS rule (selector + declarations).
-#[derive(Debug, Clone)]
-pub struct Rule {
-    pub selector: String,
-    pub declarations: Vec<Declaration>,
-}
-
-/// A complete stylesheet.
-#[derive(Debug, Default)]
-pub struct Stylesheet {
-    pub rules: Vec<Rule>,
-}
-
-impl Stylesheet {
-    /// Create an empty stylesheet.
-    pub fn new() -> Self {
-        Self { rules: Vec::new() }
-    }
-
-    /// Parse a CSS string into a stylesheet.
-    pub fn parse(css: &str) -> Result<Self, CssError> {
-        debug!(len = css.len(), "Parsing CSS");
-        let ast = parse_stylesheet(css).map_err(|e| CssError::ParseError(e.to_string()))?;
-
-        let rules = ast
-            .rules
-            .into_iter()
-            .map(|r| Rule {
-                selector: r.selector,
-                declarations: r
-                    .declarations
-                    .into_iter()
-                    .map(|d| Declaration {
-                        property: d.property,
-                        value: PropertyValue::Specified(d.value),
-                        important: d.important,
-                    })
-                    .collect(),
-            })
-            .collect::<Vec<_>>();
-
-        debug!(rule_count = rules.len(), "CSS parsed");
-        Ok(Stylesheet { rules })
-    }
-
-    /// Get the number of rules in this stylesheet.
-    pub fn rule_count(&self) -> usize {
-        self.rules.len()
-    }
-}
-
-/// Parse a color value.
-pub fn parse_color(value: &str) -> Option<Color> {
-    let value = value.trim();
-
-    // Named colors
-    match value.to_lowercase().as_str() {
-        "transparent" => return Some(Color::TRANSPARENT),
-        "black" => return Some(Color::BLACK),
-        "white" => return Some(Color::WHITE),
-        "red" => return Some(Color::from_rgb(255, 0, 0)),
-        "green" => return Some(Color::from_rgb(0, 128, 0)),
-        "blue" => return Some(Color::from_rgb(0, 0, 255)),
-        "yellow" => return Some(Color::from_rgb(255, 255, 0)),
-        "gray" | "grey" => return Some(Color::from_rgb(128, 128, 128)),
-        _ => {}
-    }
-
-    // Hex colors
-    if let Some(hex) = value.strip_prefix('#') {
-        let (r, g, b, a) = match hex.len() {
-            3 => {
-                let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
-                let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
-                let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
-                (r, g, b, 1.0)
-            }
-            6 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                (r, g, b, 1.0)
-            }
-            8 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                let a = u8::from_str_radix(&hex[6..8], 16).ok()? as f32 / 255.0;
-                (r, g, b, a)
-            }
-            _ => return None,
-        };
-        return Some(Color::new(r, g, b, a));
-    }
-
-    // rgb() / rgba()
-    if value.starts_with("rgb") {
-        // Simplified parsing
-        let inner = value
-            .trim_start_matches("rgba(")
-            .trim_start_matches("rgb(")
-            .trim_end_matches(')');
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() >= 3 {
-            let r = parts[0].trim().parse::<u8>().ok()?;
-            let g = parts[1].trim().parse::<u8>().ok()?;
-            let b = parts[2].trim().parse::<u8>().ok()?;
-            let a = if parts.len() >= 4 {
-                parts[3].trim().parse::<f32>().ok()?
-            } else {
-                1.0
-            };
-            return Some(Color::new(r, g, b, a));
-        }
-    }
-
-    None
-}
-
-/// Parse a length value.
-pub fn parse_length(value: &str) -> Option<Length> {
-    let value = value.trim();
-
-    if value == "auto" {
-        return Some(Length::Auto);
-    }
-    if value == "0" {
-        return Some(Length::Zero);
-    }
-
-    if value.ends_with("px") {
-        let num = value.trim_end_matches("px").parse::<f32>().ok()?;
-        return Some(Length::Px(num));
-    }
-    // rem MUST be checked before em: "2rem".ends_with("em") is true, so an
-    // em-first order trims "em" -> "2r", fails to parse, and the ? drops the
-    // whole declaration silently. (Matches macOS rustkit-css.)
-    if value.ends_with("rem") {
-        let num = value.trim_end_matches("rem").parse::<f32>().ok()?;
-        return Some(Length::Rem(num));
-    }
-    if value.ends_with("em") {
-        let num = value.trim_end_matches("em").parse::<f32>().ok()?;
-        return Some(Length::Em(num));
-    }
-    if value.ends_with('%') {
-        let num = value.trim_end_matches('%').parse::<f32>().ok()?;
-        return Some(Length::Percent(num));
-    }
-
-    // Try plain number (treated as px)
-    if let Ok(num) = value.parse::<f32>() {
-        return Some(Length::Px(num));
-    }
-
-    None
-}
-
-/// Parse display value.
-pub fn parse_display(value: &str) -> Option<Display> {
-    match value.trim().to_lowercase().as_str() {
-        "block" => Some(Display::Block),
-        "inline" => Some(Display::Inline),
-        "inline-block" => Some(Display::InlineBlock),
-        "flex" => Some(Display::Flex),
-        // THE ROOT BREAK for grid on this tree. The Display enum has carried
-        // InlineFlex, Grid and InlineGrid since the port began, `is_grid()`
-        // has existed, and rustkit-layout's layout_grid_container is
-        // dispatched from it - but `display: grid` could not be PARSED, so
-        // every grid page on Linux laid out as a plain block and the whole
-        // grid engine was unreachable behind one missing match arm.
-        //
-        // Not caught by the reachability metric: that measures whether a
-        // FIELD is writable, and `display` was writable. A field can be
-        // reachable while a VALUE of it is not.
-        "inline-flex" => Some(Display::InlineFlex),
-        "grid" => Some(Display::Grid),
-        "inline-grid" => Some(Display::InlineGrid),
-        "none" => Some(Display::None),
-        _ => None,
-    }
-}
-
-// ==================== Transform Types =============
 /// A single 2D transform operation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TransformOp {
@@ -1682,147 +1823,6 @@ impl Default for TransformOrigin {
     }
 }
 
-// ==================== Background Types (gradient-free) ====================
-// Mirrors Athena's ratified Windows #41 boundary: the background-layer types
-// that do NOT name Gradient. BackgroundImage / BackgroundLayer are DEFERRED
-// (they name the Gradient type) and land with the renderer gradient migration.
-
-/// Background size specification.
-#[derive(Debug, Clone, PartialEq)]
-pub enum BackgroundSize {
-    /// Stretch to cover the entire area.
-    Cover,
-    /// Scale to fit within the area.
-    Contain,
-    /// Explicit width and height (None = auto for that dimension).
-    Explicit { width: Option<f32>, height: Option<f32> },
-    /// Auto sizing (use intrinsic dimensions).
-    Auto,
-}
-
-impl Default for BackgroundSize {
-    fn default() -> Self {
-        BackgroundSize::Auto
-    }
-}
-
-/// Background repeat specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackgroundRepeat {
-    /// Repeat in both directions.
-    Repeat,
-    /// Repeat horizontally only.
-    RepeatX,
-    /// Repeat vertically only.
-    RepeatY,
-    /// No repeat.
-    NoRepeat,
-    /// Space evenly to fill.
-    Space,
-    /// Round to fill without clipping.
-    Round,
-}
-
-impl Default for BackgroundRepeat {
-    fn default() -> Self {
-        BackgroundRepeat::Repeat
-    }
-}
-
-/// Background position specification.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BackgroundPosition {
-    /// Horizontal position (0.0 = left, 0.5 = center, 1.0 = right, or pixel offset).
-    pub x: BackgroundPositionValue,
-    /// Vertical position (0.0 = top, 0.5 = center, 1.0 = bottom, or pixel offset).
-    pub y: BackgroundPositionValue,
-}
-
-impl Default for BackgroundPosition {
-    fn default() -> Self {
-        BackgroundPosition {
-            x: BackgroundPositionValue::Percent(0.0),
-            y: BackgroundPositionValue::Percent(0.0),
-        }
-    }
-}
-
-// ==================== Shadow / Filter Types ====================
-
-/// A CSS box-shadow value.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct BoxShadow {
-    /// Horizontal offset (positive = right).
-    pub offset_x: f32,
-    /// Vertical offset (positive = down).
-    pub offset_y: f32,
-    /// Blur radius (0 = sharp edge).
-    pub blur_radius: f32,
-    /// Spread radius (positive = larger shadow).
-    pub spread_radius: f32,
-    /// Shadow color.
-    pub color: Color,
-    /// Whether this is an inset shadow.
-    pub inset: bool,
-}
-
-impl BoxShadow {
-    /// Create a new box shadow with default values.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create a simple drop shadow.
-    pub fn drop_shadow(offset_x: f32, offset_y: f32, blur: f32, color: Color) -> Self {
-        Self {
-            offset_x,
-            offset_y,
-            blur_radius: blur,
-            spread_radius: 0.0,
-            color,
-            inset: false,
-        }
-    }
-
-    /// Check if this shadow is visible (non-zero offset, blur, or spread with non-transparent color).
-    pub fn is_visible(&self) -> bool {
-        self.color.a > 0.0
-            && (self.offset_x != 0.0 || self.offset_y != 0.0 || self.blur_radius > 0.0 || self.spread_radius != 0.0)
-    }
-}
-
-/// A filter function that can be applied to the backdrop.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum BackdropFilter {
-    /// No backdrop filter.
-    #[default]
-    None,
-    /// Gaussian blur with the specified radius in pixels.
-    Blur(f32),
-    /// Grayscale filter (0.0 = no effect, 1.0 = fully grayscale).
-    Grayscale(f32),
-    /// Brightness adjustment (1.0 = no change).
-    Brightness(f32),
-    /// Contrast adjustment (1.0 = no change).
-    Contrast(f32),
-    /// Saturate adjustment (1.0 = no change, 0.0 = grayscale, >1 = oversaturated).
-    Saturate(f32),
-    /// Sepia filter (0.0 = no effect, 1.0 = fully sepia).
-    Sepia(f32),
-}
-
-impl BackdropFilter {
-    /// Check if this filter has any effect.
-    pub fn is_none(&self) -> bool {
-        matches!(self, BackdropFilter::None)
-    }
-
-    /// Check if this filter requires blur (most expensive operation).
-    pub fn needs_blur(&self) -> bool {
-        matches!(self, BackdropFilter::Blur(r) if *r > 0.0)
-    }
-}
-
 // ==================== Animation/Transition Types ====================
 
 /// Animation timing function.
@@ -1877,47 +1877,6 @@ pub enum AnimationIterationCount {
     Count(f32),
 }
 
-/// A single dimension of background position.
-#[derive(Debug, Clone, PartialEq)]
-pub enum BackgroundPositionValue {
-    /// Percentage (0.0 = start, 1.0 = end).
-    Percent(f32),
-    /// Pixel offset from the start.
-    Px(f32),
-}
-
-impl Default for BackgroundPositionValue {
-    fn default() -> Self {
-        BackgroundPositionValue::Percent(0.0)
-    }
-}
-
-impl BackgroundPositionValue {
-    /// Convert to a pixel offset given the container size and image size.
-    pub fn to_px(&self, container_size: f32, image_size: f32) -> f32 {
-        match self {
-            BackgroundPositionValue::Percent(pct) => {
-                // CSS background-position: percentage positions the image such that
-                // X% of the image aligns with X% of the container
-                (container_size - image_size) * pct
-            }
-            BackgroundPositionValue::Px(px) => *px,
-        }
-    }
-}
-
-/// Background origin - where the background positioning area starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BackgroundOrigin {
-    /// Position relative to the border box.
-    #[default]
-    PaddingBox,
-    /// Position relative to the border box.
-    BorderBox,
-    /// Position relative to the content box.
-    ContentBox,
-}
-
 /// Box sizing model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BoxSizing {
@@ -1937,8 +1896,1068 @@ pub enum BackgroundClip {
     Text,
 }
 
+/// Computed style for an element.
+#[derive(Debug, Clone, Default)]
+pub struct ComputedStyle {
+    // Box model
+    pub display: Display,
+    pub position: Position,
+    pub width: Length,
+    pub height: Length,
+    pub min_width: Length,
+    pub min_height: Length,
+    pub max_width: Length,
+    pub max_height: Length,
+    pub aspect_ratio: Option<f32>,  // width / height ratio
+
+    // Margin
+    pub margin_top: Length,
+    pub margin_right: Length,
+    pub margin_bottom: Length,
+    pub margin_left: Length,
+
+    // Padding
+    pub padding_top: Length,
+    pub padding_right: Length,
+    pub padding_bottom: Length,
+    pub padding_left: Length,
+
+    // Border
+    pub border_top_width: Length,
+    pub border_right_width: Length,
+    pub border_bottom_width: Length,
+    pub border_left_width: Length,
+    pub border_top_color: Color,
+    pub border_right_color: Color,
+    pub border_bottom_color: Color,
+    pub border_left_color: Color,
+
+    // Border radius (for rounded corners)
+    pub border_top_left_radius: Length,
+    pub border_top_right_radius: Length,
+    pub border_bottom_right_radius: Length,
+    pub border_bottom_left_radius: Length,
+
+    // Colors
+    pub color: Color,
+    pub background_color: Color,
+    /// Background layers (painted bottom-to-top, index 0 is bottom).
+    /// For backwards compatibility, also check background_gradient.
+    pub background_layers: Vec<BackgroundLayer>,
+    /// Legacy single gradient field - prefer using background_layers.
+    /// This is kept for backwards compatibility during migration.
+    pub background_gradient: Option<Gradient>,
+
+    // Typography - Basic
+    pub font_size: Length,
+    pub font_weight: FontWeight,
+    pub font_style: FontStyle,
+    pub font_family: String,
+    pub line_height: LineHeight,
+    pub text_align: TextAlign,
+
+    // Typography - Advanced
+    pub font_stretch: FontStretch,
+    pub letter_spacing: Length,
+    pub word_spacing: Length,
+    pub text_indent: Length,
+    pub text_decoration_line: TextDecorationLine,
+    pub text_decoration_color: Option<Color>,
+    pub text_decoration_style: TextDecorationStyle,
+    pub text_decoration_thickness: Length,
+    pub text_transform: TextTransform,
+    pub white_space: WhiteSpace,
+    pub word_break: WordBreak,
+    pub vertical_align: VerticalAlign,
+    pub writing_mode: WritingMode,
+    pub direction: Direction,
+
+    // Positioning offsets
+    pub top: Option<Length>,
+    pub right: Option<Length>,
+    pub bottom: Option<Length>,
+    pub left: Option<Length>,
+    pub z_index: i32,
+
+    // Transforms
+    pub transform: TransformList,
+    pub transform_origin: TransformOrigin,
+
+    // Transitions (parsed but not executed during parity capture)
+    pub transition_property: String,
+    pub transition_duration: f32, // seconds
+    pub transition_timing_function: TimingFunction,
+    pub transition_delay: f32, // seconds
+
+    // Animations (parsed but not executed during parity capture)
+    pub animation_name: String,
+    pub animation_duration: f32, // seconds
+    pub animation_timing_function: TimingFunction,
+    pub animation_delay: f32, // seconds
+    pub animation_iteration_count: AnimationIterationCount,
+    pub animation_direction: AnimationDirection,
+    pub animation_fill_mode: AnimationFillMode,
+    pub animation_play_state: AnimationPlayState,
+
+    // Box sizing
+    pub box_sizing: BoxSizing,
+
+    // Visual
+    pub opacity: f32,
+    pub overflow_x: Overflow,
+    pub overflow_y: Overflow,
+    
+    // Box shadows (multiple shadows supported)
+    pub box_shadows: Vec<BoxShadow>,
+
+    // Backdrop filter (blur, grayscale, etc.)
+    pub backdrop_filter: BackdropFilter,
+
+    // Image/replaced element
+    pub image_url: Option<String>,
+    pub object_fit: String,  // "fill", "contain", "cover", "none", "scale-down"
+    pub object_position: (f32, f32),
+
+    // Flexbox Container
+    pub flex_direction: FlexDirection,
+    pub flex_wrap: FlexWrap,
+    pub justify_content: JustifyContent,
+    pub align_items: AlignItems,
+    pub align_content: AlignContent,
+    pub row_gap: Length,
+    pub column_gap: Length,
+
+    // Flexbox Item
+    pub order: i32,
+    pub flex_grow: f32,
+    pub flex_shrink: f32,
+    pub flex_basis: FlexBasis,
+    pub align_self: AlignSelf,
+
+    // Scrolling
+    pub scroll_behavior: ScrollBehavior,
+    pub overscroll_behavior_x: OverscrollBehavior,
+    pub overscroll_behavior_y: OverscrollBehavior,
+    pub scrollbar_width: ScrollbarWidth,
+    pub scrollbar_gutter: ScrollbarGutter,
+    pub scrollbar_color: Option<(Color, Color)>, // (thumb, track)
+
+    // Grid Container
+    pub grid_template_columns: GridTemplate,
+    pub grid_template_rows: GridTemplate,
+    pub grid_template_areas: Option<GridTemplateAreas>,
+    pub grid_auto_columns: TrackSize,
+    pub grid_auto_rows: TrackSize,
+    pub grid_auto_flow: GridAutoFlow,
+
+    // Grid Item
+    pub grid_column_start: GridLine,
+    pub grid_column_end: GridLine,
+    pub grid_row_start: GridLine,
+    pub grid_row_end: GridLine,
+
+    // Grid Alignment (also used by Flexbox)
+    pub justify_items: JustifyItems,
+    pub justify_self: JustifySelf,
+
+    // Pseudo-element content
+    /// The `content` property for ::before/::after pseudo-elements.
+    /// None means no content (element not rendered).
+    /// Some("") means empty content (element rendered but empty).
+    /// Some("text") means text content.
+    pub content: Option<String>,
+
+    // Background clip for gradient text
+    pub background_clip: BackgroundClip,
+    pub webkit_text_fill_color: Option<Color>,
+}
+
+impl ComputedStyle {
+    /// Create default style.
+    pub fn new() -> Self {
+        Self {
+            font_size: Length::Px(16.0),
+            line_height: LineHeight::Normal,
+            opacity: 1.0,
+            color: Color::BLACK,
+            background_color: Color::TRANSPARENT,
+            font_family: "sans-serif".to_string(),
+            text_decoration_line: TextDecorationLine::NONE,
+            text_decoration_color: None,
+            text_decoration_thickness: Length::Auto,
+            // Flexbox item defaults
+            flex_shrink: 1.0, // Default is 1, not 0
+            // Width/height defaults to auto (fill available space)
+            width: Length::Auto,
+            height: Length::Auto,
+            // CSS 2.1 / Flexbox §4.5: the INITIAL value of min-width and
+            // min-height is `auto`, not zero. The distinction is invisible in
+            // most contexts — Length::Auto and Length::Zero both resolve to
+            // 0.0 in to_px_with_viewport — but it is load-bearing for flex
+            // items, where `auto` means "floor at the content-based minimum"
+            // and an explicitly authored `0` means "you may shrink me to
+            // nothing". Defaulting to Zero made those two indistinguishable,
+            // so every flex item was shrinkable to zero and text got squeezed
+            // below the width it actually paints at.
+            min_width: Length::Auto,
+            min_height: Length::Auto,
+            max_width: Length::Auto, // No max constraint
+            max_height: Length::Auto,
+            // Image/replaced element defaults
+            image_url: None,
+            object_fit: "contain".to_string(),
+            object_position: (0.5, 0.5), // center center
+            ..Default::default()
+        }
+    }
+
+    /// Create style with inheritance from parent.
+    pub fn inherit_from(parent: &ComputedStyle) -> Self {
+        Self {
+            // Inherited properties
+            color: parent.color,
+            font_size: parent.font_size.clone(),
+            font_weight: parent.font_weight,
+            font_style: parent.font_style,
+            font_stretch: parent.font_stretch,
+            font_family: parent.font_family.clone(),
+            line_height: parent.line_height,
+            text_align: parent.text_align,
+            letter_spacing: parent.letter_spacing.clone(),
+            word_spacing: parent.word_spacing.clone(),
+            text_indent: parent.text_indent.clone(),
+            text_transform: parent.text_transform,
+            white_space: parent.white_space,
+            word_break: parent.word_break,
+            direction: parent.direction,
+            writing_mode: parent.writing_mode,
+            // Inherits alongside `color`, which it shadows at paint time.
+            // Restored on Linux; the macOS copy drops it (declared divergence).
+            webkit_text_fill_color: parent.webkit_text_fill_color,
+
+            // Text decoration is NOT inherited (each element sets its own)
+            text_decoration_line: TextDecorationLine::NONE,
+            text_decoration_color: None,
+            text_decoration_style: TextDecorationStyle::Solid,
+            text_decoration_thickness: Length::Auto,
+
+            // NON-INHERITED PROPERTIES WHOSE DERIVED DEFAULT IS WRONG.
+            //
+            // RE-APPLIED LINUX FIX, preserved across the 2026-09 adoption of
+            // the macOS rustkit-css: the macOS copy of this function falls
+            // through to `..Default::default()` alone, and the derived
+            // defaults are not the CSS initial values —
+            //
+            //   * Length::default() is Zero, not Auto (#[default] sits on the
+            //     Zero variant), so every inheriting element becomes 0x0;
+            //   * Color::default() is opaque BLACK, so every inheriting
+            //     element paints a black box over the page;
+            //   * f32::default() is 0.0, so opacity renders the page
+            //     invisible and flex_shrink stops shrinking anything.
+            //
+            // Measured on THIS tree when the adoption landed: seven engine
+            // tests went red (Zero widths through the inheritance path) and
+            // localized here. The macOS engine does not currently route
+            // through inherit_from, so the defect is latent there; this
+            // tree's engine calls it at two sites, so here it is fatal.
+            // Same fix and same scar as Athena's Windows inherit_from.
+            width: Length::Auto,
+            height: Length::Auto,
+            max_width: Length::Auto,
+            max_height: Length::Auto,
+            // min-width/min-height: initial value is `auto` per Flexbox §4.5.
+            min_width: Length::Auto,
+            min_height: Length::Auto,
+            background_color: Color::TRANSPARENT,
+            opacity: 1.0,
+            flex_shrink: 1.0,
+
+            // Everything genuinely non-inherited whose derived default IS the
+            // CSS initial value.
+            ..Default::default()
+        }
+    }
+}
+
+/// CSS property value (unparsed or parsed).
+#[derive(Debug, Clone)]
+pub enum PropertyValue {
+    /// Inherit from parent.
+    Inherit,
+    /// Initial value.
+    Initial,
+    /// Specific value.
+    Specified(String),
+}
+
+/// A CSS declaration (property: value).
+#[derive(Debug, Clone)]
+pub struct Declaration {
+    pub property: String,
+    pub value: PropertyValue,
+    pub important: bool,
+}
+
+/// A CSS rule (selector + declarations).
+#[derive(Debug, Clone)]
+pub struct Rule {
+    pub selector: String,
+    pub declarations: Vec<Declaration>,
+}
+
+/// A complete stylesheet.
+#[derive(Debug, Default, Clone)]
+pub struct Stylesheet {
+    pub rules: Vec<Rule>,
+}
+
+impl Stylesheet {
+    /// Create an empty stylesheet.
+    pub fn new() -> Self {
+        Self { rules: Vec::new() }
+    }
+
+    /// Parse a CSS string into a stylesheet.
+    pub fn parse(css: &str) -> Result<Self, CssError> {
+        debug!(len = css.len(), "Parsing CSS");
+        let ast = parse_stylesheet(css).map_err(|e| CssError::ParseError(e.to_string()))?;
+
+        let rules = ast
+            .rules
+            .into_iter()
+            .map(|r| Rule {
+                selector: r.selector,
+                declarations: r
+                    .declarations
+                    .into_iter()
+                    .map(|d| Declaration {
+                        property: d.property,
+                        value: PropertyValue::Specified(d.value),
+                        important: d.important,
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+
+        debug!(rule_count = rules.len(), "CSS parsed");
+        Ok(Stylesheet { rules })
+    }
+
+    /// Get the number of rules in this stylesheet.
+    pub fn rule_count(&self) -> usize {
+        self.rules.len()
+    }
+}
+
+/// Parse a color value.
+pub fn parse_color(value: &str) -> Option<Color> {
+    let value = value.trim();
+
+    // Named colors (CSS Color Level 4)
+    match value.to_lowercase().as_str() {
+        "transparent" => return Some(Color::TRANSPARENT),
+        "black" => return Some(Color::BLACK),
+        "white" => return Some(Color::WHITE),
+        "red" => return Some(Color::from_rgb(255, 0, 0)),
+        "green" => return Some(Color::from_rgb(0, 128, 0)),
+        "blue" => return Some(Color::from_rgb(0, 0, 255)),
+        "yellow" => return Some(Color::from_rgb(255, 255, 0)),
+        "gray" | "grey" => return Some(Color::from_rgb(128, 128, 128)),
+        // Extended named colors
+        "coral" => return Some(Color::from_rgb(255, 127, 80)),
+        "orange" => return Some(Color::from_rgb(255, 165, 0)),
+        "pink" => return Some(Color::from_rgb(255, 192, 203)),
+        "purple" => return Some(Color::from_rgb(128, 0, 128)),
+        "cyan" => return Some(Color::from_rgb(0, 255, 255)),
+        "magenta" | "fuchsia" => return Some(Color::from_rgb(255, 0, 255)),
+        "lime" => return Some(Color::from_rgb(0, 255, 0)),
+        "navy" => return Some(Color::from_rgb(0, 0, 128)),
+        "teal" => return Some(Color::from_rgb(0, 128, 128)),
+        "olive" => return Some(Color::from_rgb(128, 128, 0)),
+        "maroon" => return Some(Color::from_rgb(128, 0, 0)),
+        "aqua" => return Some(Color::from_rgb(0, 255, 255)),
+        "silver" => return Some(Color::from_rgb(192, 192, 192)),
+        "lightgray" | "lightgrey" => return Some(Color::from_rgb(211, 211, 211)),
+        "darkgray" | "darkgrey" => return Some(Color::from_rgb(169, 169, 169)),
+        "dimgray" | "dimgrey" => return Some(Color::from_rgb(105, 105, 105)),
+        "lightblue" => return Some(Color::from_rgb(173, 216, 230)),
+        "lightgreen" => return Some(Color::from_rgb(144, 238, 144)),
+        "lightyellow" => return Some(Color::from_rgb(255, 255, 224)),
+        "lightpink" => return Some(Color::from_rgb(255, 182, 193)),
+        "lightcoral" => return Some(Color::from_rgb(240, 128, 128)),
+        "darkblue" => return Some(Color::from_rgb(0, 0, 139)),
+        "darkgreen" => return Some(Color::from_rgb(0, 100, 0)),
+        "darkred" => return Some(Color::from_rgb(139, 0, 0)),
+        "gold" => return Some(Color::from_rgb(255, 215, 0)),
+        "brown" => return Some(Color::from_rgb(165, 42, 42)),
+        "beige" => return Some(Color::from_rgb(245, 245, 220)),
+        "ivory" => return Some(Color::from_rgb(255, 255, 240)),
+        "wheat" => return Some(Color::from_rgb(245, 222, 179)),
+        "tan" => return Some(Color::from_rgb(210, 180, 140)),
+        "khaki" => return Some(Color::from_rgb(240, 230, 140)),
+        "salmon" => return Some(Color::from_rgb(250, 128, 114)),
+        "tomato" => return Some(Color::from_rgb(255, 99, 71)),
+        "crimson" => return Some(Color::from_rgb(220, 20, 60)),
+        "indianred" => return Some(Color::from_rgb(205, 92, 92)),
+        "firebrick" => return Some(Color::from_rgb(178, 34, 34)),
+        "orangered" => return Some(Color::from_rgb(255, 69, 0)),
+        "chocolate" => return Some(Color::from_rgb(210, 105, 30)),
+        "sienna" => return Some(Color::from_rgb(160, 82, 45)),
+        "peru" => return Some(Color::from_rgb(205, 133, 63)),
+        "sandybrown" => return Some(Color::from_rgb(244, 164, 96)),
+        "goldenrod" => return Some(Color::from_rgb(218, 165, 32)),
+        "darkgoldenrod" => return Some(Color::from_rgb(184, 134, 11)),
+        "lemonchiffon" => return Some(Color::from_rgb(255, 250, 205)),
+        "palegoldenrod" => return Some(Color::from_rgb(238, 232, 170)),
+        "greenyellow" => return Some(Color::from_rgb(173, 255, 47)),
+        "chartreuse" => return Some(Color::from_rgb(127, 255, 0)),
+        "lawngreen" => return Some(Color::from_rgb(124, 252, 0)),
+        "springgreen" => return Some(Color::from_rgb(0, 255, 127)),
+        "mediumspringgreen" => return Some(Color::from_rgb(0, 250, 154)),
+        "seagreen" => return Some(Color::from_rgb(46, 139, 87)),
+        "forestgreen" => return Some(Color::from_rgb(34, 139, 34)),
+        "limegreen" => return Some(Color::from_rgb(50, 205, 50)),
+        "palegreen" => return Some(Color::from_rgb(152, 251, 152)),
+        "mediumseagreen" => return Some(Color::from_rgb(60, 179, 113)),
+        "aquamarine" => return Some(Color::from_rgb(127, 255, 212)),
+        "turquoise" => return Some(Color::from_rgb(64, 224, 208)),
+        "mediumturquoise" => return Some(Color::from_rgb(72, 209, 204)),
+        "darkturquoise" => return Some(Color::from_rgb(0, 206, 209)),
+        "cadetblue" => return Some(Color::from_rgb(95, 158, 160)),
+        "steelblue" => return Some(Color::from_rgb(70, 130, 180)),
+        "lightsteelblue" => return Some(Color::from_rgb(176, 196, 222)),
+        "powderblue" => return Some(Color::from_rgb(176, 224, 230)),
+        "skyblue" => return Some(Color::from_rgb(135, 206, 235)),
+        "lightskyblue" => return Some(Color::from_rgb(135, 206, 250)),
+        "deepskyblue" => return Some(Color::from_rgb(0, 191, 255)),
+        "dodgerblue" => return Some(Color::from_rgb(30, 144, 255)),
+        "cornflowerblue" => return Some(Color::from_rgb(100, 149, 237)),
+        "royalblue" => return Some(Color::from_rgb(65, 105, 225)),
+        "mediumblue" => return Some(Color::from_rgb(0, 0, 205)),
+        "midnightblue" => return Some(Color::from_rgb(25, 25, 112)),
+        "slateblue" => return Some(Color::from_rgb(106, 90, 205)),
+        "darkslateblue" => return Some(Color::from_rgb(72, 61, 139)),
+        "mediumslateblue" => return Some(Color::from_rgb(123, 104, 238)),
+        "mediumpurple" => return Some(Color::from_rgb(147, 112, 219)),
+        "blueviolet" => return Some(Color::from_rgb(138, 43, 226)),
+        "darkorchid" => return Some(Color::from_rgb(153, 50, 204)),
+        "darkviolet" => return Some(Color::from_rgb(148, 0, 211)),
+        "mediumorchid" => return Some(Color::from_rgb(186, 85, 211)),
+        "orchid" => return Some(Color::from_rgb(218, 112, 214)),
+        "plum" => return Some(Color::from_rgb(221, 160, 221)),
+        "violet" => return Some(Color::from_rgb(238, 130, 238)),
+        "thistle" => return Some(Color::from_rgb(216, 191, 216)),
+        "lavender" => return Some(Color::from_rgb(230, 230, 250)),
+        "mistyrose" => return Some(Color::from_rgb(255, 228, 225)),
+        "antiquewhite" => return Some(Color::from_rgb(250, 235, 215)),
+        "linen" => return Some(Color::from_rgb(250, 240, 230)),
+        "oldlace" => return Some(Color::from_rgb(253, 245, 230)),
+        "papayawhip" => return Some(Color::from_rgb(255, 239, 213)),
+        "seashell" => return Some(Color::from_rgb(255, 245, 238)),
+        "mintcream" => return Some(Color::from_rgb(245, 255, 250)),
+        "slategray" | "slategrey" => return Some(Color::from_rgb(112, 128, 144)),
+        "lightslategray" | "lightslategrey" => return Some(Color::from_rgb(119, 136, 153)),
+        "gainsboro" => return Some(Color::from_rgb(220, 220, 220)),
+        "whitesmoke" => return Some(Color::from_rgb(245, 245, 245)),
+        "floralwhite" => return Some(Color::from_rgb(255, 250, 240)),
+        "ghostwhite" => return Some(Color::from_rgb(248, 248, 255)),
+        "honeydew" => return Some(Color::from_rgb(240, 255, 240)),
+        "azure" => return Some(Color::from_rgb(240, 255, 255)),
+        "aliceblue" => return Some(Color::from_rgb(240, 248, 255)),
+        "snow" => return Some(Color::from_rgb(255, 250, 250)),
+        "darkcyan" => return Some(Color::from_rgb(0, 139, 139)),
+        "darkmagenta" => return Some(Color::from_rgb(139, 0, 139)),
+        "darkorange" => return Some(Color::from_rgb(255, 140, 0)),
+        "darksalmon" => return Some(Color::from_rgb(233, 150, 122)),
+        "darkseagreen" => return Some(Color::from_rgb(143, 188, 143)),
+        "darkslategray" | "darkslategrey" => return Some(Color::from_rgb(47, 79, 79)),
+        "deeppink" => return Some(Color::from_rgb(255, 20, 147)),
+        "hotpink" => return Some(Color::from_rgb(255, 105, 180)),
+        "mediumvioletred" => return Some(Color::from_rgb(199, 21, 133)),
+        "palevioletred" => return Some(Color::from_rgb(219, 112, 147)),
+        "rosybrown" => return Some(Color::from_rgb(188, 143, 143)),
+        "saddlebrown" => return Some(Color::from_rgb(139, 69, 19)),
+        "yellowgreen" => return Some(Color::from_rgb(154, 205, 50)),
+        "olivedrab" => return Some(Color::from_rgb(107, 142, 35)),
+        "darkolivegreen" => return Some(Color::from_rgb(85, 107, 47)),
+        "mediumaquamarine" => return Some(Color::from_rgb(102, 205, 170)),
+        "lightcyan" => return Some(Color::from_rgb(224, 255, 255)),
+        "paleturquoise" => return Some(Color::from_rgb(175, 238, 238)),
+        "lightseagreen" => return Some(Color::from_rgb(32, 178, 170)),
+        "cornsilk" => return Some(Color::from_rgb(255, 248, 220)),
+        "blanchedalmond" => return Some(Color::from_rgb(255, 235, 205)),
+        "bisque" => return Some(Color::from_rgb(255, 228, 196)),
+        "navajowhite" => return Some(Color::from_rgb(255, 222, 173)),
+        "moccasin" => return Some(Color::from_rgb(255, 228, 181)),
+        "peachpuff" => return Some(Color::from_rgb(255, 218, 185)),
+        "burlywood" => return Some(Color::from_rgb(222, 184, 135)),
+        "lavenderblush" => return Some(Color::from_rgb(255, 240, 245)),
+        "currentcolor" => return None, // Special case - needs context
+        "inherit" => return None, // Special case - needs context
+        _ => {}
+    }
+
+    // Hex colors
+    if let Some(hex) = value.strip_prefix('#') {
+        let (r, g, b, a) = match hex.len() {
+            3 => {
+                let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+                let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+                let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+                (r, g, b, 1.0)
+            }
+            6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                (r, g, b, 1.0)
+            }
+            8 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                let a = u8::from_str_radix(&hex[6..8], 16).ok()? as f32 / 255.0;
+                (r, g, b, a)
+            }
+            _ => return None,
+        };
+        return Some(Color::new(r, g, b, a));
+    }
+
+    // rgb() / rgba()
+    if value.starts_with("rgb") {
+        // Simplified parsing
+        let inner = value
+            .trim_start_matches("rgba(")
+            .trim_start_matches("rgb(")
+            .trim_end_matches(')');
+        let parts: Vec<&str> = inner.split(',').collect();
+        if parts.len() >= 3 {
+            let r = parts[0].trim().parse::<u8>().ok()?;
+            let g = parts[1].trim().parse::<u8>().ok()?;
+            let b = parts[2].trim().parse::<u8>().ok()?;
+            let a = if parts.len() >= 4 {
+                parts[3].trim().parse::<f32>().ok()?
+            } else {
+                1.0
+            };
+            return Some(Color::new(r, g, b, a));
+        }
+    }
+
+    // hsl() / hsla()
+    if value.starts_with("hsl") {
+        let inner = value
+            .trim_start_matches("hsla(")
+            .trim_start_matches("hsl(")
+            .trim_end_matches(')');
+        let parts: Vec<&str> = inner.split(',').collect();
+        if parts.len() >= 3 {
+            let h = parts[0].trim().trim_end_matches("deg").parse::<f32>().ok()?;
+            let s = parts[1].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+            let l = parts[2].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+            let a = if parts.len() >= 4 {
+                parts[3].trim().parse::<f32>().ok()?
+            } else {
+                1.0
+            };
+            
+            // HSL to RGB conversion
+            let (r, g, b) = hsl_to_rgb(h, s, l);
+            return Some(Color::new(r, g, b, a));
+        }
+    }
+
+    None
+}
+
+/// Convert HSL to RGB
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let s = s.clamp(0.0, 1.0);
+    let l = l.clamp(0.0, 1.0);
+
+    if s < 0.0001 {
+        // Achromatic (gray)
+        let v = (l * 255.0).round() as u8;
+        return (v, v, v);
+    }
+
+    // Wrap hue into [0, 360) — hsl(-120, …) and hsl(480, …) are valid CSS.
+    let h = ((h % 360.0) + 360.0) % 360.0 / 360.0;
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+
+    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h);
+    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+
+    (
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    )
+}
+
+fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 { t += 1.0; }
+    if t > 1.0 { t -= 1.0; }
+    
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 1.0 / 2.0 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    p
+}
+
+/// Parse a length value.
+pub fn parse_length(value: &str) -> Option<Length> {
+    let value = value.trim();
+
+    if value == "auto" {
+        return Some(Length::Auto);
+    }
+    if value == "0" {
+        return Some(Length::Zero);
+    }
+
+    // Handle min(), max(), clamp() CSS math functions
+    if value.starts_with("min(") && value.ends_with(')') {
+        let inner = &value[4..value.len() - 1];
+        let args = split_css_function_args(inner);
+        if args.len() >= 2 {
+            let a = parse_length(args[0])?;
+            let b = parse_length(args[1])?;
+            return Some(Length::Min(Box::new((a, b))));
+        }
+        return None;
+    }
+
+    if value.starts_with("max(") && value.ends_with(')') {
+        let inner = &value[4..value.len() - 1];
+        let args = split_css_function_args(inner);
+        if args.len() >= 2 {
+            let a = parse_length(args[0])?;
+            let b = parse_length(args[1])?;
+            return Some(Length::Max(Box::new((a, b))));
+        }
+        return None;
+    }
+
+    if value.starts_with("clamp(") && value.ends_with(')') {
+        let inner = &value[6..value.len() - 1];
+        let args = split_css_function_args(inner);
+        if args.len() >= 3 {
+            let min = parse_length(args[0])?;
+            let preferred = parse_length(args[1])?;
+            let max = parse_length(args[2])?;
+            return Some(Length::Clamp(Box::new((min, preferred, max))));
+        }
+        return None;
+    }
+
+    // Handle calc() - simplified support
+    if value.starts_with("calc(") && value.ends_with(')') {
+        // For now, try to extract a simple value from calc
+        // Full calc support would require expression parsing
+        let inner = &value[5..value.len() - 1].trim();
+        // If it's a simple value wrapped in calc, parse it
+        if let Some(len) = parse_length(inner) {
+            return Some(len);
+        }
+        return None;
+    }
+
+    if value.ends_with("px") {
+        let num = value.trim_end_matches("px").parse::<f32>().ok()?;
+        return Some(Length::Px(num));
+    }
+    // rem MUST be checked before em: "2rem".ends_with("em") is true, and
+    // the em arm's "2r".parse() then fails -> None. The engine's deleted
+    // duplicate carried this exact warning; the canonical copy had the rem
+    // arm dead below the em arm. (Duplication audit P0, proven by test.)
+    if value.ends_with("rem") {
+        let num = value.trim_end_matches("rem").parse::<f32>().ok()?;
+        return Some(Length::Rem(num));
+    }
+    if value.ends_with("em") {
+        let num = value.trim_end_matches("em").parse::<f32>().ok()?;
+        return Some(Length::Em(num));
+    }
+    if value.ends_with("vh") {
+        let num = value.trim_end_matches("vh").parse::<f32>().ok()?;
+        return Some(Length::Vh(num));
+    }
+    if value.ends_with("vw") {
+        let num = value.trim_end_matches("vw").parse::<f32>().ok()?;
+        return Some(Length::Vw(num));
+    }
+    if value.ends_with("vmin") {
+        let num = value.trim_end_matches("vmin").parse::<f32>().ok()?;
+        return Some(Length::Vmin(num));
+    }
+    if value.ends_with("vmax") {
+        let num = value.trim_end_matches("vmax").parse::<f32>().ok()?;
+        return Some(Length::Vmax(num));
+    }
+    if value.ends_with('%') {
+        let num = value.trim_end_matches('%').parse::<f32>().ok()?;
+        return Some(Length::Percent(num));
+    }
+
+    // Try plain number (treated as px)
+    if let Ok(num) = value.parse::<f32>() {
+        return Some(Length::Px(num));
+    }
+
+    None
+}
+
+/// Split CSS function arguments, handling nested parentheses.
+fn split_css_function_args(args: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+
+    for (i, c) in args.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                result.push(args[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Add the last argument
+    let last = args[start..].trim();
+    if !last.is_empty() {
+        result.push(last);
+    }
+
+    result
+}
+
+/// Parse display value.
+pub fn parse_display(value: &str) -> Option<Display> {
+    match value.trim().to_lowercase().as_str() {
+        "block" => Some(Display::Block),
+        "inline" => Some(Display::Inline),
+        "inline-block" => Some(Display::InlineBlock),
+        "flex" => Some(Display::Flex),
+        "inline-flex" => Some(Display::InlineFlex),
+        "grid" => Some(Display::Grid),
+        "inline-grid" => Some(Display::InlineGrid),
+        "none" => Some(Display::None),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_color_hex() {
+        assert_eq!(parse_color("#fff"), Some(Color::from_rgb(255, 255, 255)));
+        assert_eq!(parse_color("#000000"), Some(Color::BLACK));
+        assert_eq!(parse_color("#ff0000"), Some(Color::from_rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn test_parse_color_named() {
+        assert_eq!(parse_color("red"), Some(Color::from_rgb(255, 0, 0)));
+        assert_eq!(parse_color("black"), Some(Color::BLACK));
+        assert_eq!(parse_color("transparent"), Some(Color::TRANSPARENT));
+        // Extended names must resolve — rustkit-engine delegates here now
+        assert_eq!(parse_color("coral"), Some(Color::from_rgb(255, 127, 80)));
+        assert_eq!(parse_color("tomato"), Some(Color::from_rgb(255, 99, 71)));
+    }
+
+    #[test]
+    fn test_parse_color_hsl_hue_wraps() {
+        // hsl(-120) ≡ hsl(240), hsl(480) ≡ hsl(120) — hue is a circle
+        assert_eq!(parse_color("hsl(-120, 50%, 50%)"), parse_color("hsl(240, 50%, 50%)"));
+        assert_eq!(parse_color("hsl(480, 100%, 50%)"), parse_color("hsl(120, 100%, 50%)"));
+    }
+
+    #[test]
+    fn test_parse_color_hsl() {
+        // Pure red: hsl(0, 100%, 50%)
+        let red = parse_color("hsl(0, 100%, 50%)");
+        assert!(red.is_some(), "HSL red should parse");
+        let red = red.unwrap();
+        assert_eq!(red.r, 255, "HSL red R component");
+        assert_eq!(red.g, 0, "HSL red G component");
+        assert_eq!(red.b, 0, "HSL red B component");
+
+        // Pure green: hsl(120, 100%, 50%)
+        let green = parse_color("hsl(120, 100%, 50%)");
+        assert!(green.is_some(), "HSL green should parse");
+        let green = green.unwrap();
+        assert_eq!(green.r, 0, "HSL green R component");
+        assert_eq!(green.g, 255, "HSL green G component");
+        assert_eq!(green.b, 0, "HSL green B component");
+
+        // Pure blue: hsl(240, 100%, 50%)
+        let blue = parse_color("hsl(240, 100%, 50%)");
+        assert!(blue.is_some(), "HSL blue should parse");
+        let blue = blue.unwrap();
+        assert_eq!(blue.r, 0, "HSL blue R component");
+        assert_eq!(blue.g, 0, "HSL blue G component");
+        assert_eq!(blue.b, 255, "HSL blue B component");
+    }
+
+    #[test]
+    fn test_parse_length() {
+        assert_eq!(parse_length("10px"), Some(Length::Px(10.0)));
+        assert_eq!(parse_length("1.5em"), Some(Length::Em(1.5)));
+        assert_eq!(parse_length("50%"), Some(Length::Percent(50.0)));
+        assert_eq!(parse_length("auto"), Some(Length::Auto));
+    }
+
+    #[test]
+    fn test_parse_length_math_functions() {
+        // Test min()
+        let min_result = parse_length("min(700px, 100%)");
+        assert!(min_result.is_some());
+        if let Some(Length::Min(pair)) = min_result {
+            assert_eq!(pair.0, Length::Px(700.0));
+            assert_eq!(pair.1, Length::Percent(100.0));
+        } else {
+            panic!("Expected Length::Min");
+        }
+
+        // Test max()
+        let max_result = parse_length("max(50%, 300px)");
+        assert!(max_result.is_some());
+        if let Some(Length::Max(pair)) = max_result {
+            assert_eq!(pair.0, Length::Percent(50.0));
+            assert_eq!(pair.1, Length::Px(300.0));
+        } else {
+            panic!("Expected Length::Max");
+        }
+
+        // Test clamp()
+        let clamp_result = parse_length("clamp(200px, 50%, 800px)");
+        assert!(clamp_result.is_some());
+        if let Some(Length::Clamp(triple)) = clamp_result {
+            assert_eq!(triple.0, Length::Px(200.0));
+            assert_eq!(triple.1, Length::Percent(50.0));
+            assert_eq!(triple.2, Length::Px(800.0));
+        } else {
+            panic!("Expected Length::Clamp");
+        }
+    }
+
+    #[test]
+    fn test_parse_length_viewport_units() {
+        assert_eq!(parse_length("100vh"), Some(Length::Vh(100.0)));
+        assert_eq!(parse_length("50vw"), Some(Length::Vw(50.0)));
+        assert_eq!(parse_length("10vmin"), Some(Length::Vmin(10.0)));
+        assert_eq!(parse_length("20vmax"), Some(Length::Vmax(20.0)));
+    }
+
+    #[test]
+    fn test_parse_stylesheet() {
+        let css = r#"
+            body {
+                color: black;
+            }
+            .container {
+                width: 100%;
+            }
+        "#;
+
+        let stylesheet = Stylesheet::parse(css).unwrap();
+        assert!(stylesheet.rules.len() >= 2);
+    }
+
+    #[test]
+    fn test_computed_style_inherit() {
+        let parent = ComputedStyle {
+            color: Color::from_rgb(255, 0, 0),
+            font_size: Length::Px(20.0),
+            ..Default::default()
+        };
+
+        let child = ComputedStyle::inherit_from(&parent);
+        assert_eq!(child.color, parent.color);
+        assert_eq!(child.font_size, parent.font_size);
+        // Non-inherited properties should be default
+        assert_eq!(child.display, Display::Block);
+    }
+
+    // Grid template expansion tests
+    #[test]
+    fn test_expand_tracks_no_repeat() {
+        // Template without any repeats should return tracks unchanged
+        let template = GridTemplate {
+            tracks: vec![
+                TrackDefinition::simple(TrackSize::Fr(1.0)),
+                TrackDefinition::simple(TrackSize::Fr(1.0)),
+            ],
+            repeats: vec![],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 2);
+        assert!(auto_repeat.is_none());
+    }
+
+    #[test]
+    fn test_expand_tracks_repeat_count() {
+        // repeat(3, 1fr) should expand to 3 tracks
+        let template = GridTemplate {
+            tracks: vec![],
+            repeats: vec![(
+                0,
+                TrackRepeat::Count(3, vec![TrackDefinition::simple(TrackSize::Fr(1.0))]),
+            )],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 3);
+        assert!(auto_repeat.is_none());
+        for track in &expanded {
+            assert_eq!(track.size, TrackSize::Fr(1.0));
+        }
+    }
+
+    #[test]
+    fn test_expand_tracks_repeat_multiple_tracks() {
+        // repeat(2, 100px 1fr) should expand to 4 tracks: 100px, 1fr, 100px, 1fr
+        let template = GridTemplate {
+            tracks: vec![],
+            repeats: vec![(
+                0,
+                TrackRepeat::Count(
+                    2,
+                    vec![
+                        TrackDefinition::simple(TrackSize::Px(100.0)),
+                        TrackDefinition::simple(TrackSize::Fr(1.0)),
+                    ],
+                ),
+            )],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 4);
+        assert_eq!(expanded[0].size, TrackSize::Px(100.0));
+        assert_eq!(expanded[1].size, TrackSize::Fr(1.0));
+        assert_eq!(expanded[2].size, TrackSize::Px(100.0));
+        assert_eq!(expanded[3].size, TrackSize::Fr(1.0));
+    }
+
+    #[test]
+    fn test_expand_tracks_mixed() {
+        // 100px repeat(2, 1fr) 200px -> 100px 1fr 1fr 200px
+        let template = GridTemplate {
+            tracks: vec![
+                TrackDefinition::simple(TrackSize::Px(100.0)),
+                TrackDefinition::simple(TrackSize::Px(200.0)),
+            ],
+            repeats: vec![(
+                1, // Insert at position 1 (after first track)
+                TrackRepeat::Count(2, vec![TrackDefinition::simple(TrackSize::Fr(1.0))]),
+            )],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 4);
+        assert_eq!(expanded[0].size, TrackSize::Px(100.0));
+        assert_eq!(expanded[1].size, TrackSize::Fr(1.0));
+        assert_eq!(expanded[2].size, TrackSize::Fr(1.0));
+        assert_eq!(expanded[3].size, TrackSize::Px(200.0));
+    }
+
+    #[test]
+    fn test_expand_tracks_auto_fill_returns_unexpanded() {
+        // auto-fill should be marked for layout-time expansion
+        let template = GridTemplate {
+            tracks: vec![],
+            repeats: vec![(
+                0,
+                TrackRepeat::AutoFill(vec![TrackDefinition::simple(TrackSize::Px(200.0))]),
+            )],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 0); // No tracks expanded yet
+        assert!(auto_repeat.is_some());
+        match auto_repeat.unwrap() {
+            TrackRepeat::AutoFill(_) => {}
+            _ => panic!("Expected AutoFill"),
+        }
+    }
+
+    #[test]
+    fn test_expand_tracks_auto_fit_returns_unexpanded() {
+        // auto-fit should be marked for layout-time expansion
+        let template = GridTemplate {
+            tracks: vec![],
+            repeats: vec![(
+                0,
+                TrackRepeat::AutoFit(vec![TrackDefinition::simple(TrackSize::Px(200.0))]),
+            )],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 0);
+        assert!(auto_repeat.is_some());
+        match auto_repeat.unwrap() {
+            TrackRepeat::AutoFit(_) => {}
+            _ => panic!("Expected AutoFit"),
+        }
+    }
+
+    #[test]
+    fn test_expand_tracks_with_line_names() {
+        // Named lines should be preserved during expansion
+        let track_with_names = TrackDefinition {
+            size: TrackSize::Fr(1.0),
+            line_names: vec!["col-start".to_string()],
+        };
+
+        let template = GridTemplate {
+            tracks: vec![],
+            repeats: vec![(0, TrackRepeat::Count(2, vec![track_with_names]))],
+            final_line_names: vec![],
+        };
+
+        let (expanded, _) = template.expand_tracks();
+        assert_eq!(expanded.len(), 2);
+        assert_eq!(expanded[0].line_names, vec!["col-start".to_string()]);
+        assert_eq!(expanded[1].line_names, vec!["col-start".to_string()]);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// LINUX REGRESSION TESTS, restored across the 2026-09 adoption of the macOS
+// rustkit-css. Adopting the reference file replaced this crate's test module
+// wholesale and silently dropped 25 tests — among them the guards for the
+// inherit_from initial-value fix, in the same change that had to re-apply
+// that very fix. A port that can drop the test for the defect it just
+// reintroduced will do it again; these ride along from now on.
+// ═══════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod linux_regression_tests {
     use super::*;
 
     // ColorF32 (inert type port from hiwave-macos). Pure-method execute tests —
@@ -2187,14 +3206,12 @@ mod tests {
         assert_eq!(outer.to_px(16.0, 16.0, 0.0), 15.0);
     }
 
-    #[test]
-    fn test_length_math_parse_invariance() {
-        // parse_length does not yet produce Min/Max/Clamp — no CSS input path,
-        // so parity numbers do not move (same state as Windows #42 / macOS).
-        assert_eq!(parse_length("min(10px, 50%)"), None);
-        assert_eq!(parse_length("max(10px, 50%)"), None);
-        assert_eq!(parse_length("clamp(1px, 2px, 3px)"), None);
-    }
+    // test_length_math_parse_invariance is RETIRED (2026-09 adoption): it
+    // pinned that parse_length could NOT yet produce Min/Max/Clamp, and the
+    // adopted macOS crate now parses them (covered positively by
+    // tests::test_parse_length_math_functions). A guard that must be removed
+    // to gain a capability was guarding the absence of that capability —
+    // the same reasoning retired the min-width Zero pin above.
 
     #[test]
     fn test_parse_color_hex() {
@@ -2285,6 +3302,11 @@ mod computed_style_field_guards {
             font_stretch, font_style, font_weight, letter_spacing,
             line_height, text_align, text_indent, text_transform,
             white_space, word_break, word_spacing, writing_mode,
+            // -webkit-text-fill-color inherits (it shadows `color`, which
+            // inherits; Chrome agrees). The adopted macOS inherit_from DROPPED
+            // it — a child of a fill-colored element fell back to plain color.
+            // Declared divergence from the reference, flagged upstream.
+            webkit_text_fill_color,
             // ---- NOT INHERITED: reset to an initial by inherit_from, or
             //      deliberately left to Default because Default IS the CSS
             //      initial. NOTE min_width/min_height are NOT in that group any
@@ -2310,6 +3332,14 @@ mod computed_style_field_guards {
             text_decoration_style, text_decoration_thickness, transform, transform_origin,
             transition_delay, transition_duration, transition_property, transition_timing_function,
             vertical_align, width,
+            // New with the 2026-09 macOS adoption, all NOT inherited per
+            // css-sizing/css-backgrounds/css-images/css-content: a child does
+            // not adopt its parent's aspect-ratio, background stack, gradient,
+            // box-sizing, backdrop-filter, replaced-content source, object
+            // fit/position, generated content, or background-clip.
+            aspect_ratio, background_layers, background_gradient, box_sizing,
+            backdrop_filter, image_url, object_fit, object_position, content,
+            background_clip,
             // Offsets and z-index: NOT inherited. A child does not adopt its
             // parent's `top: 20px` - that would cascade a positioned parent's
             // displacement onto every descendant.
@@ -2349,7 +3379,7 @@ mod computed_style_field_guards {
         parent.font_style = FontStyle::Oblique;
         parent.font_weight = FontWeight(825);
         parent.letter_spacing = Length::Px(3.5);
-        parent.line_height = 2.75;
+        parent.line_height = LineHeight::Number(2.75);
         parent.text_align = TextAlign::Justify;
         parent.text_indent = Length::Px(11.0);
         parent.text_transform = TextTransform::Uppercase;
@@ -2375,7 +3405,7 @@ mod computed_style_field_guards {
         assert_eq!(child.font_style, FontStyle::Oblique, "font-style must inherit");
         assert_eq!(child.font_weight, FontWeight(825), "font-weight must inherit");
         assert_eq!(child.letter_spacing, Length::Px(3.5), "letter-spacing must inherit");
-        assert_eq!(child.line_height, 2.75, "line-height must inherit");
+        assert_eq!(child.line_height, LineHeight::Number(2.75), "line-height must inherit");
         assert_eq!(child.text_align, TextAlign::Justify, "text-align must inherit");
         assert_eq!(child.text_indent, Length::Px(11.0), "text-indent must inherit");
         assert_eq!(child.text_transform, TextTransform::Uppercase, "text-transform must inherit");
@@ -2437,6 +3467,11 @@ mod computed_style_field_guards {
             top, right, bottom, left, z_index,
             border_top_left_radius, border_top_right_radius,
             border_bottom_right_radius, border_bottom_left_radius,
+            // 2026-09 macOS adoption additions — initials asserted below
+            // where the derived default could plausibly go wrong.
+            aspect_ratio, background_layers, background_gradient, box_sizing,
+            backdrop_filter, image_url, object_fit, object_position, content,
+            background_clip, webkit_text_fill_color,
         } = ComputedStyle::new();
 
         // Initials that have historically been wrong, pinned positively.
@@ -2476,6 +3511,18 @@ mod computed_style_field_guards {
         assert_eq!(bottom, None, "bottom initial is auto (None), NOT 0");
         assert_eq!(left, None, "left initial is auto (None), NOT 0");
         assert_eq!(z_index, 0, "z-index initial IS 0 (CSS initial is `auto`; 0 is our stand-in)");
+
+        // The adoption additions, pinned the day they arrived: Option/Vec
+        // defaults are safely empty, but object_fit is a bare String (an
+        // empty one is not a css-images-3 value) and object_position's
+        // (0,0) means top-left where the spec initial is 50% 50%.
+        assert_eq!(aspect_ratio, None, "aspect-ratio initial is auto (None)");
+        assert!(background_layers.is_empty(), "no background layers initially");
+        assert_eq!(background_gradient, None, "no gradient initially");
+        assert_eq!(image_url, None, "no replaced-content source initially");
+        assert_eq!(content, None, "content initial is normal (None)");
+        assert_eq!(webkit_text_fill_color, None, "fill-color initial defers to color");
+        let _ = (box_sizing, backdrop_filter, object_fit, object_position, background_clip);
 
         // Corner radii fall through ..Default::default() to Length::Zero, and
         // that IS the correct CSS initial - unlike width, where Zero was wrong
