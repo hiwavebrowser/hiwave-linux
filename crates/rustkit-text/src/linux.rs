@@ -13,7 +13,7 @@
 #![cfg(target_os = "linux")]
 
 use crate::{
-    FontDescriptor, FontFamily, FontStyle, FontWeight, GlyphInfo, ShapedGlyph, ShapedText,
+    FontDescriptor, FontStyle, FontWeight, GlyphInfo, ShapedGlyph, ShapedText,
     TextBackend, TextError, TextMetrics,
 };
 use fontconfig::Fontconfig;
@@ -251,29 +251,16 @@ impl TextBackend for LinuxTextBackend {
         })
     }
 
-    fn get_font_families(&self) -> Result<Vec<FontFamily>, TextError> {
-        // Fontconfig can enumerate all available fonts
-        // For now, return common families
-        let families = vec![
-            FontFamily {
-                name: "DejaVu Sans".to_string(),
-                styles: vec![FontStyle::Normal, FontStyle::Italic],
-            },
-            FontFamily {
-                name: "Liberation Sans".to_string(),
-                styles: vec![FontStyle::Normal, FontStyle::Italic],
-            },
-            FontFamily {
-                name: "Noto Sans".to_string(),
-                styles: vec![FontStyle::Normal, FontStyle::Italic],
-            },
-            FontFamily {
-                name: "Ubuntu".to_string(),
-                styles: vec![FontStyle::Normal, FontStyle::Italic],
-            },
-        ];
-
-        Ok(families)
+    fn get_font_families(&self) -> Result<Vec<String>, TextError> {
+        // Fontconfig can enumerate everything; the common-family list is all
+        // any caller has ever needed (currently: none outside tests).
+        Ok(vec![
+            "DejaVu Sans".to_string(),
+            "Liberation Sans".to_string(),
+            "Noto Sans".to_string(),
+            "Ubuntu".to_string(),
+            "FreeSans".to_string(),
+        ])
     }
 
     fn get_metrics(&mut self, descriptor: &FontDescriptor) -> Result<TextMetrics, TextError> {
