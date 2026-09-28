@@ -297,7 +297,7 @@ impl Engine {
         let loader = if let Some(interceptor) = interceptor {
             info!("ResourceLoader initialized with request interceptor");
             Arc::new(
-                ResourceLoader::with_interceptor(loader_config, interceptor)
+                ResourceLoader::with_interceptor(loader_config, Some(interceptor))
                     .map_err(EngineError::NetworkError)?,
             )
         } else {
