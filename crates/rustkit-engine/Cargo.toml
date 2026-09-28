@@ -6,6 +6,12 @@ description = "Browser engine orchestration layer for RustKit"
 authors = ["HiWave Team"]
 license = "MIT"
 
+[features]
+default = []
+# Headless mode: Enables offscreen rendering without window surfaces
+# Useful for testing, CI/CD, and server-side rendering
+headless = []
+
 [dependencies]
 # RustKit crates
 rustkit-viewhost = { path = "../rustkit-viewhost" }
@@ -18,10 +24,12 @@ rustkit-js = { path = "../rustkit-js" }
 rustkit-bindings = { path = "../rustkit-bindings" }
 rustkit-net = { path = "../rustkit-net" }
 rustkit-image = { path = "../rustkit-image" }
+rustkit-svg = { path = "../rustkit-svg" }
 rustkit-renderer = { path = "../rustkit-renderer" }
 
 # Async runtime
 tokio = { version = "1.42", features = ["sync", "time", "rt"] }
+futures = "0.3"
 
 # URL handling
 url = "2.5"
@@ -32,7 +40,11 @@ thiserror = "1.0"
 # Tracing
 tracing = "0.1"
 
-# Windows
+# JSON serialization
+serde_json = "1.0"
+
+# Windows (conditional)
+[target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation"] }
 
 [dev-dependencies]
