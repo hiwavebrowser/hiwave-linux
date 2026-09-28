@@ -4953,6 +4953,21 @@ impl DisplayList {
                 // and re-owned pitch + baseline in paint — the last dual
                 // text path.)
                 let advances = shape_line_advances(&text, style, font_size);
+                // LINUX (declared divergence, wave-3 of the macOS sync):
+                // withhold layout's advances from paint and let the renderer
+                // fall back to deriving advances from the face it actually
+                // rasterizes — the documented legacy half of the ADVANCE
+                // CONTRACT. On this platform layout resolves the face through
+                // FontFamilyChain fallbacks while paint queries fontconfig
+                // with the raw CSS family, and fontconfig SUBSTITUTES rather
+                // than fails — so the two sides can land on different faces
+                // and layout's advances then misplace paint's ink (measured:
+                // overlapping glyphs in the wave-3 native smoke; same
+                // silent-substitute shape Atlas flagged for CTFontCreateWithName).
+                // The real fix — one face resolution feeding both sides —
+                // is coordinated engine work, not a paint-side patch.
+                #[cfg(all(unix, not(target_os = "macos")))]
+                let advances: Option<Vec<f32>> = None;
 
                 // Check if this is gradient text (background-clip: text with gradient and transparent fill)
                 let is_gradient_text = style.background_clip == rustkit_css::BackgroundClip::Text

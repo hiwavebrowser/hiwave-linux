@@ -2068,9 +2068,9 @@ impl Renderer {
                     let ny = dx / len * width * 0.5;
                     
                     let c = [
-                        color.r as f32 / 255.0,
-                        color.g as f32 / 255.0,
-                        color.b as f32 / 255.0,
+                        Self::srgb_to_linear(color.r as f32 / 255.0),
+                        Self::srgb_to_linear(color.g as f32 / 255.0),
+                        Self::srgb_to_linear(color.b as f32 / 255.0),
                         color.a,
                     ];
                     
@@ -2105,9 +2105,9 @@ impl Renderer {
                 // Simple triangle fan for convex polygons
                 if points.len() >= 3 {
                     let c = [
-                        color.r as f32 / 255.0,
-                        color.g as f32 / 255.0,
-                        color.b as f32 / 255.0,
+                        Self::srgb_to_linear(color.r as f32 / 255.0),
+                        Self::srgb_to_linear(color.g as f32 / 255.0),
+                        Self::srgb_to_linear(color.b as f32 / 255.0),
                         color.a,
                     ];
                     
@@ -2201,9 +2201,9 @@ impl Renderer {
         };
 
         let c = [
-            color.r as f32 / 255.0,
-            color.g as f32 / 255.0,
-            color.b as f32 / 255.0,
+            Self::srgb_to_linear(color.r as f32 / 255.0),
+            Self::srgb_to_linear(color.g as f32 / 255.0),
+            Self::srgb_to_linear(color.b as f32 / 255.0),
             color.a,
         ];
 
@@ -2468,9 +2468,9 @@ impl Renderer {
         let segments = ((radius / 2.0).sqrt() * 8.0).round().max(16.0).min(64.0) as u32;
 
         let c = [
-            color.r as f32 / 255.0,
-            color.g as f32 / 255.0,
-            color.b as f32 / 255.0,
+            Self::srgb_to_linear(color.r as f32 / 255.0),
+            Self::srgb_to_linear(color.g as f32 / 255.0),
+            Self::srgb_to_linear(color.b as f32 / 255.0),
             color.a,
         ];
 
@@ -2522,9 +2522,9 @@ impl Renderer {
         let segments = ((avg_radius / 2.0).sqrt() * 8.0).round().max(16.0).min(64.0) as u32;
 
         let c = [
-            color.r as f32 / 255.0,
-            color.g as f32 / 255.0,
-            color.b as f32 / 255.0,
+            Self::srgb_to_linear(color.r as f32 / 255.0),
+            Self::srgb_to_linear(color.g as f32 / 255.0),
+            Self::srgb_to_linear(color.b as f32 / 255.0),
             color.a,
         ];
 
@@ -4454,9 +4454,9 @@ impl Renderer {
     ) {
         let mut cursor_x = x;
         let c = [
-            color.r as f32 / 255.0,
-            color.g as f32 / 255.0,
-            color.b as f32 / 255.0,
+            Self::srgb_to_linear(color.r as f32 / 255.0),
+            Self::srgb_to_linear(color.g as f32 / 255.0),
+            Self::srgb_to_linear(color.b as f32 / 255.0),
             color.a,
         ];
 
@@ -5148,9 +5148,9 @@ impl Renderer {
                 let test_rect = Rect::new(10.0, 10.0, 100.0, 100.0);
                 let test_color = Color::new(0, 255, 0, 1.0); // Green
                 let c = [
-                    test_color.r as f32 / 255.0,
-                    test_color.g as f32 / 255.0,
-                    test_color.b as f32 / 255.0,
+                    Self::srgb_to_linear(test_color.r as f32 / 255.0),
+                    Self::srgb_to_linear(test_color.g as f32 / 255.0),
+                    Self::srgb_to_linear(test_color.b as f32 / 255.0),
                     test_color.a,
                 ];
                 let x = test_rect.x;
