@@ -7,6 +7,8 @@ authors = ["HiWave Team"]
 license = "MIT"
 
 [dependencies]
+rustkit-layout = { path = "../rustkit-layout" }
+rustkit-renderer = { path = "../rustkit-renderer" }
 # GPU abstraction
 wgpu = "24"
 raw-window-handle = "0.6"

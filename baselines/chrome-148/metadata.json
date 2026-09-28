@@ -1,0 +1,10 @@
+{
+  "browserVersion": "148.0.7778.216",
+  "executable": "Chrome for Testing (pinned via PARITY_CHROME_PATH)",
+  "capturedAt": "2026-07-09T04:22:11.192Z",
+  "platform": "darwin",
+  "glBackend": "angle-swiftshader",
+  "cases": 25,
+  "failures": [],
+  "sourceMissing": []
+}
