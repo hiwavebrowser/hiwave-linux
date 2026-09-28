@@ -55,6 +55,19 @@ impl X11ViewHost {
     pub fn new() -> Result<Self, ViewHostError> {
         info!("Initializing X11 ViewHost");
 
+        // Xlib is not thread-safe unless XInitThreads is the FIRST Xlib call
+        // in the process. Without it, an X11ViewHost on one thread racing any
+        // Xlib traffic on another segfaults inside libX11 — measured on this
+        // tree as a 1-in-3 SIGSEGV of the rustkit-engine test binary (the
+        // x11_content_path test racing parallel tests that construct
+        // Engines), present on master before the 2026-09 port waves. Once
+        // guarantees exactly-once even with concurrent first callers; all
+        // Xlib entry in this workspace goes through X11ViewHost::new.
+        static XLIB_THREADS: std::sync::Once = std::sync::Once::new();
+        XLIB_THREADS.call_once(|| unsafe {
+            x11::xlib::XInitThreads();
+        });
+
         let display = unsafe { XOpenDisplay(ptr::null()) };
         if display.is_null() {
             error!("Failed to open X11 display");
