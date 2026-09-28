@@ -1,27 +1,43 @@
 //! # Text Rendering Module
 //!
-//! Comprehensive text rendering support using DirectWrite on Windows.
+//! Comprehensive text rendering support using DirectWrite on Windows and Core Text on macOS.
 //! Provides font fallback, text shaping, text decoration, and line height calculation.
 //!
 //! ## Features
 //!
 //! - **Font Fallback Chain**: Automatic fallback for missing glyphs
-//! - **Complex Script Support**: Full Unicode shaping via DirectWrite
+//! - **Complex Script Support**: Full Unicode shaping via DirectWrite/Core Text
 //! - **Text Decoration**: Underline, strikethrough, overline
 //! - **Line Height**: Proper line-height calculation with various units
 //! - **Font Variants**: Bold, italic, weights, stretches
 //! - **Metrics**: Accurate glyph and line metrics
+//! - **Bidirectional Text**: Support for mixed LTR/RTL text via UAX #9
+//! - **Line Breaking**: Text wrapping with CSS word-break support via UAX #14
 
 use rustkit_css::{
-    Color, FontStretch, FontStyle, FontWeight, Length, TextDecorationLine, TextDecorationStyle,
-    TextTransform, WhiteSpace,
+    Color, Direction as CssDirection, FontStretch, FontStyle, FontWeight, Length,
+    TextDecorationLine, TextDecorationStyle, TextTransform, WhiteSpace, WordBreak as CssWordBreak,
 };
+use rustkit_text::bidi::{BidiInfo, Direction as BidiDirection};
+use rustkit_text::line_break::{LineBreaker, OverflowWrap, WordBreak as LineBreakWordBreak};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use thiserror::Error;
 
 #[cfg(windows)]
-use rustkit_text::{FontCollection as RkFontCollection, FontStretch as RkFontStretch, FontStyle as RkFontStyle, FontWeight as RkFontWeight};
+use rustkit_text::{
+    FontCollection as RkFontCollection, FontStretch as RkFontStretch, FontStyle as RkFontStyle,
+    FontWeight as RkFontWeight,
+};
+#[cfg(windows)]
+use std::sync::Arc;
+
+#[cfg(target_os = "macos")]
+use core_foundation::base::TCFType;
+#[cfg(target_os = "macos")]
+use core_graphics::geometry::CGSize;
+#[cfg(target_os = "macos")]
+use core_text::font as ct_font;
 
 /// Errors that can occur in text operations.
 #[derive(Error, Debug)]
@@ -69,6 +85,20 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for sans-serif.
+    #[cfg(target_os = "macos")]
+    pub fn sans_serif() -> Self {
+        Self::new("SF Pro")
+            .with_fallback(".AppleSystemUIFont")
+            .with_fallback("Helvetica Neue")
+            .with_fallback("Helvetica")
+            .with_fallback("Arial")
+            .with_fallback("PingFang SC")
+            .with_fallback("Hiragino Sans")
+            .with_fallback("sans-serif")
+    }
+
+    /// Create default font chain for sans-serif.
+    #[cfg(not(target_os = "macos"))]
     pub fn sans_serif() -> Self {
         Self::new("Segoe UI")
             .with_fallback("Arial")
@@ -80,6 +110,17 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for serif.
+    #[cfg(target_os = "macos")]
+    pub fn serif() -> Self {
+        Self::new("New York")
+            .with_fallback("Times New Roman")
+            .with_fallback("Georgia")
+            .with_fallback("Songti SC")
+            .with_fallback("serif")
+    }
+
+    /// Create default font chain for serif.
+    #[cfg(not(target_os = "macos"))]
     pub fn serif() -> Self {
         Self::new("Times New Roman")
             .with_fallback("Georgia")
@@ -90,12 +131,42 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for monospace.
+    #[cfg(target_os = "macos")]
+    pub fn monospace() -> Self {
+        Self::new("SF Mono")
+            .with_fallback("Menlo")
+            .with_fallback("Monaco")
+            .with_fallback("Courier New")
+            .with_fallback("monospace")
+    }
+
+    /// Create default font chain for monospace.
+    #[cfg(not(target_os = "macos"))]
     pub fn monospace() -> Self {
         Self::new("Cascadia Code")
             .with_fallback("Consolas")
             .with_fallback("Courier New")
             .with_fallback("Noto Sans Mono")
             .with_fallback("monospace")
+    }
+
+    /// Create system-ui font chain (platform-specific).
+    #[cfg(target_os = "macos")]
+    pub fn system_ui() -> Self {
+        Self::new(".AppleSystemUIFont")
+            .with_fallback("SF Pro")
+            .with_fallback("Helvetica Neue")
+            .with_fallback("Helvetica")
+            .with_fallback("Arial")
+    }
+
+    /// Create system-ui font chain (platform-specific).
+    #[cfg(not(target_os = "macos"))]
+    pub fn system_ui() -> Self {
+        Self::new("Segoe UI")
+            .with_fallback("Roboto")
+            .with_fallback("Arial")
+            .with_fallback("Noto Sans")
     }
 
     /// Resolve a CSS font-family value to a chain.
@@ -116,21 +187,44 @@ impl FontFamilyChain {
             "sans-serif" => Self::sans_serif(),
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
+            "system-ui" | "-apple-system" | "blinkmacsystemfont" => Self::system_ui(),
             "cursive" => Self::new("Comic Sans MS")
                 .with_fallback("Brush Script MT")
                 .with_fallback("cursive"),
             "fantasy" => Self::new("Impact")
                 .with_fallback("Papyrus")
                 .with_fallback("fantasy"),
-            "system-ui" => Self::new("Segoe UI").with_fallback("system-ui"),
             _ => {
                 let mut chain = Self::new(primary);
                 for fallback in families.iter().skip(1) {
-                    chain.fallbacks.push(fallback.to_string());
+                    // Recursively handle generic families in fallback chain
+                    let lower = fallback.to_lowercase();
+                    if lower == "system-ui"
+                        || lower == "-apple-system"
+                        || lower == "blinkmacsystemfont"
+                    {
+                        let sys_chain = Self::system_ui();
+                        chain.fallbacks.push(sys_chain.primary);
+                        chain.fallbacks.extend(sys_chain.fallbacks);
+                    } else if lower == "sans-serif" {
+                        let sans_chain = Self::sans_serif();
+                        chain.fallbacks.push(sans_chain.primary);
+                        chain.fallbacks.extend(sans_chain.fallbacks);
+                    } else {
+                        chain.fallbacks.push(fallback.to_string());
+                    }
                 }
-                // Always add system fallbacks
-                chain.fallbacks.push("Segoe UI".to_string());
-                chain.fallbacks.push("Arial".to_string());
+                // Add platform-specific system fallbacks
+                #[cfg(target_os = "macos")]
+                {
+                    chain.fallbacks.push(".AppleSystemUIFont".to_string());
+                    chain.fallbacks.push("Helvetica".to_string());
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    chain.fallbacks.push("Segoe UI".to_string());
+                    chain.fallbacks.push("Arial".to_string());
+                }
                 chain
             }
         }
@@ -164,10 +258,14 @@ pub struct TextMetrics {
 
 impl TextMetrics {
     /// Create metrics with baseline values.
+    /// Ratios based on SF Pro font metrics (macOS system font).
+    /// SF Pro: ~0.82 ascent, ~0.21 descent (measured from actual Core Text metrics).
+    /// Previous values (0.88/0.24) were too large and caused baseline shifts.
     pub fn with_font_size(font_size: f32) -> Self {
-        let ascent = font_size * 0.8;
-        let descent = font_size * 0.2;
-        let leading = font_size * 0.15;
+        // Use SF Pro ratios as default - these match macOS system font better
+        let ascent = font_size * 0.82;
+        let descent = font_size * 0.21;
+        let leading = 0.0;
 
         Self {
             width: 0.0,
@@ -179,6 +277,32 @@ impl TextMetrics {
             underline_thickness: font_size / 14.0,
             strikethrough_offset: -ascent * 0.35,
             strikethrough_thickness: font_size / 14.0,
+            overline_offset: -ascent,
+        }
+    }
+
+    /// Create metrics from a Core Text font (macOS).
+    /// This provides accurate metrics directly from the font.
+    #[cfg(target_os = "macos")]
+    pub fn from_core_text_font(ct_font: &core_text::font::CTFont, width: f32) -> Self {
+        let ascent = ct_font.ascent() as f32;
+        let descent = ct_font.descent() as f32;
+        let leading = ct_font.leading() as f32;
+        let underline_position = ct_font.underline_position() as f32;
+        let underline_thickness = ct_font.underline_thickness() as f32;
+        let x_height = ct_font.x_height() as f32;
+        let strikethrough_offset = x_height * 0.5;
+
+        Self {
+            width,
+            height: ascent + descent + leading,
+            ascent,
+            descent,
+            leading,
+            underline_offset: underline_position,
+            underline_thickness,
+            strikethrough_offset,
+            strikethrough_thickness: underline_thickness,
             overline_offset: -ascent,
         }
     }
@@ -220,6 +344,54 @@ pub struct ShapedRun {
     pub font_size: f32,
     /// Text metrics.
     pub metrics: TextMetrics,
+    /// Text direction (LTR or RTL).
+    pub direction: TextDirection,
+}
+
+/// Text direction for a shaped run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextDirection {
+    /// Left-to-right (Latin, Greek, Cyrillic, etc.)
+    #[default]
+    Ltr,
+    /// Right-to-left (Arabic, Hebrew, etc.)
+    Rtl,
+}
+
+impl TextDirection {
+    /// Convert from CSS Direction.
+    pub fn from_css(direction: CssDirection) -> Self {
+        match direction {
+            CssDirection::Ltr => TextDirection::Ltr,
+            CssDirection::Rtl => TextDirection::Rtl,
+        }
+    }
+
+    /// Convert from bidi Direction.
+    pub fn from_bidi(direction: BidiDirection) -> Self {
+        match direction {
+            BidiDirection::Ltr => TextDirection::Ltr,
+            BidiDirection::Rtl => TextDirection::Rtl,
+        }
+    }
+
+    /// Convert to bidi Direction.
+    pub fn to_bidi(self) -> BidiDirection {
+        match self {
+            TextDirection::Ltr => BidiDirection::Ltr,
+            TextDirection::Rtl => BidiDirection::Rtl,
+        }
+    }
+
+    /// Check if this is left-to-right.
+    pub fn is_ltr(self) -> bool {
+        self == TextDirection::Ltr
+    }
+
+    /// Check if this is right-to-left.
+    pub fn is_rtl(self) -> bool {
+        self == TextDirection::Rtl
+    }
 }
 
 impl ShapedRun {
@@ -231,6 +403,57 @@ impl ShapedRun {
     /// Get the height of the run.
     pub fn height(&self) -> f32 {
         self.metrics.height
+    }
+
+    /// Apply letter-spacing to the shaped run.
+    /// Letter-spacing adds extra space after each character.
+    pub fn apply_letter_spacing(&mut self, letter_spacing: f32) {
+        if letter_spacing == 0.0 || self.glyphs.is_empty() {
+            return;
+        }
+
+        let mut accumulated_offset = 0.0;
+        for glyph in &mut self.glyphs {
+            // Shift glyph position by accumulated offset
+            glyph.x += accumulated_offset;
+            // Add letter-spacing to advance
+            glyph.advance += letter_spacing;
+            accumulated_offset += letter_spacing;
+        }
+
+        // Update total width
+        self.metrics.width += accumulated_offset;
+    }
+
+    /// Apply word-spacing to the shaped run.
+    /// Word-spacing adds extra space to whitespace characters.
+    pub fn apply_word_spacing(&mut self, word_spacing: f32) {
+        if word_spacing == 0.0 || self.glyphs.is_empty() {
+            return;
+        }
+
+        let mut accumulated_offset = 0.0;
+        for glyph in &mut self.glyphs {
+            // Shift glyph position by accumulated offset
+            glyph.x += accumulated_offset;
+
+            // Add word-spacing to whitespace characters
+            if glyph.character.is_whitespace() {
+                glyph.advance += word_spacing;
+                accumulated_offset += word_spacing;
+            }
+        }
+
+        // Update total width
+        self.metrics.width += accumulated_offset;
+    }
+
+    /// Apply both letter-spacing and word-spacing.
+    pub fn apply_spacing(&mut self, letter_spacing: f32, word_spacing: f32) {
+        // Apply word-spacing first, then letter-spacing
+        // This matches CSS specification behavior
+        self.apply_word_spacing(word_spacing);
+        self.apply_letter_spacing(letter_spacing);
     }
 }
 
@@ -394,7 +617,7 @@ pub struct FontCache {
     #[cfg(windows)]
     fonts: RwLock<HashMap<FontKey, Arc<FontCacheEntry>>>,
     #[cfg(not(windows))]
-    fonts: RwLock<HashMap<FontKey, ()>>,
+    _fonts: RwLock<HashMap<FontKey, ()>>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -473,18 +696,14 @@ impl FontCache {
         stretch: FontStretch,
         size: f32,
     ) -> Result<TextMetrics, TextError> {
-        let collection = RkFontCollection::system().map_err(|e| TextError::DirectWriteError(e.to_string()))?;
+        let collection =
+            RkFontCollection::system().map_err(|e| TextError::DirectWriteError(e.to_string()))?;
 
         // Try to find the font family
         let dw_family = collection
             .font_family_by_name(family)
             .map_err(|e| TextError::DirectWriteError(e.to_string()))?
-            .or_else(|| {
-                collection
-                    .font_family_by_name("Segoe UI")
-                    .ok()
-                    .flatten()
-            });
+            .or_else(|| collection.font_family_by_name("Segoe UI").ok().flatten());
 
         if let Some(family) = dw_family {
             let dw_weight = RkFontWeight::from_u32(weight.0 as u32);
@@ -530,7 +749,35 @@ impl FontCache {
         Ok(TextMetrics::with_font_size(size))
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    pub fn get_metrics(
+        &self,
+        family: &str,
+        weight: FontWeight,
+        style: FontStyle,
+        _stretch: FontStretch,
+        size: f32,
+    ) -> Result<TextMetrics, TextError> {
+        // Try to get real Core Text metrics for the requested font
+        if let Ok(font) = TextShaper::create_ct_font_with_traits(
+            family,
+            size,
+            weight.0,
+            style == FontStyle::Italic,
+        ) {
+            return Ok(TextMetrics::from_core_text_font(&font, 0.0));
+        }
+
+        // Try system font as fallback
+        if let Ok(font) = ct_font::new_from_name("Helvetica", size as f64) {
+            return Ok(TextMetrics::from_core_text_font(&font, 0.0));
+        }
+
+        // Ultimate fallback to computed metrics
+        Ok(TextMetrics::with_font_size(size))
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     pub fn get_metrics(
         &self,
         _family: &str,
@@ -539,7 +786,7 @@ impl FontCache {
         _stretch: FontStretch,
         size: f32,
     ) -> Result<TextMetrics, TextError> {
-        // Fallback metrics for non-Windows platforms
+        // Fallback metrics for other platforms (Linux, etc.)
         Ok(TextMetrics::with_font_size(size))
     }
 }
@@ -579,10 +826,12 @@ impl TextShaper {
                 font_stretch: stretch,
                 font_size: size,
                 metrics: TextMetrics::with_font_size(size),
+                direction: TextDirection::Ltr,
             });
         }
 
-        let collection = RkFontCollection::system().map_err(|e| TextError::DirectWriteError(e.to_string()))?;
+        let collection =
+            RkFontCollection::system().map_err(|e| TextError::DirectWriteError(e.to_string()))?;
 
         // Find first available font in chain
         let mut font_family_name = font_chain.primary.clone();
@@ -677,6 +926,7 @@ impl TextShaper {
                         font_stretch: stretch,
                         font_size: size,
                         metrics,
+                        direction: TextDirection::Ltr,
                     });
                 }
             }
@@ -734,10 +984,12 @@ impl TextShaper {
             font_stretch: stretch,
             font_size: size,
             metrics,
+            direction: TextDirection::Ltr,
         })
     }
 
-    #[cfg(not(windows))]
+    /// Shape text using Core Text on macOS.
+    #[cfg(target_os = "macos")]
     pub fn shape(
         &self,
         text: &str,
@@ -747,7 +999,226 @@ impl TextShaper {
         stretch: FontStretch,
         size: f32,
     ) -> Result<ShapedRun, TextError> {
-        // Simplified shaping for non-Windows platforms
+        if text.is_empty() {
+            return Ok(ShapedRun {
+                text: String::new(),
+                glyphs: Vec::new(),
+                font_family: font_chain.primary.clone(),
+                font_weight: weight,
+                font_style: style,
+                font_stretch: stretch,
+                font_size: size,
+                metrics: TextMetrics::with_font_size(size),
+                direction: TextDirection::Ltr,
+            });
+        }
+
+        // Try to find a font from the chain
+        let mut ct_font_opt: Option<core_text::font::CTFont> = None;
+        let mut used_family = font_chain.primary.clone();
+
+        for family in font_chain.all_families() {
+            // Try to create font with traits
+            if let Ok(font) =
+                Self::create_ct_font_with_traits(family, size, weight.0, style == FontStyle::Italic)
+            {
+                ct_font_opt = Some(font);
+                used_family = family.to_string();
+                break;
+            }
+        }
+
+        // Fallback to system font if nothing found
+        let ct_font = ct_font_opt.unwrap_or_else(|| {
+            ct_font::new_from_name("Helvetica", size as f64).unwrap_or_else(|_| {
+                ct_font::new_from_name(".AppleSystemUIFont", size as f64).unwrap()
+            })
+        });
+
+        // Convert text to UTF-16 for Core Text
+        let utf16_chars: Vec<u16> = text.encode_utf16().collect();
+        let char_count = utf16_chars.len();
+
+        // Get glyph IDs
+        let mut glyph_ids: Vec<u16> = vec![0; char_count];
+
+        unsafe {
+            extern "C" {
+                fn CTFontGetGlyphsForCharacters(
+                    font: core_text::font::CTFontRef,
+                    characters: *const u16,
+                    glyphs: *mut u16,
+                    count: isize,
+                ) -> bool;
+
+                fn CTFontGetAdvancesForGlyphs(
+                    font: core_text::font::CTFontRef,
+                    orientation: u32,
+                    glyphs: *const u16,
+                    advances: *mut CGSize,
+                    count: isize,
+                ) -> f64;
+            }
+
+            let _success = CTFontGetGlyphsForCharacters(
+                ct_font.as_concrete_TypeRef(),
+                utf16_chars.as_ptr(),
+                glyph_ids.as_mut_ptr(),
+                char_count as isize,
+            );
+
+            // Get advances for each glyph
+            let mut glyph_advances: Vec<CGSize> = vec![CGSize::new(0.0, 0.0); char_count];
+            let _total_advance = CTFontGetAdvancesForGlyphs(
+                ct_font.as_concrete_TypeRef(),
+                0, // kCTFontOrientationHorizontal
+                glyph_ids.as_ptr(),
+                glyph_advances.as_mut_ptr(),
+                char_count as isize,
+            );
+
+            // Build positioned glyphs
+            let text_chars: Vec<char> = text.chars().collect();
+            let mut glyphs = Vec::with_capacity(text_chars.len());
+            let mut x_offset: f32 = 0.0;
+
+            // Handle surrogate pairs - UTF-16 index to char index mapping
+            let mut char_idx = 0;
+            let mut utf16_idx = 0;
+
+            while utf16_idx < char_count && char_idx < text_chars.len() {
+                let c = text_chars[char_idx];
+                let advance = glyph_advances[utf16_idx].width as f32;
+
+                // Handle missing glyphs (glyph ID 0)
+                let final_advance = if glyph_ids[utf16_idx] == 0 && advance == 0.0 {
+                    size * 0.5 // Fallback advance
+                } else {
+                    advance
+                };
+
+                glyphs.push(PositionedGlyph {
+                    glyph_id: glyph_ids[utf16_idx],
+                    x: x_offset,
+                    y: 0.0,
+                    advance: final_advance,
+                    character: c,
+                    cluster: char_idx as u32,
+                });
+
+                x_offset += final_advance;
+
+                // Advance UTF-16 index (handle surrogate pairs)
+                utf16_idx += c.len_utf16();
+                char_idx += 1;
+            }
+
+            // Get font metrics from Core Text
+            let ascent = ct_font.ascent() as f32;
+            let descent = ct_font.descent() as f32;
+            let leading = ct_font.leading() as f32;
+            let underline_position = ct_font.underline_position() as f32;
+            let underline_thickness = ct_font.underline_thickness() as f32;
+
+            // Calculate strikethrough position (approximately middle of x-height)
+            let x_height = ct_font.x_height() as f32;
+            let strikethrough_offset = x_height * 0.5;
+
+            let metrics = TextMetrics {
+                width: x_offset,
+                height: ascent + descent + leading,
+                ascent,
+                descent,
+                leading,
+                underline_offset: underline_position,
+                underline_thickness,
+                strikethrough_offset,
+                strikethrough_thickness: underline_thickness,
+                overline_offset: -ascent,
+            };
+
+            Ok(ShapedRun {
+                text: text.to_string(),
+                glyphs,
+                font_family: used_family,
+                font_weight: weight,
+                font_style: style,
+                font_stretch: stretch,
+                font_size: size,
+                metrics,
+                direction: TextDirection::Ltr,
+            })
+        }
+    }
+
+    /// Create a Core Text font with specific traits.
+    #[cfg(target_os = "macos")]
+    fn create_ct_font_with_traits(
+        family: &str,
+        size: f32,
+        weight: u16,
+        italic: bool,
+    ) -> Result<core_text::font::CTFont, TextError> {
+        // The macOS system font has no by-name trait variants
+        // (".AppleSystemUIFont-Bold" does not exist), so bold system-ui text
+        // silently shaped with the REGULAR face — every bold heading
+        // measured ~6% narrower than Chrome and re-centered off Chrome's x
+        // (gradient-no-radius h1: ours 493.5px vs Chrome 529).
+        //
+        // The UI-font API alone exposes only TWO faces, so the original
+        // `weight >= 600` gate merely moved the error: 100..500 all shaped as
+        // .SFNS-Regular and 600..900 all as .SFNS-Bold. Chrome/Skia instead
+        // apply kCTFontWeightTrait to the descriptor and get the real face.
+        // `about`'s .tagline (font-weight:300, 20px) measured 670.0px as
+        // Regular and wrapped inside its 672px block; Light is 659.1px and
+        // fits on one line, as it does in Chrome.
+        if family == ".AppleSystemUIFont" && !italic {
+            return Ok(rustkit_text::macos::create_system_font_with_weight(
+                size as f64,
+                weight,
+            ));
+        }
+
+        // Try to find a font variant with the specified traits
+        // First try appending -Bold, -Italic, etc. to the family name
+        let mut variants_to_try = vec![family.to_string()];
+
+        if weight >= 700 {
+            variants_to_try.push(format!("{}-Bold", family));
+            variants_to_try.push(format!("{}Bold", family));
+            if italic {
+                variants_to_try.push(format!("{}-BoldItalic", family));
+                variants_to_try.push(format!("{}-BoldOblique", family));
+            }
+        }
+
+        if italic {
+            variants_to_try.push(format!("{}-Italic", family));
+            variants_to_try.push(format!("{}-Oblique", family));
+            variants_to_try.push(format!("{}Italic", family));
+        }
+
+        for variant in &variants_to_try {
+            if let Ok(font) = ct_font::new_from_name(variant, size as f64) {
+                return Ok(font);
+            }
+        }
+
+        Err(TextError::FontNotFound(family.to_string()))
+    }
+
+    /// Simplified shaping fallback for non-Windows, non-macOS platforms.
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    pub fn shape(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+    ) -> Result<ShapedRun, TextError> {
+        // Simplified shaping for other platforms
         let avg_char_width = size * 0.5;
         let mut glyphs = Vec::with_capacity(text.len());
         let mut x_offset: f32 = 0.0;
@@ -785,6 +1256,7 @@ impl TextShaper {
             font_stretch: stretch,
             font_size: size,
             metrics,
+            direction: TextDirection::Ltr,
         })
     }
 
@@ -801,6 +1273,456 @@ impl TextShaper {
         let chain = FontFamilyChain::from_css_value(font_family);
         let run = self.shape(text, &chain, weight, style, stretch, size)?;
         Ok(run.metrics)
+    }
+
+    /// Shape text with bidirectional text support.
+    ///
+    /// This function analyzes the text for bidirectional content (mixed LTR/RTL)
+    /// using the Unicode Bidirectional Algorithm (UAX #9) and produces separate
+    /// shaped runs for each directional segment in visual order.
+    ///
+    /// # Arguments
+    /// * `text` - The text to shape
+    /// * `font_chain` - Font family chain with fallbacks
+    /// * `weight` - Font weight
+    /// * `style` - Font style (normal, italic, oblique)
+    /// * `stretch` - Font stretch
+    /// * `size` - Font size in pixels
+    /// * `base_direction` - Base paragraph direction (from CSS `direction` property)
+    ///
+    /// # Returns
+    /// A vector of `ShapedRun`s in visual (display) order, each with its own direction.
+    /// For pure LTR or RTL text, this returns a single run.
+    pub fn shape_with_bidi(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        base_direction: Option<TextDirection>,
+    ) -> Result<Vec<ShapedRun>, TextError> {
+        if text.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Convert to bidi direction for analysis
+        let bidi_base = base_direction.map(|d| d.to_bidi());
+
+        // Analyze bidirectional text
+        let bidi_info = BidiInfo::with_base_direction(text, bidi_base);
+
+        // Fast path: pure LTR or RTL text with single run
+        let visual_runs = bidi_info.visual_runs();
+        if visual_runs.len() == 1 && bidi_info.is_pure_ltr() {
+            // Simple case: just shape the whole text as LTR
+            let mut run = self.shape(text, font_chain, weight, style, stretch, size)?;
+            run.direction = TextDirection::Ltr;
+            return Ok(vec![run]);
+        }
+
+        // Handle mixed-direction text
+        let mut shaped_runs = Vec::with_capacity(visual_runs.len());
+
+        for bidi_run in visual_runs {
+            let run_text = bidi_run.text(text);
+            if run_text.is_empty() {
+                continue;
+            }
+
+            // Shape this run
+            let mut shaped = self.shape(run_text, font_chain, weight, style, stretch, size)?;
+            shaped.direction = TextDirection::from_bidi(bidi_run.direction);
+
+            // For RTL runs, we may need to reverse the glyph order
+            // (depending on whether the underlying shaper already did this)
+            // Note: Core Text and DirectWrite handle RTL internally,
+            // so we typically don't need to reverse here.
+
+            shaped_runs.push(shaped);
+        }
+
+        Ok(shaped_runs)
+    }
+
+    /// Shape text with bidirectional support using CSS direction property.
+    ///
+    /// Convenience wrapper around `shape_with_bidi` that takes a CSS direction value.
+    pub fn shape_with_css_direction(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        css_direction: CssDirection,
+    ) -> Result<Vec<ShapedRun>, TextError> {
+        self.shape_with_bidi(
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            Some(TextDirection::from_css(css_direction)),
+        )
+    }
+
+    /// Wrap text into lines that fit within the specified width.
+    ///
+    /// This function shapes text and breaks it into multiple lines based on:
+    /// - Available width
+    /// - CSS word-break property
+    /// - UAX #14 line breaking rules
+    ///
+    /// # Arguments
+    /// * `text` - The text to wrap
+    /// * `font_chain` - Font family chain with fallbacks
+    /// * `weight` - Font weight
+    /// * `style` - Font style
+    /// * `stretch` - Font stretch
+    /// * `size` - Font size in pixels
+    /// * `max_width` - Maximum line width in pixels
+    /// * `word_break` - CSS word-break property value
+    ///
+    /// # Returns
+    /// A vector of `WrappedLine` structs, each containing shaped runs for one line.
+    pub fn wrap_text(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        self.wrap_text_with_first_line(
+            text, font_chain, weight, style, stretch, size, max_width, max_width, word_break,
+        )
+    }
+
+    /// Wrap text where the FIRST line has a different available width than
+    /// the rest — the inline-formatting-context case: a run starting
+    /// mid-line fills the remaining space of the current line box, then
+    /// continues at the containing block's full width.
+    ///
+    /// If nothing fits on a narrower first line, the first line comes back
+    /// EMPTY (the run starts on the next line box) instead of overflowing at
+    /// the tail of a partially-filled line — css-text-3 §5.2 overflow only
+    /// applies when a whole line box cannot take the word.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wrap_text_with_first_line(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        first_line_max_width: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        if text.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Convert CSS word-break to our line breaking enum
+        let lb_word_break = match word_break {
+            CssWordBreak::Normal => LineBreakWordBreak::Normal,
+            CssWordBreak::BreakAll => LineBreakWordBreak::BreakAll,
+            CssWordBreak::KeepAll => LineBreakWordBreak::KeepAll,
+            CssWordBreak::BreakWord => LineBreakWordBreak::BreakWord,
+        };
+
+        let breaker = LineBreaker::new(lb_word_break, OverflowWrap::Normal);
+        let mut lines = Vec::new();
+
+        // First, handle mandatory line breaks
+        for segment in rustkit_text::line_break::break_into_lines(text) {
+            let segment_text = segment.text_without_break();
+            if segment_text.is_empty() {
+                // Empty line (just a line break)
+                lines.push(WrappedLine {
+                    runs: vec![],
+                    width: 0.0,
+                    start_offset: segment.start,
+                    end_offset: segment.end,
+                });
+                continue;
+            }
+
+            // The narrower first-line width applies only to the very first
+            // rendered line of the whole run.
+            let seg_first_max = if lines.is_empty() {
+                first_line_max_width
+            } else {
+                max_width
+            };
+
+            // Now wrap this segment within max_width
+            let segment_lines = self.wrap_segment(
+                segment_text,
+                font_chain,
+                weight,
+                style,
+                stretch,
+                size,
+                seg_first_max,
+                max_width,
+                &breaker,
+                segment.start,
+            )?;
+
+            lines.extend(segment_lines);
+        }
+
+        // Handle case where text has no mandatory breaks
+        if lines.is_empty() && !text.is_empty() {
+            lines = self.wrap_segment(
+                text,
+                font_chain,
+                weight,
+                style,
+                stretch,
+                size,
+                first_line_max_width,
+                max_width,
+                &breaker,
+                0,
+            )?;
+        }
+
+        Ok(lines)
+    }
+
+    /// Internal helper to wrap a single segment (no mandatory breaks).
+    fn wrap_segment(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        first_line_max_width: f32,
+        max_width: f32,
+        breaker: &LineBreaker,
+        base_offset: usize,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        if text.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut lines = Vec::new();
+        let mut line_start = 0;
+
+        while line_start < text.len() {
+            // The first rendered line may have a narrower budget (a run
+            // starting mid-line fills the current line box's remainder).
+            let cur_max = if lines.is_empty() {
+                first_line_max_width
+            } else {
+                max_width
+            };
+
+            // Shape the remaining text to find where we need to break
+            let remaining = &text[line_start..];
+            let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
+
+            if shaped.metrics.width <= cur_max {
+                // Entire remaining text fits on one line
+                let width = shaped.metrics.width;
+                lines.push(WrappedLine {
+                    runs: vec![shaped],
+                    width,
+                    start_offset: base_offset + line_start,
+                    end_offset: base_offset + text.len(),
+                });
+                break;
+            }
+
+            // Need to find a break point
+            // Binary search for the right break point
+            let break_offset = self.find_line_break(
+                remaining, font_chain, weight, style, stretch, size, cur_max, breaker,
+            )?;
+
+            if break_offset == 0 {
+                // Nothing fits on a NARROWED first line: start the run on
+                // the next (full-width) line box instead of overflowing a
+                // partially-filled line.
+                if lines.is_empty() && first_line_max_width < max_width {
+                    lines.push(WrappedLine {
+                        runs: vec![],
+                        width: 0.0,
+                        start_offset: base_offset + line_start,
+                        end_offset: base_offset + line_start,
+                    });
+                    continue;
+                }
+                // No break opportunity fits within max_width.
+                let may_break_mid_word = breaker.allows_emergency_breaks()
+                    || matches!(
+                        breaker.word_break,
+                        LineBreakWordBreak::BreakAll | LineBreakWordBreak::BreakWord
+                    );
+                let line_end = if may_break_mid_word {
+                    // overflow-wrap: anywhere/break-word or word-break:
+                    // break-all — force break at the first grapheme boundary.
+                    rustkit_text::segmentation::grapheme_boundaries(remaining)
+                        .get(1)
+                        .copied()
+                        .unwrap_or(remaining.len())
+                } else {
+                    // css-text-3 §5.2: when no break opportunity exists on the
+                    // line, the unbreakable unit stays on it and OVERFLOWS —
+                    // it is never broken mid-word. (Chrome behavior for
+                    // word-break: normal/keep-all.) Take everything up to the
+                    // next break opportunity as this line.
+                    breaker
+                        .find_break_after(remaining, 1)
+                        .filter(|&o| o > 0)
+                        .unwrap_or(remaining.len())
+                        .min(remaining.len())
+                };
+
+                let line_text = &remaining[..line_end];
+                let shaped_line =
+                    self.shape(line_text, font_chain, weight, style, stretch, size)?;
+
+                lines.push(WrappedLine {
+                    runs: vec![shaped_line.clone()],
+                    width: shaped_line.metrics.width,
+                    start_offset: base_offset + line_start,
+                    end_offset: base_offset + line_start + line_end,
+                });
+
+                // Skip whitespace at the break point
+                line_start += line_end;
+                while line_start < text.len() && text[line_start..].starts_with(char::is_whitespace)
+                {
+                    line_start += text[line_start..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                }
+            } else {
+                let line_text = &remaining[..break_offset];
+                let shaped_line =
+                    self.shape(line_text, font_chain, weight, style, stretch, size)?;
+
+                lines.push(WrappedLine {
+                    runs: vec![shaped_line.clone()],
+                    width: shaped_line.metrics.width,
+                    start_offset: base_offset + line_start,
+                    end_offset: base_offset + line_start + break_offset,
+                });
+
+                // Skip whitespace at the break point
+                line_start += break_offset;
+                while line_start < text.len() && text[line_start..].starts_with(char::is_whitespace)
+                {
+                    line_start += text[line_start..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                }
+            }
+        }
+
+        Ok(lines)
+    }
+
+    /// Find the best line break point within max_width.
+    fn find_line_break(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        max_width: f32,
+        breaker: &LineBreaker,
+    ) -> Result<usize, TextError> {
+        // Get all break opportunities
+        let break_offsets = breaker.break_offsets(text);
+
+        // Find the last break that fits
+        let mut best_break = 0;
+
+        for &offset in &break_offsets {
+            if offset == 0 {
+                continue;
+            }
+
+            let prefix = &text[..offset];
+            let shaped = self.shape(prefix, font_chain, weight, style, stretch, size)?;
+
+            if shaped.metrics.width <= max_width {
+                best_break = offset;
+            } else {
+                break;
+            }
+        }
+
+        Ok(best_break)
+    }
+}
+
+/// A wrapped line of text.
+#[derive(Debug, Clone)]
+pub struct WrappedLine {
+    /// Shaped runs for this line.
+    pub runs: Vec<ShapedRun>,
+    /// Total width of this line.
+    pub width: f32,
+    /// Start byte offset in the original text.
+    pub start_offset: usize,
+    /// End byte offset in the original text.
+    pub end_offset: usize,
+}
+
+impl WrappedLine {
+    /// Get the height of this line (max height of all runs).
+    pub fn height(&self) -> f32 {
+        self.runs
+            .iter()
+            .map(|r| r.metrics.height)
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Get the ascent of this line (max ascent of all runs).
+    pub fn ascent(&self) -> f32 {
+        self.runs
+            .iter()
+            .map(|r| r.metrics.ascent)
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Get the descent of this line (max descent of all runs).
+    pub fn descent(&self) -> f32 {
+        self.runs
+            .iter()
+            .map(|r| r.metrics.descent)
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Check if this line is empty.
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty() || self.runs.iter().all(|r| r.glyphs.is_empty())
+    }
+
+    /// Get the text content of this line.
+    pub fn text(&self) -> String {
+        self.runs.iter().map(|r| r.text.as_str()).collect()
     }
 }
 
@@ -949,10 +1871,29 @@ mod tests {
     #[test]
     fn test_generic_font_families() {
         let sans = FontFamilyChain::from_css_value("sans-serif");
+        #[cfg(target_os = "macos")]
+        assert_eq!(sans.primary, "SF Pro");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(sans.primary, "Segoe UI");
 
         let mono = FontFamilyChain::from_css_value("monospace");
+        #[cfg(target_os = "macos")]
+        assert_eq!(mono.primary, "SF Mono");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(mono.primary, "Cascadia Code");
+
+        // Test system-ui and vendor-prefixed variants
+        let system = FontFamilyChain::from_css_value("system-ui");
+        #[cfg(target_os = "macos")]
+        assert_eq!(system.primary, ".AppleSystemUIFont");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(system.primary, "Segoe UI");
+
+        let apple = FontFamilyChain::from_css_value("-apple-system");
+        #[cfg(target_os = "macos")]
+        assert_eq!(apple.primary, ".AppleSystemUIFont");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(apple.primary, "Segoe UI");
     }
 
     #[test]
@@ -1078,5 +2019,297 @@ mod tests {
         assert!(result.is_ok());
         let run = result.unwrap();
         assert!(run.glyphs.is_empty());
+    }
+
+    #[test]
+    fn test_text_direction_conversions() {
+        use rustkit_css::Direction as CssDirection;
+        use rustkit_text::bidi::Direction as BidiDirection;
+
+        // From CSS
+        assert_eq!(
+            TextDirection::from_css(CssDirection::Ltr),
+            TextDirection::Ltr
+        );
+        assert_eq!(
+            TextDirection::from_css(CssDirection::Rtl),
+            TextDirection::Rtl
+        );
+
+        // From bidi
+        assert_eq!(
+            TextDirection::from_bidi(BidiDirection::Ltr),
+            TextDirection::Ltr
+        );
+        assert_eq!(
+            TextDirection::from_bidi(BidiDirection::Rtl),
+            TextDirection::Rtl
+        );
+
+        // To bidi
+        assert_eq!(TextDirection::Ltr.to_bidi(), BidiDirection::Ltr);
+        assert_eq!(TextDirection::Rtl.to_bidi(), BidiDirection::Rtl);
+
+        // Helper methods
+        assert!(TextDirection::Ltr.is_ltr());
+        assert!(!TextDirection::Ltr.is_rtl());
+        assert!(TextDirection::Rtl.is_rtl());
+        assert!(!TextDirection::Rtl.is_ltr());
+
+        // Default
+        assert_eq!(TextDirection::default(), TextDirection::Ltr);
+    }
+
+    #[test]
+    fn test_shape_with_bidi_empty() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.shape_with_bidi(
+            "",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            None,
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_shape_with_bidi_ltr() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.shape_with_bidi(
+            "Hello, world!",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            None,
+        );
+        assert!(result.is_ok());
+        let runs = result.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].direction, TextDirection::Ltr);
+        assert_eq!(runs[0].text, "Hello, world!");
+    }
+
+    #[test]
+    fn test_shape_with_bidi_rtl() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        // Hebrew: "shalom" (שלום)
+        let result = shaper.shape_with_bidi(
+            "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            None,
+        );
+        assert!(result.is_ok());
+        let runs = result.unwrap();
+        // Pure RTL text should produce a single RTL run
+        assert!(!runs.is_empty());
+    }
+
+    #[test]
+    fn test_shape_with_bidi_mixed() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        // Mixed: "Hello שלום world"
+        let result = shaper.shape_with_bidi(
+            "Hello \u{05E9}\u{05DC}\u{05D5}\u{05DD} world",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            None,
+        );
+        assert!(result.is_ok());
+        let runs = result.unwrap();
+        // Mixed text should produce multiple runs
+        assert!(
+            runs.len() >= 2,
+            "Expected multiple runs for mixed text, got {}",
+            runs.len()
+        );
+    }
+
+    #[test]
+    fn test_shape_with_css_direction() {
+        use rustkit_css::Direction as CssDirection;
+
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.shape_with_css_direction(
+            "Hello",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            CssDirection::Ltr,
+        );
+        assert!(result.is_ok());
+        let runs = result.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].direction, TextDirection::Ltr);
+    }
+
+    #[test]
+    fn test_shaped_run_direction_field() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.shape(
+            "Test",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+        );
+        assert!(result.is_ok());
+        let run = result.unwrap();
+        // Default shape() should produce LTR direction
+        assert_eq!(run.direction, TextDirection::Ltr);
+    }
+
+    #[test]
+    fn test_wrap_text_empty() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.wrap_text(
+            "",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            200.0,
+            CssWordBreak::Normal,
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_wrap_text_single_line() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.wrap_text(
+            "Hello",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            1000.0, // Very wide, should fit on one line
+            CssWordBreak::Normal,
+        );
+        assert!(result.is_ok());
+        let lines = result.unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "Hello");
+    }
+
+    #[test]
+    fn test_wrap_text_multiple_lines() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.wrap_text(
+            "Hello world this is a test",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            80.0, // Narrow width to force wrapping
+            CssWordBreak::Normal,
+        );
+        assert!(result.is_ok());
+        let lines = result.unwrap();
+        // Should have multiple lines due to narrow width
+        assert!(
+            lines.len() > 1,
+            "Expected multiple lines, got {}",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn test_wrap_text_with_newlines() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.wrap_text(
+            "Line1\nLine2",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            1000.0,
+            CssWordBreak::Normal,
+        );
+        assert!(result.is_ok());
+        let lines = result.unwrap();
+        // Should have at least 2 lines due to newline
+        assert!(
+            lines.len() >= 2,
+            "Expected at least 2 lines for text with newline"
+        );
+    }
+
+    #[test]
+    fn test_wrap_text_break_all() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        // With break-all, should be able to break mid-word
+        let result = shaper.wrap_text(
+            "Supercalifragilisticexpialidocious",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            50.0, // Very narrow
+            CssWordBreak::BreakAll,
+        );
+        assert!(result.is_ok());
+        let lines = result.unwrap();
+        // Should break the long word
+        assert!(lines.len() > 1, "Expected word to be broken with break-all");
+    }
+
+    #[test]
+    fn test_wrapped_line_properties() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.wrap_text(
+            "Test",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            1000.0,
+            CssWordBreak::Normal,
+        );
+        assert!(result.is_ok());
+        let lines = result.unwrap();
+        assert_eq!(lines.len(), 1);
+
+        let line = &lines[0];
+        assert!(line.width > 0.0);
+        assert!(line.height() > 0.0);
+        assert!(line.ascent() > 0.0);
+        assert!(!line.is_empty());
+        assert_eq!(line.start_offset, 0);
+        assert_eq!(line.end_offset, 4);
     }
 }

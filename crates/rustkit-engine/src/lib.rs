@@ -5671,7 +5671,17 @@ mod box_shadow_paint_tests {
     fn shadow_commands(html: &str) -> Vec<(f32, f32, f32, f32, rustkit_css::Color, bool)> {
         let e = engine();
         let doc = Document::parse_html(html).expect("parse");
-        DisplayList::build(&e.build_layout_from_document(&doc))
+        // Layout FIRST: the adopted (macOS) paint path culls zero-sized
+        // boxes, so a display list built from an un-laid-out tree is empty.
+        // The old paint emitted for 0x0 boxes, which let this helper skip
+        // layout and still measure something — a fixture accident, not a
+        // guarantee.
+        let mut layout = e.build_layout_from_document(&doc);
+        layout.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+        DisplayList::build(&layout)
             .commands
             .iter()
             .filter_map(|c| match c {
@@ -6094,7 +6104,17 @@ mod rounded_rect_tests {
     fn rounded(html: &str) -> Vec<rustkit_layout::BorderRadius> {
         let e = engine();
         let doc = Document::parse_html(html).expect("parse");
-        DisplayList::build(&e.build_layout_from_document(&doc))
+        // Layout FIRST: the adopted (macOS) paint path culls zero-sized
+        // boxes, so a display list built from an un-laid-out tree is empty.
+        // The old paint emitted for 0x0 boxes, which let this helper skip
+        // layout and still measure something — a fixture accident, not a
+        // guarantee.
+        let mut layout = e.build_layout_from_document(&doc);
+        layout.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+        DisplayList::build(&layout)
             .commands.iter()
             .filter_map(|c| match c {
                 rustkit_layout::DisplayCommand::RoundedRect { radius, .. } => Some(*radius),
@@ -6105,7 +6125,17 @@ mod rounded_rect_tests {
     fn plain_rects(html: &str) -> usize {
         let e = engine();
         let doc = Document::parse_html(html).expect("parse");
-        DisplayList::build(&e.build_layout_from_document(&doc))
+        // Layout FIRST: the adopted (macOS) paint path culls zero-sized
+        // boxes, so a display list built from an un-laid-out tree is empty.
+        // The old paint emitted for 0x0 boxes, which let this helper skip
+        // layout and still measure something — a fixture accident, not a
+        // guarantee.
+        let mut layout = e.build_layout_from_document(&doc);
+        layout.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+        DisplayList::build(&layout)
             .commands.iter()
             .filter(|c| matches!(c, rustkit_layout::DisplayCommand::SolidColor(..)))
             .count()
@@ -6294,11 +6324,16 @@ mod l1_live_relative_units_reach_flex_and_grid {
         let xs = element_xs(
             r#"<html><head><style>body{margin:0;padding:0}
                #f{display:flex;font-size:20px;gap:2em;width:1000px}
-               #a,#b{min-width:0}</style></head>
+               #a,#b{min-width:0;width:12px}</style></head>
                <body><div id=f><div id=a>x</div><div id=b>y</div></div></body></html>"#);
         let second = *xs.last().expect("second flex item");
+        // 12 (item A, honored Px width) + 40 (2em at the CONTAINER's 20px).
+        // Item widths are pinned to a NONZERO Px because the adopted flex
+        // treats an authored zero as unset (Length::Zero -> auto, Px(0) ->
+        // 16) — a reference-tree quirk reported upstream 2026-09-28. Element-
+        // font resolution would give 12+42=54; hardcoded 16 gives 12+32=44.
         assert_eq!(
-            second, 40.0,
+            second, 52.0,
             "an em gap must resolve against the flex CONTAINER font size (20); got {second}"
         );
     }
@@ -6333,7 +6368,7 @@ mod l1_live_relative_units_reach_flex_and_grid {
             r#"<html><head><style>body{margin:0;padding:0}
                #g{display:grid;grid-template-columns:100px 100px;font-size:20px;
                   column-gap:2em;width:1000px}
-               #a,#b{min-width:0}</style></head>
+               #a,#b{min-width:0;width:12px}</style></head>
                <body><div id=g><div id=a>x</div><div id=b>y</div></div></body></html>"#);
         let second = *xs.last().expect("second grid item");
         assert_eq!(
@@ -6350,7 +6385,7 @@ mod l1_live_relative_units_reach_flex_and_grid {
             r#"<html><head><style>body{margin:0;padding:0}
                #g{display:grid;grid-template-columns:100px 100px;font-size:20px;
                   column-gap:2rem;width:1000px}
-               #a,#b{min-width:0}</style></head>
+               #a,#b{min-width:0;width:12px}</style></head>
                <body><div id=g><div id=a>x</div><div id=b>y</div></div></body></html>"#);
         let second = *xs.last().expect("second grid item");
         assert_eq!(second, 132.0, "a rem column-gap must use the root constant 16 (100 + 2*16)");
@@ -6463,6 +6498,38 @@ mod flexbox_45_automatic_minimum {
     use super::*;
     use rustkit_css::Length;
 
+
+    fn flex_item_width_with_text(item_css: &str, text: &str) -> f32 {
+        let html = format!(
+            r#"<html><head><style>body{{margin:0;padding:0}}
+               #f{{display:flex;width:40px}} #a{{{item_css}}}</style></head>
+               <body><div id=f><div id=a>{text}</div></div></body></html>"#
+        );
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Engine {
+            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
+            compositor: test_compositor(), renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
+        };
+        let doc = Document::parse_html(&html).expect("parse");
+        let mut layout = e.build_layout_from_document(&doc);
+        layout.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 1000.0, 800.0),
+            ..Default::default()
+        });
+        fn find(b: &LayoutBox) -> Option<f32> {
+            if b.style.display == rustkit_css::Display::Flex {
+                return b.children.first().map(|c| c.dimensions.content.width);
+            }
+            for c in &b.children {
+                if let Some(w) = find(c) { return Some(w); }
+            }
+            None
+        }
+        find(&layout).expect("a flex container with one item")
+    }
+
     /// Width of the first child of the first flex container in the tree.
     fn flex_item_width(item_css: &str) -> f32 {
         let html = format!(
@@ -6512,9 +6579,13 @@ mod flexbox_45_automatic_minimum {
         // The item is in a 40px container with content wider than that. With
         // `min-width: auto` (the initial) and visible overflow, §4.5 floors it
         // at its min-content width instead of letting shrink squeeze it away.
-        let w = flex_item_width("");
+        // Long unbreakable word: min-content (224) far exceeds the 40px
+        // container, so the floor BINDS and the negatives below can
+        // discriminate. With short text the floor sits under the container
+        // and floored == suppressed == 40 proves nothing.
+        let w = flex_item_width_with_text("", "Antidisestablishmentarianism");
         assert!(
-            w > 0.0,
+            w > 40.0,
             "an item with the initial min-width:auto must be floored at its \
              content-based minimum, got {w}"
         );
@@ -6527,9 +6598,20 @@ mod flexbox_45_automatic_minimum {
         // writes 0 is asking to be shrinkable to nothing and must keep getting
         // it — this is the distinction that required the initial value to
         // become Auto, since the resolver maps both Auto and Px(0) to 0.0.
-        assert_eq!(
-            flex_item_width("min-width:0;"), 0.0,
-            "an explicit min-width:0 must remain shrinkable to nothing"
+        // UPDATED at the wave-3 layout adoption. The old expectation of 0.0
+        // was an artifact of the old flex base-size bug: an auto-width item
+        // computed a ZERO flex base, so "no floor" meant "no width at all".
+        // With a correct content-derived base, shrink resolves the overflow
+        // against the 40px container and stops there — Chrome agrees. What
+        // min-width:0 buys is shrinking BELOW the content floor, not to
+        // nothing, so that is what is asserted: container fit, strictly
+        // below the §4.5 floor the positive test measures.
+        let floored = flex_item_width_with_text("", "Antidisestablishmentarianism");
+        let w = flex_item_width_with_text("min-width:0;", "Antidisestablishmentarianism");
+        assert_eq!(w, 40.0, "min-width:0 must shrink to container fit");
+        assert!(
+            w < floored,
+            "an authored zero must undercut the automatic minimum ({floored})"
         );
     }
 
@@ -6541,10 +6623,10 @@ mod flexbox_45_automatic_minimum {
         // `overflow` became parseable: `overflow_x` was permanently Visible, so
         // the spec condition could never go false and the rule was
         // unconditional while looking conditional.
-        assert_eq!(
-            flex_item_width("overflow:hidden;"), 0.0,
-            "overflow:hidden must suppress the §4.5 automatic minimum"
-        );
+        let floored = flex_item_width_with_text("", "Antidisestablishmentarianism");
+        let w = flex_item_width_with_text("overflow:hidden;", "Antidisestablishmentarianism");
+        assert_eq!(w, 40.0, "overflow:hidden must suppress the floor down to container fit");
+        assert!(w < floored, "suppressed item must sit below the floor ({floored})");
     }
 
     #[test]
@@ -6552,11 +6634,14 @@ mod flexbox_45_automatic_minimum {
         let _gpu = gpu_serial();
         // `hidden` alone would leave "not visible" tested through a single
         // keyword while the rule is written against every non-visible value.
+        let floored = flex_item_width_with_text("", "Antidisestablishmentarianism");
         for keyword in ["scroll", "auto", "clip"] {
+            let w = flex_item_width_with_text(&format!("overflow:{keyword};"), "Antidisestablishmentarianism");
             assert_eq!(
-                flex_item_width(&format!("overflow:{keyword};")), 0.0,
+                w, 40.0,
                 "overflow:{keyword} must also suppress the automatic minimum"
             );
+            assert!(w < floored, "overflow:{keyword} item must sit below the floor");
         }
     }
 
