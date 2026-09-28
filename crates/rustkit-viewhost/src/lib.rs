@@ -21,6 +21,14 @@
 // Platform-specific modules
 pub mod linux;
 
+// Platform-agnostic trait seam (ported from the reference tree in the wave-4
+// engine adoption; this is the one-engine Phase-2 shape). On this platform
+// WindowHandle is `()` — the native path drives the CONCRETE X11 API
+// (create_view(parent: u64, ..)), and the trait exists so the shared engine
+// compiles and the non-view operations delegate.
+mod traits;
+pub use traits::{ViewHostTrait, WindowHandle};
+
 // Screenshot capture
 pub mod screenshot;
 
@@ -1403,5 +1411,54 @@ mod tests {
 
         host.destroy_view(view_id).unwrap();
         assert_eq!(host.view_count(), 0);
+    }
+}
+
+// ============================================================================
+// ViewHostTrait for the Linux (X11) ViewHost — ported seam, wave-4.
+// create_view through the TRAIT is refused loudly: the trait's WindowHandle
+// is `()` on this platform, and an X11 view cannot be created without a real
+// parent window. Callers that can supply one use the concrete API; a silent
+// stub here would recreate the hwnd_raw:0 phantom-view defect this tree
+// removed in #59.
+// ============================================================================
+impl ViewHostTrait for ViewHost {
+    fn create_view(
+        &self,
+        _parent: WindowHandle,
+        _bounds: Bounds,
+    ) -> Result<ViewId, ViewHostError> {
+        Err(ViewHostError::WindowCreation(
+            "trait create_view has no X11 parent; use ViewHost::create_view(parent_window, bounds)"
+                .into(),
+        ))
+    }
+
+    fn resize_view(&self, view_id: ViewId, bounds: Bounds) -> Result<(), ViewHostError> {
+        self.set_bounds(view_id, bounds)
+    }
+
+    fn destroy_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
+        self.destroy_view(view_id)
+    }
+
+    fn set_visible(&self, view_id: ViewId, visible: bool) -> Result<(), ViewHostError> {
+        self.set_visible(view_id, visible)
+    }
+
+    fn focus_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
+        self.focus_view(view_id)
+    }
+
+    fn pump_messages(&self) -> bool {
+        self.pump_messages()
+    }
+
+    fn get_bounds(&self, view_id: ViewId) -> Result<Bounds, ViewHostError> {
+        self.get_bounds(view_id)
+    }
+
+    fn get_dpi(&self, view_id: ViewId) -> Result<u32, ViewHostError> {
+        self.get_dpi(view_id)
     }
 }
