@@ -1,0 +1,275 @@
+{
+ "os": "linux",
+ "engine": "f0ad47d",
+ "engine_note": "hiwave-linux PR #66 head (paint advances), stacked on PR #65 head f0d0be8 which syncs to hiwave-macos develop 22092e6",
+ "command": "for each case in hiwave-macos cases/registry.json (holdout excluded): target/release/parity-capture --html-file <MAC>/<case.html> --width W --height H --dump-frame frame.ppm; frame.ppm converted losslessly to rustkit.png",
+ "parity_capture_sha256": "3e2a91e23c7db70e8745758fe359a6e2d61bf8b26dde14775f66da5a297cf23c",
+ "chrome": "148.0.7778.216, pinned baselines copied unmodified from hiwave-macos baselines/chrome-148 (captured on macOS). NO Linux Chrome oracle exists on this seat.",
+ "compare_tool": "diff_pct comes from a Python port of pixelmatch (threshold 0.1, includeAA) - NOT validated against tools/parity_oracle/compare_pixels.mjs (no node on this seat). Treat diff_pct as a reading; the gallery verdict from the canonical pipeline governs.",
+ "known_difference": "Linux fonts differ from the darwin-captured baselines (Liberation/Noto/Ubuntu via fontconfig, no SF/Helvetica, no color-emoji rasterization). Accepted by Pete 2026-09-30.",
+ "host": "Linux 6.17 Ubuntu 25.10 / Intel i7-10750H / NVIDIA RTX 2060 Mobile (rendering via wgpu)",
+ "utc": "2026-09-30T21:00:09Z",
+ "mean_diff_pct": 4.5019,
+ "cases": {
+  "new_tab": {
+   "group": "builtins",
+   "diff_pct": 2.1683,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    1280,
+    800
+   ]
+  },
+  "about": {
+   "group": "builtins",
+   "diff_pct": 11.0167,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "settings": {
+   "group": "builtins",
+   "diff_pct": 3.1845,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    1024,
+    768
+   ]
+  },
+  "chrome_rustkit": {
+   "group": "builtins",
+   "diff_pct": 1.6687,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    1280,
+    100
+   ]
+  },
+  "shelf": {
+   "group": "builtins",
+   "diff_pct": 1.4232,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    1280,
+    120
+   ]
+  },
+  "article-typography": {
+   "group": "websuite",
+   "diff_pct": 8.0576,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    1280,
+    800
+   ]
+  },
+  "card-grid": {
+   "group": "websuite",
+   "diff_pct": 7.2177,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    1280,
+    800
+   ]
+  },
+  "css-selectors": {
+   "group": "websuite",
+   "diff_pct": 20.1195,
+   "pass": false,
+   "threshold": 15,
+   "viewport": [
+    800,
+    1200
+   ]
+  },
+  "flex-positioning": {
+   "group": "websuite",
+   "diff_pct": 4.501,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    1000
+   ]
+  },
+  "form-elements": {
+   "group": "websuite",
+   "diff_pct": 4.415,
+   "pass": true,
+   "threshold": 12,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "gradient-backgrounds": {
+   "group": "websuite",
+   "diff_pct": 2.9458,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "image-gallery": {
+   "group": "websuite",
+   "diff_pct": 2.8666,
+   "pass": true,
+   "threshold": 10,
+   "viewport": [
+    1280,
+    800
+   ]
+  },
+  "sticky-scroll": {
+   "group": "websuite",
+   "diff_pct": 2.0647,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    1280,
+    800
+   ]
+  },
+  "backgrounds": {
+   "group": "micro",
+   "diff_pct": 7.6654,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    900,
+    1000
+   ]
+  },
+  "bg-solid": {
+   "group": "micro",
+   "diff_pct": 2.0377,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "bg-pure": {
+   "group": "micro",
+   "diff_pct": 0.0,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "combinators": {
+   "group": "micro",
+   "diff_pct": 3.2742,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    800
+   ]
+  },
+  "form-controls": {
+   "group": "micro",
+   "diff_pct": 6.2061,
+   "pass": true,
+   "threshold": 12,
+   "viewport": [
+    800,
+    1200
+   ]
+  },
+  "gradients": {
+   "group": "micro",
+   "diff_pct": 2.6017,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    900,
+    1000
+   ]
+  },
+  "gradient-no-radius": {
+   "group": "micro",
+   "diff_pct": 2.5998,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "gradient-radius-only": {
+   "group": "micro",
+   "diff_pct": 1.7604,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "gpu-gradient-regression": {
+   "group": "micro",
+   "diff_pct": 3.8973,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    1200
+   ]
+  },
+  "images-intrinsic": {
+   "group": "micro",
+   "diff_pct": 5.4847,
+   "pass": true,
+   "threshold": 10,
+   "viewport": [
+    800,
+    1400
+   ]
+  },
+  "pseudo-classes": {
+   "group": "micro",
+   "diff_pct": 2.7844,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    800
+   ]
+  },
+  "rounded-corners": {
+   "group": "micro",
+   "diff_pct": 4.2829,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    900,
+    1000
+   ]
+  },
+  "specificity": {
+   "group": "micro",
+   "diff_pct": 2.8054,
+   "pass": true,
+   "threshold": 15,
+   "viewport": [
+    800,
+    600
+   ]
+  }
+ }
+}
