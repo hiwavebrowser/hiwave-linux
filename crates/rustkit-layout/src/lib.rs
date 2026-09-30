@@ -7782,22 +7782,6 @@ impl DisplayList {
                     _ => (text, advances, text_width),
                 };
 
-                // LINUX (declared divergence, wave-3 of the macOS sync):
-                // withhold layout's advances from paint and let the renderer
-                // fall back to deriving advances from the face it actually
-                // rasterizes — the documented legacy half of the ADVANCE
-                // CONTRACT. On this platform layout resolves the face through
-                // FontFamilyChain fallbacks while paint queries fontconfig
-                // with the raw CSS family, and fontconfig SUBSTITUTES rather
-                // than fails — so the two sides can land on different faces
-                // and layout's advances then misplace paint's ink (measured:
-                // overlapping glyphs in the wave-3 native smoke; same
-                // silent-substitute shape Atlas flagged for CTFontCreateWithName).
-                // The real fix — one face resolution feeding both sides —
-                // is coordinated engine work, not a paint-side patch.
-                #[cfg(all(unix, not(target_os = "macos")))]
-                let advances: Option<Vec<f32>> = None;
-
                 // Check if this is gradient text (background-clip: text with gradient and transparent fill)
                 let is_gradient_text = style.background_clip == rustkit_css::BackgroundClip::Text
                     && style.webkit_text_fill_color == Some(rustkit_css::Color::TRANSPARENT)
@@ -8987,6 +8971,22 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn text_command_carries_layout_advances_with_letter_spacing() {
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.letter_spacing = Length::Px(10.0);
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.dimensions.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut text_box = LayoutBox::new(BoxType::Text("spaced".to_string()), style);
+        text_box.dimensions.content = Rect::new(20.0, 100.0, 600.0, 16.0);
+        root.children.push(text_box);
+        let cmds = text_commands(&DisplayList::build(&root));
+        let advances = cmds[0].2.as_ref().expect("paint must carry layout's advances");
+        assert_eq!(advances.len(), 6);
+        assert!(advances.iter().all(|a| *a >= 10.0), "{advances:?}");
     }
 
     // ==================== negative leading + seat face (n57) ====================
