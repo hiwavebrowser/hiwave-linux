@@ -1,13 +1,17 @@
 [workspace]
 resolver = "2"
+# Vendored with a patch, not a workspace member (see third_party/boa_gc/HIWAVE_PATCH.md).
+exclude = ["third_party/boa_gc"]
 members = [
     "crates/hiwave-core",
     "crates/hiwave-shield",
+    "crates/hiwave-mcp",
     "crates/hiwave-vault",
     "crates/hiwave-shell",
     "crates/hiwave-analytics",
     "crates/hiwave-app",
     "crates/hiwave-smoke",
+    "crates/parity-capture",
     "crates/rustkit-viewhost",
     "crates/rustkit-compositor",
     "crates/rustkit-core",
@@ -96,6 +100,7 @@ rfd = "0.15"
 # Internal dependencies - HiWave crates
 hiwave-core = { path = "crates/hiwave-core" }
 hiwave-shield = { path = "crates/hiwave-shield" }
+hiwave-mcp = { path = "crates/hiwave-mcp" }
 hiwave-vault = { path = "crates/hiwave-vault" }
 hiwave-shell = { path = "crates/hiwave-shell" }
 hiwave-analytics = { path = "crates/hiwave-analytics" }
@@ -122,3 +127,8 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# boa_gc 0.20.0 with the weak-phase mark fix backported from 0.22.
+# Drop when Boa is upgraded to >= 0.22. See third_party/boa_gc/HIWAVE_PATCH.md.
+[patch.crates-io]
+boa_gc = { path = "third_party/boa_gc" }
