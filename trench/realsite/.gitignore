@@ -1,0 +1,2 @@
+# Run artifacts (frames, text, JSON) stay local: real-site captures are not for public repos.
+runs/
