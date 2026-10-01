@@ -254,7 +254,13 @@ def collect(commit: str, branch: str) -> dict:
     # collector must see EVERY crate's result, not a truncated prefix ending at
     # the first failure (that is the same "green incomplete detector" blind
     # spot the zero-test detector exists to avoid).
-    test_code, test_out = run(["cargo", "test", "--workspace", "--no-fail-fast"])
+    # --test-threads=1: engine tests share one software GPU behind a guard that
+    # panics a waiter after 120s (test_gpu::MAX_WAIT). In parallel the queue of
+    # GPU tests is longer than that on a CI runner, so the unlucky tail fails
+    # on the wait, not on its assertions (5 tests, run 36804275308); serial
+    # runs the whole engine suite in ~50s locally with no contention.
+    test_code, test_out = run(["cargo", "test", "--workspace", "--no-fail-fast",
+                               "--", "--test-threads=1"])
 
     # Echo failing-test context to stderr so CI names WHICH tests failed and
     # why, instead of only a count. Mirrors the build-failure surfacing above.
