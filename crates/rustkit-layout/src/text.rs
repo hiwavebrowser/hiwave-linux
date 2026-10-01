@@ -860,6 +860,10 @@ pub const TEXT_SHAPER_BACKEND: &str = if cfg!(windows) {
     "directwrite"
 } else if cfg!(target_os = "macos") {
     "coretext"
+} else if cfg!(target_os = "linux") {
+    // LINUX (declared divergence): advances come from rustybuzz (HarfBuzz) over
+    // FreeType-opened faces, so the stub's closed form does not hold here.
+    "freetype-harfbuzz"
 } else {
     "stub-0.5em"
 };
@@ -870,7 +874,8 @@ pub const TEXT_SHAPER_BACKEND: &str = if cfg!(windows) {
 /// box whose size or inline position depends on a text measurement is reporting
 /// that constant and not a defect. Geometry taken on such a build is MECHANICS
 /// and can never be a parity receipt.
-pub const TEXT_METRICS_ARE_FONT_DERIVED: bool = cfg!(any(windows, target_os = "macos"));
+pub const TEXT_METRICS_ARE_FONT_DERIVED: bool =
+    cfg!(any(windows, target_os = "macos", target_os = "linux"));
 
 /// Text shaper for complex text layout.
 pub struct TextShaper {
