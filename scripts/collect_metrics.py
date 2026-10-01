@@ -47,7 +47,7 @@ def run(cmd: list[str]) -> tuple[int, str]:
     return proc.returncode, proc.stdout or ""
 
 
-APPLIER_FN = "fn apply_inline_style_decls"
+APPLIER_FN = "fn apply_style_property_impl"
 
 
 def _applier_body(engine: str) -> tuple[str, bool]:

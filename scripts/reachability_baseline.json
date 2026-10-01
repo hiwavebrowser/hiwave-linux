@@ -1,8 +1,10 @@
 {
   "_comment": "Baseline for the reachability ratchet. A capability may only LEAVE this list. Adding one is a regression and CI fails. When you close one, delete it here in the same PR - that edit is the receipt.",
   "unreachable_fields": [
-    "justify_items",
-    "justify_self",
+    "backdrop_filter",
+    "direction",
+    "font_stretch",
+    "object_position",
     "text_decoration_thickness"
   ]
 }
