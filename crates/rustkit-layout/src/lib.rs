@@ -2911,11 +2911,17 @@ impl LayoutBox {
         } else {
             0.0
         };
-        descent
-            + half_leading
-            + spare_below
-            + self.dimensions.padding.bottom
-            + self.dimensions.border.bottom
+        // A control's box model lives in its style: the dimensions carry no
+        // padding or border for it, so reading them alone left an author-
+        // padded input hanging 4px under the baseline instead of ~17 and
+        // let any taller container strut (Noto 16px: 5) inflate the line.
+        let px = |l: &Length| match l {
+            Length::Percent(_) | Length::Auto => 0.0,
+            other => other.to_px(font_size, 16.0, 0.0),
+        };
+        let padding_bottom = self.dimensions.padding.bottom.max(px(&self.style.padding_bottom));
+        let border_bottom = self.dimensions.border.bottom.max(px(&self.style.border_bottom_width));
+        descent + half_leading + spare_below + padding_bottom + border_bottom
     }
 
     /// Content area of a NON-REPLACED inline box and the half-leading that
@@ -11302,6 +11308,42 @@ mod tests {
             "whitespace between the members must not change the line's height: {} vs {}",
             row.dimensions.content.height,
             with_ws.dimensions.content.height
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_author_padded_input_hangs_its_padding_under_the_baseline_not_the_strut() {
+        // `<div><input style="padding:12px 14px;border:1px solid"></div>` in a
+        // Noto 16px container: the input's box is 44px (18 line + 24 + 2) and
+        // its baseline sits 27 down, so 17 hang below it. The hang read only
+        // the dimensions (zero for a control), saw ~4, and let the container
+        // strut's 5px descent lengthen the line to 44.9. Chrome: 44.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 540.0, 0.0);
+        let mut row_style = ComputedStyle::new();
+        row_style.font_family = "system-ui".to_string();
+        row_style.font_size = Length::Px(16.0);
+        let mut row = LayoutBox::new(BoxType::Block, row_style);
+        let mut input = n53_text_input();
+        input.style.font_size = Length::Px(16.0);
+        input.style.line_height = rustkit_css::LineHeight::Normal;
+        input.style.width = Length::Px(540.0);
+        input.style.padding_top = Length::Px(12.0);
+        input.style.padding_bottom = Length::Px(12.0);
+        input.style.padding_left = Length::Px(14.0);
+        input.style.padding_right = Length::Px(14.0);
+        input.style.border_top_width = Length::Px(1.0);
+        input.style.border_bottom_width = Length::Px(1.0);
+        input.style.border_left_width = Length::Px(1.0);
+        input.style.border_right_width = Length::Px(1.0);
+        input.style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        row.children.push(input);
+        row.layout(&cb);
+        assert!(
+            (row.dimensions.content.height - 44.0).abs() <= 0.01,
+            "the input is the whole 44px line, got {}",
+            row.dimensions.content.height
         );
     }
 
