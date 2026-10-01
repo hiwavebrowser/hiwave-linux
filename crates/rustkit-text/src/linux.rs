@@ -173,10 +173,37 @@ impl LinuxTextBackend {
         ch: char,
         descriptor: &FontDescriptor,
     ) -> Result<RasterizedGlyph, TextError> {
+        self.rasterize_glyph_at_phase(ch, descriptor, 0, 1)
+    }
+
+    /// Rasterize with the pen `phase / phases` of a pixel right of an integer
+    /// column, so the bitmap carries the fractional position the way Skia's
+    /// subpixel text does. `bearing_x` is relative to that integer column.
+    pub fn rasterize_glyph_at_phase(
+        &mut self,
+        ch: char,
+        descriptor: &FontDescriptor,
+        phase: u8,
+        phases: u8,
+    ) -> Result<RasterizedGlyph, TextError> {
         let face = self.get_face(descriptor)?;
 
-        face.load_char(ch as usize, freetype::face::LoadFlag::RENDER)
-            .map_err(|e| TextError::ShapingFailed(format!("load_char {ch:?}: {e:?}")))?;
+        // The face is shared with measurement, so the shift must not outlive
+        // this render.
+        let shifted = phase != 0 && phases != 0;
+        if shifted {
+            let mut matrix = freetype::ffi::FT_Matrix { xx: 0x10000, xy: 0, yx: 0, yy: 0x10000 };
+            let mut delta =
+                freetype::ffi::FT_Vector { x: (phase as i64 * 64) / phases as i64, y: 0 };
+            face.set_transform(&mut matrix, &mut delta);
+        }
+        let loaded = face.load_char(ch as usize, freetype::face::LoadFlag::RENDER);
+        if shifted {
+            let mut matrix = freetype::ffi::FT_Matrix { xx: 0x10000, xy: 0, yx: 0, yy: 0x10000 };
+            let mut delta = freetype::ffi::FT_Vector { x: 0, y: 0 };
+            face.set_transform(&mut matrix, &mut delta);
+        }
+        loaded.map_err(|e| TextError::ShapingFailed(format!("load_char {ch:?}: {e:?}")))?;
 
         let glyph = face.glyph();
         let bmp = glyph.bitmap();
@@ -489,6 +516,23 @@ mod tests {
         );
         crate::webfonts::clear();
         assert_eq!(backend.resolve_family([family]), "sans-serif", "cleared set is forgotten");
+    }
+
+    #[test]
+    fn a_phased_raster_differs_and_leaves_the_shared_face_unshifted() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let d = FontDescriptor {
+            family: b.resolve_family(["sans-serif"]),
+            weight: FontWeight(400),
+            style: FontStyle::Normal,
+            size: 14.0,
+        };
+        let at0 = b.rasterize_glyph('l', &d).unwrap();
+        let at2 = b.rasterize_glyph_at_phase('l', &d, 2, 4).unwrap();
+        assert_ne!(at0.bitmap, at2.bitmap, "a half-pixel shift must change the coverage");
+        let again = b.rasterize_glyph('l', &d).unwrap();
+        assert_eq!(at0.bitmap, again.bitmap, "the shift must not outlive its render");
+        assert_eq!(at0.advance, at2.advance, "the advance is the layout's, not the phase's");
     }
 
     #[test]
