@@ -979,6 +979,65 @@ pub struct StyleRecord {
     pub computed: Vec<(String, String)>,
 }
 
+/// Decode the escapes inside a CSS string token (CSS Syntax 3 §4.3.7):
+/// `\HEX{1,6}` with one optional trailing whitespace, `\<newline>` as a line
+/// continuation, and `\<char>` as the character itself. Icon fonts write
+/// their glyphs as `content: "\f13a"`.
+fn unescape_css_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            None => {}
+            Some('\n') | Some('\x0c') => {
+                chars.next();
+            }
+            Some('\r') => {
+                chars.next();
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            Some(h) if h.is_ascii_hexdigit() => {
+                let mut cp = 0u32;
+                let mut digits = 0;
+                while digits < 6 {
+                    match chars.peek().and_then(|d| d.to_digit(16)) {
+                        Some(d) => {
+                            cp = cp * 16 + d;
+                            digits += 1;
+                            chars.next();
+                        }
+                        None => break,
+                    }
+                }
+                match chars.peek() {
+                    Some('\r') => {
+                        chars.next();
+                        if chars.peek() == Some(&'\n') {
+                            chars.next();
+                        }
+                    }
+                    Some(' ') | Some('\t') | Some('\n') | Some('\x0c') => {
+                        chars.next();
+                    }
+                    _ => {}
+                }
+                out.push(char::from_u32(cp).filter(|&c| c != '\0').unwrap_or('\u{FFFD}'));
+            }
+            Some(other) => {
+                chars.next();
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
 impl Engine {
     /// Create a new browser engine.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
@@ -7138,12 +7197,10 @@ impl Engine {
                 let v = value.trim();
                 if v == "none" || v == "normal" {
                     style.content = None;
-                } else if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
-                    // Quoted string content
-                    style.content = Some(v[1..v.len() - 1].to_string());
-                } else if v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2 {
-                    // Single-quoted string content
-                    style.content = Some(v[1..v.len() - 1].to_string());
+                } else if (v.starts_with('"') && v.ends_with('"') && v.len() >= 2)
+                    || (v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2)
+                {
+                    style.content = Some(unescape_css_string(&v[1..v.len() - 1]));
                 } else if v == "''" || v == "\"\"" {
                     // Empty string
                     style.content = Some(String::new());
@@ -24875,6 +24932,68 @@ mod pseudo_element_display_tests {
         ).into_iter().enumerate() {
             assert_eq!(rect(&root, "a").height, 32.0, "path {path}");
         }
+    }
+}
+
+#[cfg(test)]
+mod css_content_escape_tests {
+    use super::*;
+
+    fn content_of(value: &str) -> Option<String> {
+        let mut s = ComputedStyle::default();
+        Engine::apply_style_property_impl(&mut s, "content", value);
+        s.content
+    }
+
+    #[test]
+    fn hex_escapes_decode_to_the_code_point() {
+        assert_eq!(content_of(r#""\f13a""#).as_deref(), Some("\u{f13a}"));
+        assert_eq!(content_of(r#"'\2022 '"#).as_deref(), Some("\u{2022}"));
+        assert_eq!(content_of(r#""\41\42 C""#).as_deref(), Some("ABC"));
+        assert_eq!(content_of(r#""\1F600""#).as_deref(), Some("\u{1F600}"));
+    }
+
+    #[test]
+    fn only_one_whitespace_after_a_hex_escape_is_swallowed() {
+        assert_eq!(content_of(r#""\2022  x""#).as_deref(), Some("\u{2022} x"));
+    }
+
+    #[test]
+    fn at_most_six_hex_digits_are_consumed() {
+        assert_eq!(content_of(r#""\0000411""#).as_deref(), Some("A1"));
+    }
+
+    #[test]
+    fn invalid_code_points_become_the_replacement_character() {
+        assert_eq!(content_of(r#""\0""#).as_deref(), Some("\u{FFFD}"));
+        assert_eq!(content_of(r#""\D800""#).as_deref(), Some("\u{FFFD}"));
+        assert_eq!(content_of(r#""\110000""#).as_deref(), Some("\u{FFFD}"));
+    }
+
+    #[test]
+    fn quote_and_backslash_escapes_and_line_continuations() {
+        assert_eq!(content_of(r#""\"q\"""#).as_deref(), Some("\"q\""));
+        assert_eq!(content_of(r#"'\''"#).as_deref(), Some("'"));
+        assert_eq!(content_of(r#""a\\b""#).as_deref(), Some("a\\b"));
+        assert_eq!(content_of("\"a\\\nb\"").as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn the_second_declaration_decodes_too() {
+        // Second-call rule: a style that already carries decoded content must
+        // be replaced, not appended to or left stale.
+        let mut s = ComputedStyle::default();
+        Engine::apply_style_property_impl(&mut s, "content", r#""\f13a""#);
+        Engine::apply_style_property_impl(&mut s, "content", r#""\2022""#);
+        assert_eq!(s.content.as_deref(), Some("\u{2022}"));
+        Engine::apply_style_property_impl(&mut s, "content", "none");
+        assert_eq!(s.content, None);
+    }
+
+    #[test]
+    fn plain_strings_are_unchanged() {
+        assert_eq!(content_of(r#""hello world""#).as_deref(), Some("hello world"));
+        assert_eq!(content_of(r#""""#).as_deref(), Some(""));
     }
 }
 
