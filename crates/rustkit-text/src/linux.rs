@@ -32,6 +32,8 @@ pub struct LinuxTextBackend {
     face_cache: HashMap<String, freetype::Face>,
     /// Default font size
     default_size: f32,
+    /// Candidate name -> installed family (None = not installed).
+    family_cache: HashMap<String, Option<String>>,
 }
 
 impl LinuxTextBackend {
@@ -52,30 +54,25 @@ impl LinuxTextBackend {
             fontconfig,
             face_cache: HashMap::new(),
             default_size: 16.0,
+            family_cache: HashMap::new(),
         })
     }
 
     /// Find a font file matching the descriptor.
     fn find_font(&self, descriptor: &FontDescriptor) -> Result<PathBuf, TextError> {
-        // Use fontconfig to find matching font
-        let pattern = format!(
-            "{}:weight={}:slant={}",
-            descriptor.family,
-            match descriptor.weight {
-                w if w.0 < 400 => "light",
-                w if w.0 < 600 => "regular",
-                w if w.0 < 700 => "medium",
-                _ => "bold",
-            },
-            match descriptor.style {
-                FontStyle::Normal => "roman",
-                FontStyle::Italic => "italic",
-                FontStyle::Oblique => "oblique",
-            }
-        );
+        // The fontconfig style name for the requested weight/slant. The old
+        // code built a pattern string and then discarded it, so bold and
+        // italic text resolved to the regular face.
+        let bold = descriptor.weight.0 >= 600;
+        let style = match (bold, descriptor.style) {
+            (true, FontStyle::Normal) => "Bold",
+            (true, _) => "Bold Italic",
+            (false, FontStyle::Normal) => "Regular",
+            (false, _) => "Italic",
+        };
 
         self.fontconfig
-            .find(&descriptor.family, None)
+            .find(&descriptor.family, Some(style))
             .map(|font| font.path)
             .ok_or_else(|| {
                 TextError::FontNotFound(format!("Font '{}' not found", descriptor.family))
@@ -101,20 +98,22 @@ impl LinuxTextBackend {
                 .ft_library
                 .new_face(&path, 0)
                 .map_err(|e| TextError::FontNotFound(format!("Failed to load font: {:?}", e)))?;
-
-            // Set char size
-            face.set_char_size(
-                (descriptor.size * 64.0) as isize, // width in 1/64 points
-                (descriptor.size * 64.0) as isize, // height in 1/64 points
-                72,                                 // horizontal DPI
-                72,                                 // vertical DPI
-            )
-            .map_err(|e| TextError::ShapingFailed(format!("Failed to set char size: {:?}", e)))?;
-
             self.face_cache.insert(key.clone(), face);
         }
 
-        Ok(self.face_cache.get(&key).unwrap())
+        // The cache key omits the size (one face per family/weight/style), so
+        // the size must be applied on every fetch: applying it only at load
+        // pinned every later request to whichever size asked first.
+        let face = self.face_cache.get(&key).unwrap();
+        face.set_char_size(
+            (descriptor.size * 64.0) as isize, // width in 1/64 points
+            (descriptor.size * 64.0) as isize, // height in 1/64 points
+            72,                                 // horizontal DPI
+            72,                                 // vertical DPI
+        )
+        .map_err(|e| TextError::ShapingFailed(format!("Failed to set char size: {:?}", e)))?;
+
+        Ok(face)
     }
 }
 
@@ -185,9 +184,85 @@ impl LinuxTextBackend {
             height,
             bearing_x: glyph.bitmap_left(),
             bearing_y: glyph.bitmap_top(),
-            advance: (glyph.advance().x >> 6) as f32,
+            advance: glyph.linear_hori_advance() as f32 / 65536.0,
             ascent,
         })
+    }
+}
+
+impl LinuxTextBackend {
+    /// First candidate that names an installed family (or a CSS generic that
+    /// fontconfig resolves itself), else `sans-serif`. Layout and the renderer
+    /// both resolve through this so the face that is measured is the face that
+    /// is painted.
+    pub fn resolve_family<'a>(&mut self, candidates: impl IntoIterator<Item = &'a str>) -> String {
+        for raw in candidates {
+            let name = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(hit) = self.family_cache.get(name) {
+                if let Some(hit) = hit {
+                    return hit.clone();
+                }
+                continue;
+            }
+            let lower = name.to_ascii_lowercase();
+            let resolved = if matches!(lower.as_str(), "sans-serif" | "serif" | "monospace") {
+                Some(lower.clone())
+            } else {
+                // Metric-compatible substitutes (Arial -> Liberation Sans ...)
+                // are real matches: fontconfig aliases them on purpose and
+                // Chrome on Linux resolves them the same way.
+                let metric_alias = matches!(
+                    lower.as_str(),
+                    "arial" | "helvetica" | "times new roman" | "times" | "courier new" | "courier"
+                );
+                self.fontconfig
+                    .find(name, None)
+                    .filter(|f| metric_alias || f.name.eq_ignore_ascii_case(name))
+                    .map(|_| name.to_string())
+            };
+            self.family_cache.insert(name.to_string(), resolved.clone());
+            if let Some(r) = resolved {
+                return r;
+            }
+        }
+        "sans-serif".to_string()
+    }
+
+    /// (ascent, descent, line gap) in pixels, each rounded the way Blink
+    /// rounds them before summing into a line box.
+    pub fn line_metrics(&mut self, descriptor: &FontDescriptor) -> Result<(f32, f32, f32), TextError> {
+        let face = self.get_face(descriptor)?;
+        let upem = face.em_size() as f32;
+        if upem <= 0.0 {
+            return Err(TextError::ShapingFailed("face reports no units_per_EM".into()));
+        }
+        let scale = descriptor.size / upem;
+        let ascent = (face.ascender() as f32 * scale).round();
+        let descent = (face.descender() as f32 * scale).abs().round();
+        let gap = ((face.height() as f32 - (face.ascender() as f32 - face.descender() as f32)) * scale)
+            .max(0.0)
+            .round();
+        Ok((ascent, descent, gap))
+    }
+
+    /// Unhinted horizontal advance of each char, in pixels, at the
+    /// descriptor's size (subpixel positioning, as Chrome lays out).
+    pub fn advance_widths(
+        &mut self,
+        text: &str,
+        descriptor: &FontDescriptor,
+    ) -> Result<Vec<f32>, TextError> {
+        let face = self.get_face(descriptor)?;
+        let mut out = Vec::with_capacity(text.len());
+        for c in text.chars() {
+            face.load_char(c as usize, freetype::face::LoadFlag::NO_HINTING | freetype::face::LoadFlag::NO_BITMAP)
+                .map_err(|e| TextError::ShapingFailed(format!("load_char {c:?}: {e:?}")))?;
+            out.push(face.glyph().linear_hori_advance() as f32 / 65536.0);
+        }
+        Ok(out)
     }
 }
 
@@ -323,6 +398,33 @@ impl TextBackend for LinuxTextBackend {
 
 #[cfg(test)]
 mod tests {
-    // Linux tests require X11/Wayland display and fonts
+    use super::*;
+
+    fn desc(family: &str, size: f32, weight: u32) -> FontDescriptor {
+        FontDescriptor {
+            family: family.to_string(),
+            weight: crate::FontWeight(weight),
+            style: FontStyle::Normal,
+            size,
+        }
+    }
+
+    #[test]
+    fn advances_follow_the_requested_size_not_the_first_one() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let small: f32 = b.advance_widths("Hello", &desc("sans-serif", 10.0, 400)).unwrap().iter().sum();
+        let large: f32 = b.advance_widths("Hello", &desc("sans-serif", 20.0, 400)).unwrap().iter().sum();
+        let back: f32 = b.advance_widths("Hello", &desc("sans-serif", 10.0, 400)).unwrap().iter().sum();
+        assert!((large / small - 2.0).abs() < 0.01, "20px must be twice 10px, got {small} vs {large}");
+        assert!((back - small).abs() < 0.001, "returning to 10px must restore 10px widths");
+    }
+
+    #[test]
+    fn resolve_family_skips_uninstalled_names_and_keeps_generics() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        assert_eq!(b.resolve_family(["No Such Family Zzz", "monospace"]), "monospace");
+        assert_eq!(b.resolve_family(["No Such Family Zzz"]), "sans-serif");
+        assert_eq!(b.resolve_family([" \"serif\" "]), "serif");
+    }
 }
 
