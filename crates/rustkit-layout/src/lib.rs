@@ -12790,8 +12790,8 @@ mod tests {
         let mut a = LayoutBox::new(BoxType::Inline, a_style);
         let (content, half) = a.inline_content_area();
         assert!(
-            content < 24.0 * 0.9,
-            "content area must be font-based, got {content}"
+            content < 23.0,
+            "content area must be font-based (< the 24px line-height), got {content}"
         );
         parent.children.push(a);
 

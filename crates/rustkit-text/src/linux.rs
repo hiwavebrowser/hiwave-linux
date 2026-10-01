@@ -239,6 +239,15 @@ impl LinuxTextBackend {
             let lower = name.to_ascii_lowercase();
             let resolved = if matches!(lower.as_str(), "sans-serif" | "serif" | "monospace") {
                 Some(lower.clone())
+            } else if lower == "system-ui" {
+                // Chrome asks fontconfig for its default sans; the generic
+                // "sans-serif" pattern is that lookup here.
+                Some("sans-serif".to_string())
+            } else if lower == "helvetica" {
+                // Chrome resolves Helvetica to the same metric-compatible
+                // face as Arial (Liberation Sans), where a bare fontconfig
+                // match picks Nimbus Sans.
+                self.fontconfig.find("Arial", None).map(|_| "Arial".to_string())
             } else {
                 // Metric-compatible substitutes (Arial -> Liberation Sans ...)
                 // are real matches: fontconfig aliases them on purpose and
@@ -488,6 +497,14 @@ mod tests {
         assert_eq!(b.resolve_family(["No Such Family Zzz", "monospace"]), "monospace");
         assert_eq!(b.resolve_family(["No Such Family Zzz"]), "sans-serif");
         assert_eq!(b.resolve_family([" \"serif\" "]), "serif");
+    }
+
+    #[test]
+    fn system_ui_is_the_fontconfig_default_and_helvetica_is_arial() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        assert_eq!(b.resolve_family(["system-ui"]), "sans-serif");
+        assert_eq!(b.resolve_family(["-apple-system", "BlinkMacSystemFont", "monospace"]), "monospace");
+        assert_eq!(b.resolve_family(["Helvetica"]), "Arial");
     }
 }
 
