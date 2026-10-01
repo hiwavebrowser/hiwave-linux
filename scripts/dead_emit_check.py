@@ -29,6 +29,42 @@ LAYOUT = Path("crates/rustkit-layout/src")
 BASELINE = Path(__file__).with_name("dead_emit_baseline.json")
 
 
+def _production_source(src: str) -> str:
+    """Drop every `#[cfg(test)]` item, leaving production code.
+
+    NOT `src[:src.find("#[cfg(test)]")]`: layout/lib.rs declares
+    `#[cfg(test)] mod flex_item_relayout_tests;` on line 27, so cutting at the
+    first marker scanned 27 lines of an 8000-line file, saw no construction
+    of SolidColor or Text, and reported both as dead-only. The attribute
+    guards one item, which ends at the first `;` (a `mod x;` or `use`) or at
+    the matching `}` of the first block, whichever comes first.
+    """
+    out, i = [], 0
+    while True:
+        m = re.compile(r"#\[cfg\(test\)\]").search(src, i)
+        if not m:
+            out.append(src[i:])
+            return "".join(out)
+        out.append(src[i:m.start()])
+        semi, brace = src.find(";", m.end()), src.find("{", m.end())
+        if semi != -1 and (brace == -1 or semi < brace):
+            i = semi + 1
+            continue
+        if brace == -1:
+            i = m.end()
+            continue
+        depth, k = 0, brace
+        while k < len(src):
+            if src[k] == "{":
+                depth += 1
+            elif src[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        i = k + 1
+
+
 def _fn_spans(src: str) -> list[tuple[str, int, int, bool]]:
     """(name, start, end, is_dead) for each fn, with its attributes inspected."""
     out = []
@@ -62,8 +98,7 @@ def analyse() -> dict:
         # ignore test modules: a variant constructed only in tests is a
         # different (and much louder) problem than one constructed only in
         # dead production code.
-        t = src.find("#[cfg(test)]")
-        prod = src[:t] if t > 0 else src
+        prod = _production_source(src)
         spans = _fn_spans(prod)
         for m in re.finditer(r"DisplayCommand::([A-Z][A-Za-z0-9]*)\s*[{(]", prod):
             v = m.group(1)
@@ -105,8 +140,7 @@ def _reachability() -> tuple[dict[str, set[str]], set[str]]:
     srcs = []
     for path in sorted(LAYOUT.glob("*.rs")):
         src = path.read_text()
-        t = src.find("#[cfg(test)]")
-        srcs.append(src[:t] if t > 0 else src)
+        srcs.append(_production_source(src))
 
     all_fns: set[str] = set()
     spans_by_src = []
