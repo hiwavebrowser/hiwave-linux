@@ -74,9 +74,12 @@ async function captureChrome(url, pngPath, textPath, width, height, settleMs) {
     // Headless Chrome announces itself as "HeadlessChrome"; the headed
     // binary announces plain Chrome. With no display to run headed on, send
     // what the headed pinned binary sends (same version, same platform).
-    const ua = headless && process.env.REALSITE_ORACLE_HEADED_UA === '1'
-      ? `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`
-      : undefined;
+    // REALSITE_ORACLE_UA pins an explicit UA (e.g. the product's honest one)
+    // so Chrome and RustKit are served the same page; it wins over the above.
+    const ua = process.env.REALSITE_ORACLE_UA
+      || (headless && process.env.REALSITE_ORACLE_HEADED_UA === '1'
+        ? `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`
+        : undefined);
     const context = await browser.newContext({
       ...(ua ? { userAgent: ua } : {}),
       viewport: { width, height },
