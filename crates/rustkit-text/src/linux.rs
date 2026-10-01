@@ -121,6 +121,7 @@ impl LinuxTextBackend {
                         .map_err(|e| TextError::FontNotFound(format!("Failed to load font: {:?}", e)))?
                 }
             };
+            apply_weight_axis(&face, descriptor.weight.0 as f32);
             self.face_cache.insert(key.clone(), face);
         }
 
@@ -137,6 +138,76 @@ impl LinuxTextBackend {
         .map_err(|e| TextError::ShapingFailed(format!("Failed to set char size: {:?}", e)))?;
 
         Ok(face)
+    }
+}
+
+/// CSS font-weight matching over the weights a family actually offers
+/// (CSS Fonts 4 §5.2): the desired weight if present, else the nearest in the
+/// direction the spec prefers.
+fn css_match_weight(desired: f32, available: &[f32]) -> Option<f32> {
+    let pick = |it: Vec<f32>| it.into_iter().next();
+    let mut asc: Vec<f32> = available.to_vec();
+    asc.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut desc = asc.clone();
+    desc.reverse();
+    if let Some(&w) = asc.iter().find(|&&w| (w - desired).abs() < 0.5) {
+        return Some(w);
+    }
+    if (400.0..=500.0).contains(&desired) {
+        pick(asc.iter().copied().filter(|&w| w > desired && w <= 500.0).collect())
+            .or_else(|| pick(desc.iter().copied().filter(|&w| w < desired).collect()))
+            .or_else(|| pick(asc.iter().copied().filter(|&w| w > 500.0).collect()))
+    } else if desired < 400.0 {
+        pick(desc.iter().copied().filter(|&w| w < desired).collect())
+            .or_else(|| pick(asc.iter().copied().filter(|&w| w > desired).collect()))
+    } else {
+        pick(asc.iter().copied().filter(|&w| w > desired).collect())
+            .or_else(|| pick(desc.iter().copied().filter(|&w| w < desired).collect()))
+    }
+}
+
+/// Pin a variable font's `wght` axis for the requested weight. Chrome (via
+/// fontconfig) resolves a CSS weight to one of the family's NAMED instances,
+/// not to an arbitrary point on the axis: 200 and 300 both land on Light, 600
+/// lands on Bold when there is no SemiBold. A font with no named weights falls
+/// back to clamping to the axis range. Static faces are untouched.
+fn apply_weight_axis(face: &freetype::Face, weight: f32) {
+    use freetype::ffi;
+    const WGHT: u64 = 0x7767_6874;
+    let raw = face.raw() as *const ffi::FT_FaceRec as ffi::FT_Face;
+    unsafe {
+        let mut mm: *mut ffi::FT_MM_Var = std::ptr::null_mut();
+        if ffi::FT_Get_MM_Var(raw, &mut mm) != 0 || mm.is_null() {
+            return;
+        }
+        let n = (*mm).num_axis as usize;
+        let axes: Vec<ffi::FT_Var_Axis> = (0..n).map(|i| *(*mm).axis.add(i)).collect();
+        if let Some(wi) = axes.iter().position(|a| a.tag as u64 == WGHT) {
+            let mut named = Vec::new();
+            for k in 0..(*mm).num_namedstyles as usize {
+                let style = &*(*mm).namedstyle.add(k);
+                let at_defaults = (0..n)
+                    .filter(|&i| i != wi)
+                    .all(|i| *style.coords.add(i) == axes[i].def);
+                if at_defaults {
+                    named.push(*style.coords.add(wi) as f32 / 65536.0);
+                }
+            }
+            let target = css_match_weight(weight, &named).unwrap_or(weight);
+            let coords: Vec<ffi::FT_Fixed> = axes
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    if i == wi {
+                        ((target * 65536.0) as ffi::FT_Fixed).clamp(a.minimum, a.maximum)
+                    } else {
+                        a.def
+                    }
+                })
+                .collect();
+            ffi::FT_Set_Var_Design_Coordinates(raw, n as u32, coords.as_ptr());
+        }
+        ffi::FT_Done_MM_Var((*(*raw).glyph).library, mm);
     }
 }
 
@@ -283,10 +354,18 @@ impl LinuxTextBackend {
                     lower.as_str(),
                     "arial" | "helvetica" | "times new roman" | "times" | "courier new" | "courier"
                 );
-                self.fontconfig
-                    .find(name, None)
-                    .filter(|f| metric_alias || f.name.eq_ignore_ascii_case(name))
-                    .map(|_| name.to_string())
+                let mut pat = fontconfig::Pattern::new(&self.fontconfig);
+                match std::ffi::CString::new(name) {
+                    Ok(c) => {
+                        pat.add_string(c"family", &c);
+                        let matched = pat.font_match();
+                        let installed = matched
+                            .get_string(c"family")
+                            .is_some_and(|f| f.eq_ignore_ascii_case(name));
+                        (metric_alias || installed).then(|| name.to_string())
+                    }
+                    Err(_) => None,
+                }
             };
             self.family_cache.insert(name.to_string(), resolved.clone());
             if let Some(r) = resolved {
@@ -552,3 +631,25 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod weight_tests {
+    use super::*;
+
+    #[test]
+    fn css_weight_matching_follows_the_spec_direction() {
+        let ubuntu = [300.0, 400.0, 500.0, 700.0];
+        assert_eq!(css_match_weight(200.0, &ubuntu), Some(300.0));
+        assert_eq!(css_match_weight(300.0, &ubuntu), Some(300.0));
+        assert_eq!(css_match_weight(600.0, &ubuntu), Some(700.0));
+        assert_eq!(css_match_weight(500.0, &ubuntu), Some(500.0));
+        assert_eq!(css_match_weight(400.0, &[300.0, 700.0]), Some(300.0));
+        assert_eq!(css_match_weight(900.0, &ubuntu), Some(700.0));
+    }
+
+    #[test]
+    fn an_installed_family_resolves_by_its_family_name_not_its_full_name() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        assert_eq!(b.resolve_family(["Zzz Not A Font", "DejaVu Sans"]), "DejaVu Sans");
+    }
+}
