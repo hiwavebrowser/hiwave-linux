@@ -18,6 +18,7 @@ use crate::{
 };
 use fontconfig::Fontconfig;
 use freetype::Library;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -42,33 +43,67 @@ pub struct LinuxTextBackend {
     /// Char -> installed family that covers it, for chars the requested face
     /// lacks (None = nothing installed covers it).
     fallback_cache: HashMap<char, Option<String>>,
-    /// Face key -> the `wght` value the face was pinned to (None = no weight axis).
-    face_weight: HashMap<String, Option<f32>>,
+    /// Face key -> its variable-axis pin (None = no weight or optical-size axis).
+    face_axes: HashMap<String, Option<AxisPin>>,
     /// Face key -> HarfBuzz face over the same bytes (None = unparsable).
     hb_cache: HashMap<String, Option<Rc<HbFace>>>,
+}
+
+/// A variable face's pinned axes: the full FreeType design-coordinate vector
+/// plus the `wght` value used and, when the font has an `opsz` axis, where it
+/// sits and its range (Chrome sets `opsz` to the font size in CSS px).
+#[derive(Clone)]
+struct AxisPin {
+    coords: Vec<freetype::ffi::FT_Fixed>,
+    wght: Option<f32>,
+    opsz: Option<(usize, freetype::ffi::FT_Fixed, freetype::ffi::FT_Fixed)>,
+}
+
+impl AxisPin {
+    fn opsz_value(&self, size: f32) -> Option<f32> {
+        self.opsz
+            .map(|(_, lo, hi)| ((size * 65536.0) as freetype::ffi::FT_Fixed).clamp(lo, hi) as f32 / 65536.0)
+    }
 }
 
 /// A HarfBuzz face together with the font bytes it borrows.
 struct HbFace {
     // Declared first so it drops before the bytes it points into.
-    face: rustybuzz::Face<'static>,
+    face: RefCell<rustybuzz::Face<'static>>,
+    pin: Option<AxisPin>,
     _data: Arc<Vec<u8>>,
 }
 
 impl HbFace {
-    fn new(data: Arc<Vec<u8>>, weight: Option<f32>) -> Option<Self> {
+    fn new(data: Arc<Vec<u8>>, pin: Option<AxisPin>) -> Option<Self> {
         // SAFETY: `data` is a heap allocation owned by this struct and never
         // mutated, so the slice outlives `face`.
         let slice: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(data.as_slice()) };
-        let mut face = rustybuzz::Face::from_slice(slice, 0)?;
-        if let Some(w) = weight {
-            face.set_variations(&[rustybuzz::Variation {
-                tag: rustybuzz::ttf_parser::Tag::from_bytes(b"wght"),
-                value: w,
-            }]);
-        }
-        Some(Self { face, _data: data })
+        let face = rustybuzz::Face::from_slice(slice, 0)?;
+        Some(Self { face: RefCell::new(face), pin, _data: data })
     }
+
+    fn pose(&self, size: f32) {
+        let Some(pin) = &self.pin else { return };
+        let mut vars = Vec::new();
+        if let Some(w) = pin.wght {
+            vars.push(rustybuzz::Variation { tag: rustybuzz::ttf_parser::Tag::from_bytes(b"wght"), value: w });
+        }
+        if let Some(o) = pin.opsz_value(size) {
+            vars.push(rustybuzz::Variation { tag: rustybuzz::ttf_parser::Tag::from_bytes(b"opsz"), value: o });
+        }
+        self.face.borrow_mut().set_variations(&vars);
+    }
+}
+
+/// HarfBuzz parses sfnt only; web fonts arrive WOFF/WOFF2-compressed.
+fn sfnt_bytes(data: &[u8]) -> Vec<u8> {
+    let decoded = match data.get(..4) {
+        Some(b"wOF2") => wuff::decompress_woff2(data).ok(),
+        Some(b"wOFF") => wuff::decompress_woff1(data).ok(),
+        _ => None,
+    };
+    decoded.unwrap_or_else(|| data.to_vec())
 }
 
 fn face_key(descriptor: &FontDescriptor) -> String {
@@ -105,7 +140,7 @@ impl LinuxTextBackend {
             family_cache: HashMap::new(),
             webfont_generation: crate::webfonts::generation(),
             fallback_cache: HashMap::new(),
-            face_weight: HashMap::new(),
+            face_axes: HashMap::new(),
             hb_cache: HashMap::new(),
         })
     }
@@ -116,7 +151,7 @@ impl LinuxTextBackend {
             self.face_cache.clear();
             self.family_cache.clear();
             self.fallback_cache.clear();
-            self.face_weight.clear();
+            self.face_axes.clear();
             self.hb_cache.clear();
             self.webfont_generation = generation;
         }
@@ -151,6 +186,7 @@ impl LinuxTextBackend {
         if !self.face_cache.contains_key(&key) {
             let italic = !matches!(descriptor.style, FontStyle::Normal);
             let web = crate::webfonts::lookup_data(&descriptor.family, descriptor.weight.0 as u16, italic);
+            let is_web = web.is_some();
             let face = match web {
                 Some(data) => self
                     .ft_library
@@ -163,8 +199,8 @@ impl LinuxTextBackend {
                         .map_err(|e| TextError::FontNotFound(format!("Failed to load font: {:?}", e)))?
                 }
             };
-            let pinned = apply_weight_axis(&face, descriptor.weight.0 as f32);
-            self.face_weight.insert(key.clone(), pinned);
+            let pinned = apply_weight_axis(&face, descriptor.weight.0 as f32, descriptor.size, !is_web);
+            self.face_axes.insert(key.clone(), pinned);
             self.face_cache.insert(key.clone(), face);
         }
 
@@ -172,6 +208,14 @@ impl LinuxTextBackend {
         // the size must be applied on every fetch: applying it only at load
         // pinned every later request to whichever size asked first.
         let face = self.face_cache.get(&key).unwrap();
+        if let Some(Some(pin)) = self.face_axes.get(&key) {
+            if let Some((idx, lo, hi)) = pin.opsz {
+                let mut coords = pin.coords.clone();
+                coords[idx] = ((descriptor.size * 65536.0) as freetype::ffi::FT_Fixed).clamp(lo, hi);
+                let raw = face.raw() as *const freetype::ffi::FT_FaceRec as freetype::ffi::FT_Face;
+                unsafe { freetype::ffi::FT_Set_Var_Design_Coordinates(raw, coords.len() as u32, coords.as_ptr()) };
+            }
+        }
         if face.has_fixed_sizes() && !face.is_scalable() {
             // Bitmap-strike fonts (Noto Color Emoji) cannot be sized: pick the
             // strike and let callers scale by `fixed_strike_scale`.
@@ -208,8 +252,10 @@ fn shape_run(hb: &HbFace, run: &[char], size: f32, out: &mut [f32]) {
         rustybuzz::Feature::new(Tag::from_bytes(b"liga"), 0, ..),
         rustybuzz::Feature::new(Tag::from_bytes(b"clig"), 0, ..),
     ];
-    let shaped = rustybuzz::shape(&hb.face, &features, buf);
-    let scale = size / hb.face.units_per_em() as f32;
+    hb.pose(size);
+    let face = hb.face.borrow();
+    let shaped = rustybuzz::shape(&face, &features, buf);
+    let scale = size / face.units_per_em() as f32;
     for (info, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
         if let Ok(k) = starts.binary_search(&info.cluster) {
             out[k] += pos.x_advance as f32 * scale;
@@ -265,16 +311,18 @@ fn css_match_weight(desired: f32, available: &[f32]) -> Option<f32> {
     }
 }
 
-/// Pin a variable font's `wght` axis for the requested weight. Chrome (via
-/// fontconfig) resolves a CSS weight to one of the family's NAMED instances,
-/// not to an arbitrary point on the axis: 200 and 300 both land on Light, 600
-/// lands on Bold when there is no SemiBold. A font with no named weights falls
-/// back to clamping to the axis range. Static faces are untouched.
-fn apply_weight_axis(face: &freetype::Face, weight: f32) -> Option<f32> {
+/// Pin a variable font's axes for the requested weight and size. A system
+/// font resolves a CSS weight to one of the family's NAMED instances (Chrome
+/// via fontconfig: 200 and 300 both land on Light, 600 on Bold when there is
+/// no SemiBold); a web font (`snap_named` false) takes the exact weight,
+/// clamped to the axis. Either way `opsz`, when present, follows the font
+/// size (`font-optical-sizing: auto`). Static faces are untouched.
+fn apply_weight_axis(face: &freetype::Face, weight: f32, size: f32, snap_named: bool) -> Option<AxisPin> {
     use freetype::ffi;
     const WGHT: u64 = 0x7767_6874;
+    const OPSZ: u64 = 0x6f70_737a;
     let raw = face.raw() as *const ffi::FT_FaceRec as ffi::FT_Face;
-    let mut pinned = None;
+    let mut pin = None;
     unsafe {
         let mut mm: *mut ffi::FT_MM_Var = std::ptr::null_mut();
         if ffi::FT_Get_MM_Var(raw, &mut mm) != 0 || mm.is_null() {
@@ -282,35 +330,48 @@ fn apply_weight_axis(face: &freetype::Face, weight: f32) -> Option<f32> {
         }
         let n = (*mm).num_axis as usize;
         let axes: Vec<ffi::FT_Var_Axis> = (0..n).map(|i| *(*mm).axis.add(i)).collect();
-        if let Some(wi) = axes.iter().position(|a| a.tag as u64 == WGHT) {
-            let mut named = Vec::new();
-            for k in 0..(*mm).num_namedstyles as usize {
-                let style = &*(*mm).namedstyle.add(k);
-                let at_defaults = (0..n)
-                    .filter(|&i| i != wi)
-                    .all(|i| *style.coords.add(i) == axes[i].def);
-                if at_defaults {
-                    named.push(*style.coords.add(wi) as f32 / 65536.0);
+        let wi = axes.iter().position(|a| a.tag as u64 == WGHT);
+        let oi = axes.iter().position(|a| a.tag as u64 == OPSZ);
+        if wi.is_some() || oi.is_some() {
+            let mut target = None;
+            if let Some(wi) = wi {
+                let mut named = Vec::new();
+                if snap_named {
+                    for k in 0..(*mm).num_namedstyles as usize {
+                        let style = &*(*mm).namedstyle.add(k);
+                        let at_defaults = (0..n)
+                            .filter(|&i| i != wi)
+                            .all(|i| *style.coords.add(i) == axes[i].def);
+                        if at_defaults {
+                            named.push(*style.coords.add(wi) as f32 / 65536.0);
+                        }
+                    }
                 }
+                target = Some(css_match_weight(weight, &named).unwrap_or(weight));
             }
-            let target = css_match_weight(weight, &named).unwrap_or(weight);
             let coords: Vec<ffi::FT_Fixed> = axes
                 .iter()
                 .enumerate()
                 .map(|(i, a)| {
-                    if i == wi {
-                        ((target * 65536.0) as ffi::FT_Fixed).clamp(a.minimum, a.maximum)
+                    if Some(i) == wi {
+                        ((target.unwrap() * 65536.0) as ffi::FT_Fixed).clamp(a.minimum, a.maximum)
+                    } else if Some(i) == oi {
+                        ((size * 65536.0) as ffi::FT_Fixed).clamp(a.minimum, a.maximum)
                     } else {
                         a.def
                     }
                 })
                 .collect();
             ffi::FT_Set_Var_Design_Coordinates(raw, n as u32, coords.as_ptr());
-            pinned = Some(coords[wi] as f32 / 65536.0);
+            pin = Some(AxisPin {
+                wght: wi.map(|i| coords[i] as f32 / 65536.0),
+                opsz: oi.map(|i| (i, axes[i].minimum, axes[i].maximum)),
+                coords,
+            });
         }
         ffi::FT_Done_MM_Var((*(*raw).glyph).library, mm);
     }
-    pinned
+    pin
 }
 
 /// A CPU-rasterized glyph: 8-bit coverage bitmap plus placement metrics.
@@ -518,15 +579,15 @@ impl LinuxTextBackend {
         }
         let italic = !matches!(descriptor.style, FontStyle::Normal);
         let data = match crate::webfonts::lookup_data(&descriptor.family, descriptor.weight.0 as u16, italic) {
-            Some(d) => Some(Arc::new((*d).clone())),
+            Some(d) => Some(Arc::new(sfnt_bytes(&d))),
             None => self
                 .find_font(descriptor)
                 .ok()
                 .and_then(|p| std::fs::read(p).ok())
                 .map(Arc::new),
         };
-        let weight = self.face_weight.get(&key).copied().flatten();
-        let built = data.and_then(|d| HbFace::new(d, weight)).map(Rc::new);
+        let pin = self.face_axes.get(&key).cloned().flatten();
+        let built = data.and_then(|d| HbFace::new(d, pin)).map(Rc::new);
         self.hb_cache.insert(key, built.clone());
         built
     }
@@ -982,6 +1043,35 @@ mod weight_tests {
         assert!(whole < singles - 0.5, "kerned {whole} vs unkerned {singles}");
         // Chrome measures this run at 151.65625 after rounding up to 1/64.
         assert!((whole - 151.656).abs() < 0.02, "{whole}");
+    }
+
+    #[test]
+    fn a_variable_web_font_takes_the_exact_weight_not_the_nearest_named_instance() {
+        let path = "/usr/share/fonts/truetype/ubuntu/Ubuntu[wdth,wght].ttf";
+        let Ok(bytes) = std::fs::read(path) else { return };
+        crate::webfonts::install(
+            "weight-test",
+            &[crate::webfonts::WebFontFace {
+                family: "WeightTestVF".into(),
+                weight: 400,
+                italic: false,
+                data: Arc::new(bytes),
+            }],
+        );
+        let mut b = LinuxTextBackend::new().unwrap();
+        let width = |b: &mut LinuxTextBackend, w: u32| -> f32 {
+            b.advance_widths("Hamburgefonstiv", &desc("WeightTestVF", 32.0, w)).unwrap().iter().sum()
+        };
+        let (w400, w425, w500) = (width(&mut b, 400), width(&mut b, 425), width(&mut b, 500));
+        crate::webfonts::clear();
+        assert!(w400 < w425 && w425 < w500, "{w400} {w425} {w500}");
+    }
+
+    #[test]
+    fn woff_containers_are_unwrapped_for_shaping_and_sfnt_passes_through() {
+        let sfnt = vec![0u8, 1, 0, 0, 9, 9, 9, 9];
+        assert_eq!(sfnt_bytes(&sfnt), sfnt);
+        assert_eq!(sfnt_bytes(b"wOF2junk"), b"wOF2junk".to_vec());
     }
 
     #[test]
