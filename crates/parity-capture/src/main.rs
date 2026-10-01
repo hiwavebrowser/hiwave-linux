@@ -435,10 +435,32 @@ fn read_repo_parity_reset(html_path: &Path) -> Option<String> {
     loop {
         let candidate = dir.join("baselines/common/parity-reset.css");
         if candidate.is_file() {
-            return fs::read_to_string(candidate).ok();
+            let css = fs::read_to_string(candidate).ok()?;
+            let root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            return Some(absolutize_reset_font_urls(&css, &root));
         }
         dir = dir.parent()?;
     }
+}
+
+/// The reset declares its bundled fonts as `url('/baselines/common/fonts/…')`,
+/// a path that only means something relative to the repo root. Chrome's
+/// capture (deterministic.mjs, getResetCssWithAbsoluteFontPaths) rewrites it
+/// to an absolute `file://` URL before injecting; without the same rewrite
+/// here the engine looks for `/baselines/...` at the filesystem root, the
+/// faces fail, and every micro case shapes with a platform fallback instead
+/// of the font Chrome used.
+fn absolutize_reset_font_urls(css: &str, repo_root: &Path) -> String {
+    let fonts_dir = repo_root.join("baselines/common/fonts");
+    let prefix = format!("file://{}/", fonts_dir.to_string_lossy().replace('\\', "/"));
+    let mut out = css.to_string();
+    for quote in ["'", "\"", ""] {
+        out = out.replace(
+            &format!("url({quote}/baselines/common/fonts/"),
+            &format!("url({quote}{prefix}"),
+        );
+    }
+    out
 }
 
 /// Replace `<link rel="stylesheet" href="...">` tags with inline `<style>`
@@ -623,6 +645,26 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut f = fs::File::create(path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn reset_font_urls_resolve_to_the_repo_fonts_dir() {
+        let dir = std::env::temp_dir().join("pc-test-reset-fonts");
+        let _ = fs::remove_dir_all(&dir);
+        write_file(
+            &dir,
+            "baselines/common/parity-reset.css",
+            "@font-face { src: url('/baselines/common/fonts/NotoSans-Regular.ttf') format('truetype'); }",
+        );
+        write_file(&dir, "websuite/micro/x/index.html", "<html></html>");
+
+        let css = read_repo_parity_reset(&dir.join("websuite/micro/x/index.html")).unwrap();
+        let expected = format!(
+            "url('file://{}/baselines/common/fonts/NotoSans-Regular.ttf')",
+            dir.to_string_lossy()
+        );
+        assert!(css.contains(&expected), "{css}");
+        assert!(!css.contains("url('/baselines"));
     }
 
     #[test]

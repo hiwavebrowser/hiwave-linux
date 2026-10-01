@@ -54,6 +54,9 @@ docs/plans/
 
 docs/unshared/*
 
+# Pinned Chrome for Testing download (~150MB, machine-local)
+.browsers/
+
 # Python bytecode from scripts/collect_metrics.py. Committed by
 # accident twice via `git add -A`; ignored so it cannot happen again.
 __pycache__/

@@ -9072,7 +9072,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "macos"), ignore = "asserts cut runs carry advances; the declared Linux paint divergence emits advances = None")]
     fn test_text_overflow_ellipsis_cuts_overflowing_run_inside_content_edge() {
         let root = ellipsis_tree(
             100.0,
