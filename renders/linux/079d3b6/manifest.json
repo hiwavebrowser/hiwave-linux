@@ -1,0 +1,310 @@
+{
+ "os": "linux",
+ "engine": "079d3b6",
+ "engine_note": "hiwave-linux PR #68 head (Chrome-faithful generic font chains), stacked on PR #67 (web-font registry) on master b4d30d0 (macOS develop 22092e6 sync + paint advances)",
+ "command": "for each non-holdout case in hiwave-macos cases/registry.json: target/release/parity-capture --html-file <MAC>/<case.html> --width W --height H --dump-frame frame.ppm (converted losslessly to rustkit.png); baseline captured on THIS machine with tools/parity_oracle/capture_all_baselines.mjs; diff via tools/parity_oracle/compare_pixels.mjs comparePixels (threshold 0.1, includeAA)",
+ "parity_capture_sha256": "2f8ac3eb396dcdf8d38a6b5888396a6adce017dcf8c62b4d3fff63e7c0105889",
+ "chrome": "148.0.7778.216 (Chrome for Testing, pinned), captured ON LINUX (Ubuntu 25.10) via Playwright; same binary version as the macOS baselines but Linux fonts (Liberation/Noto/DejaVu). chrome.png here is that Linux capture, NOT the macOS baseline.",
+ "compare_tool": "real tools/parity_oracle/compare_pixels.mjs (pixelmatch). The earlier Python port was cross-checked: it gave an identical 4.502 mean on the same frames against the macOS-captured baselines.",
+ "mac_reference": "mac_diff_pct = hiwave-macos origin/metrics-history metrics/latest-develop.json @7cf99c3 (macOS engine vs macOS-captured baselines); delta_vs_mac = diff_pct - mac_diff_pct; the bar is delta <= 1.0 per case",
+ "host": "Linux 6.17 Ubuntu 25.10 / Intel i7-10750H / NVIDIA RTX 2060 Mobile (rendering via wgpu)",
+ "utc": "2026-10-01T00:35:29Z",
+ "mean_diff_pct": 1.9081,
+ "mac_mean_diff_pct": 1.1778,
+ "cases_over_1pt_vs_mac": [
+  "about",
+  "article-typography",
+  "form-elements",
+  "image-gallery",
+  "pseudo-classes",
+  "specificity"
+ ],
+ "cases": {
+  "new_tab": {
+   "group": "builtins",
+   "diff_pct": 1.3523,
+   "mac_diff_pct": 1.5685,
+   "delta_vs_mac": -0.2161,
+   "diff_pct_vs_mac_captured_baseline": 2.1361,
+   "viewport": [
+    1280,
+    800
+   ]
+  },
+  "about": {
+   "group": "builtins",
+   "diff_pct": 7.2252,
+   "mac_diff_pct": 3.7465,
+   "delta_vs_mac": 3.4787,
+   "diff_pct_vs_mac_captured_baseline": 11.0167,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "settings": {
+   "group": "builtins",
+   "diff_pct": 2.1798,
+   "mac_diff_pct": 2.0852,
+   "delta_vs_mac": 0.0946,
+   "diff_pct_vs_mac_captured_baseline": 3.1845,
+   "viewport": [
+    1024,
+    768
+   ]
+  },
+  "chrome_rustkit": {
+   "group": "builtins",
+   "diff_pct": 1.3469,
+   "mac_diff_pct": 1.1258,
+   "delta_vs_mac": 0.2211,
+   "diff_pct_vs_mac_captured_baseline": 1.6688,
+   "viewport": [
+    1280,
+    100
+   ]
+  },
+  "shelf": {
+   "group": "builtins",
+   "diff_pct": 1.2826,
+   "mac_diff_pct": 1.0775,
+   "delta_vs_mac": 0.2051,
+   "diff_pct_vs_mac_captured_baseline": 1.4232,
+   "viewport": [
+    1280,
+    120
+   ]
+  },
+  "article-typography": {
+   "group": "websuite",
+   "diff_pct": 5.8943,
+   "mac_diff_pct": 4.7859,
+   "delta_vs_mac": 1.1084,
+   "diff_pct_vs_mac_captured_baseline": 8.0576,
+   "viewport": [
+    1280,
+    800
+   ]
+  },
+  "card-grid": {
+   "group": "websuite",
+   "diff_pct": 2.1448,
+   "mac_diff_pct": 1.2941,
+   "delta_vs_mac": 0.8507,
+   "diff_pct_vs_mac_captured_baseline": 12.4327,
+   "viewport": [
+    1280,
+    800
+   ]
+  },
+  "css-selectors": {
+   "group": "websuite",
+   "diff_pct": 1.8233,
+   "mac_diff_pct": 1.377,
+   "delta_vs_mac": 0.4464,
+   "diff_pct_vs_mac_captured_baseline": 20.1195,
+   "viewport": [
+    800,
+    1200
+   ]
+  },
+  "flex-positioning": {
+   "group": "websuite",
+   "diff_pct": 0.6526,
+   "mac_diff_pct": 0.6321,
+   "delta_vs_mac": 0.0205,
+   "diff_pct_vs_mac_captured_baseline": 4.501,
+   "viewport": [
+    800,
+    1000
+   ]
+  },
+  "form-elements": {
+   "group": "websuite",
+   "diff_pct": 3.1244,
+   "mac_diff_pct": 0.9871,
+   "delta_vs_mac": 2.1373,
+   "diff_pct_vs_mac_captured_baseline": 4.9569,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "gradient-backgrounds": {
+   "group": "websuite",
+   "diff_pct": 0.886,
+   "mac_diff_pct": 1.0106,
+   "delta_vs_mac": -0.1246,
+   "diff_pct_vs_mac_captured_baseline": 9.1442,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "image-gallery": {
+   "group": "websuite",
+   "diff_pct": 1.7034,
+   "mac_diff_pct": 0.5202,
+   "delta_vs_mac": 1.1832,
+   "diff_pct_vs_mac_captured_baseline": 7.3657,
+   "viewport": [
+    1280,
+    800
+   ]
+  },
+  "sticky-scroll": {
+   "group": "websuite",
+   "diff_pct": 1.3037,
+   "mac_diff_pct": 0.6563,
+   "delta_vs_mac": 0.6474,
+   "diff_pct_vs_mac_captured_baseline": 2.1921,
+   "viewport": [
+    1280,
+    800
+   ]
+  },
+  "backgrounds": {
+   "group": "micro",
+   "diff_pct": 2.0428,
+   "mac_diff_pct": 1.2168,
+   "delta_vs_mac": 0.826,
+   "diff_pct_vs_mac_captured_baseline": 2.4002,
+   "viewport": [
+    900,
+    1000
+   ]
+  },
+  "bg-solid": {
+   "group": "micro",
+   "diff_pct": 0.7029,
+   "mac_diff_pct": 0.2127,
+   "delta_vs_mac": 0.4902,
+   "diff_pct_vs_mac_captured_baseline": 1.2929,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "bg-pure": {
+   "group": "micro",
+   "diff_pct": 0,
+   "mac_diff_pct": 0,
+   "delta_vs_mac": 0,
+   "diff_pct_vs_mac_captured_baseline": 0,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "combinators": {
+   "group": "micro",
+   "diff_pct": 1.4145,
+   "mac_diff_pct": 0.6547,
+   "delta_vs_mac": 0.7598,
+   "diff_pct_vs_mac_captured_baseline": 2.8222,
+   "viewport": [
+    800,
+    800
+   ]
+  },
+  "form-controls": {
+   "group": "micro",
+   "diff_pct": 3.5154,
+   "mac_diff_pct": 3.242,
+   "delta_vs_mac": 0.2734,
+   "diff_pct_vs_mac_captured_baseline": 4.7972,
+   "viewport": [
+    800,
+    1200
+   ]
+  },
+  "gradients": {
+   "group": "micro",
+   "diff_pct": 0.6084,
+   "mac_diff_pct": 0.1406,
+   "delta_vs_mac": 0.4679,
+   "diff_pct_vs_mac_captured_baseline": 0.8202,
+   "viewport": [
+    900,
+    1000
+   ]
+  },
+  "gradient-no-radius": {
+   "group": "micro",
+   "diff_pct": 1.361,
+   "mac_diff_pct": 0.5208,
+   "delta_vs_mac": 0.8402,
+   "diff_pct_vs_mac_captured_baseline": 2.5235,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "gradient-radius-only": {
+   "group": "micro",
+   "diff_pct": 0.9444,
+   "mac_diff_pct": 0.6915,
+   "delta_vs_mac": 0.2529,
+   "diff_pct_vs_mac_captured_baseline": 2.0083,
+   "viewport": [
+    800,
+    600
+   ]
+  },
+  "gpu-gradient-regression": {
+   "group": "micro",
+   "diff_pct": 1.3697,
+   "mac_diff_pct": 0.3905,
+   "delta_vs_mac": 0.9792,
+   "diff_pct_vs_mac_captured_baseline": 1.7941,
+   "viewport": [
+    800,
+    1200
+   ]
+  },
+  "images-intrinsic": {
+   "group": "micro",
+   "diff_pct": 1.0552,
+   "mac_diff_pct": 0.3254,
+   "delta_vs_mac": 0.7297,
+   "diff_pct_vs_mac_captured_baseline": 1.602,
+   "viewport": [
+    800,
+    1400
+   ]
+  },
+  "pseudo-classes": {
+   "group": "micro",
+   "diff_pct": 1.7356,
+   "mac_diff_pct": 0.4364,
+   "delta_vs_mac": 1.2992,
+   "diff_pct_vs_mac_captured_baseline": 2.6631,
+   "viewport": [
+    800,
+    800
+   ]
+  },
+  "rounded-corners": {
+   "group": "micro",
+   "diff_pct": 2.1044,
+   "mac_diff_pct": 1.322,
+   "delta_vs_mac": 0.7824,
+   "diff_pct_vs_mac_captured_baseline": 2.518,
+   "viewport": [
+    900,
+    1000
+   ]
+  },
+  "specificity": {
+   "group": "micro",
+   "diff_pct": 1.836,
+   "mac_diff_pct": 0.6029,
+   "delta_vs_mac": 1.2331,
+   "diff_pct_vs_mac_captured_baseline": 2.5238,
+   "viewport": [
+    800,
+    600
+   ]
+  }
+ }
+}
