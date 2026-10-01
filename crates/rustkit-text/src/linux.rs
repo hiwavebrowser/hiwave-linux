@@ -37,6 +37,9 @@ pub struct LinuxTextBackend {
     /// `webfonts::generation()` the caches were filled under; a change means a
     /// family name may now resolve to a different face.
     webfont_generation: u64,
+    /// Char -> installed family that covers it, for chars the requested face
+    /// lacks (None = nothing installed covers it).
+    fallback_cache: HashMap<char, Option<String>>,
 }
 
 impl LinuxTextBackend {
@@ -59,6 +62,7 @@ impl LinuxTextBackend {
             default_size: 16.0,
             family_cache: HashMap::new(),
             webfont_generation: crate::webfonts::generation(),
+            fallback_cache: HashMap::new(),
         })
     }
 
@@ -67,6 +71,7 @@ impl LinuxTextBackend {
         if generation != self.webfont_generation {
             self.face_cache.clear();
             self.family_cache.clear();
+            self.fallback_cache.clear();
             self.webfont_generation = generation;
         }
     }
@@ -129,16 +134,46 @@ impl LinuxTextBackend {
         // the size must be applied on every fetch: applying it only at load
         // pinned every later request to whichever size asked first.
         let face = self.face_cache.get(&key).unwrap();
-        face.set_char_size(
-            (descriptor.size * 64.0) as isize, // width in 1/64 points
-            (descriptor.size * 64.0) as isize, // height in 1/64 points
-            72,                                 // horizontal DPI
-            72,                                 // vertical DPI
-        )
-        .map_err(|e| TextError::ShapingFailed(format!("Failed to set char size: {:?}", e)))?;
+        if face.has_fixed_sizes() && !face.is_scalable() {
+            // Bitmap-strike fonts (Noto Color Emoji) cannot be sized: pick the
+            // strike and let callers scale by `fixed_strike_scale`.
+            let raw = face.raw() as *const freetype::ffi::FT_FaceRec as freetype::ffi::FT_Face;
+            unsafe { freetype::ffi::FT_Select_Size(raw, 0) };
+        } else {
+            face.set_char_size(
+                (descriptor.size * 64.0) as isize, // width in 1/64 points
+                (descriptor.size * 64.0) as isize, // height in 1/64 points
+                72,                                 // horizontal DPI
+                72,                                 // vertical DPI
+            )
+            .map_err(|e| TextError::ShapingFailed(format!("Failed to set char size: {:?}", e)))?;
+        }
 
         Ok(face)
     }
+}
+
+/// Zero-width format characters that must not take a glyph or an advance.
+fn is_zero_width(ch: char) -> bool {
+    matches!(ch as u32, 0x200B..=0x200D | 0xFE00..=0xFE0F | 0x2060)
+}
+
+/// Whether a char is painted from the color-emoji font. Same blocks as the
+/// macOS path; text symbols with monochrome outlines stay on the gray path.
+pub fn is_emoji(ch: char) -> bool {
+    matches!(ch as u32,
+        0x1F300..=0x1FAFF | 0x1F000..=0x1F0FF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x1F1E6..=0x1F1FF)
+}
+
+/// Pixels per strike pixel: how much a bitmap-strike font's glyphs shrink to
+/// reach `size`.
+fn fixed_strike_scale(face: &freetype::Face, size: f32) -> f32 {
+    let raw = face.raw();
+    if raw.num_fixed_sizes <= 0 || raw.available_sizes.is_null() {
+        return 1.0;
+    }
+    let ppem = unsafe { (*raw.available_sizes).y_ppem } as f32 / 64.0;
+    if ppem > 0.0 { size / ppem } else { 1.0 }
 }
 
 /// CSS font-weight matching over the weights a family actually offers
@@ -257,7 +292,22 @@ impl LinuxTextBackend {
         phase: u8,
         phases: u8,
     ) -> Result<RasterizedGlyph, TextError> {
+        if is_zero_width(ch) {
+            return Ok(RasterizedGlyph {
+                bitmap: Vec::new(),
+                width: 0,
+                height: 0,
+                bearing_x: 0,
+                bearing_y: 0,
+                advance: 0.0,
+                ascent: 0.0,
+            });
+        }
+        let descriptor = &self.source_descriptor(ch, descriptor);
         let face = self.get_face(descriptor)?;
+        if face.has_fixed_sizes() && !face.is_scalable() {
+            return Err(TextError::ShapingFailed(format!("{ch:?} is color-bitmap only")));
+        }
 
         // The face is shared with measurement, so the shift must not outlive
         // this render.
@@ -393,20 +443,156 @@ impl LinuxTextBackend {
     }
 
     /// Unhinted horizontal advance of each char, in pixels, at the
-    /// descriptor's size (subpixel positioning, as Chrome lays out).
+    /// descriptor's size (subpixel positioning, as Chrome lays out). A char the
+    /// requested face lacks is measured in the fallback face that will paint it.
     pub fn advance_widths(
         &mut self,
         text: &str,
         descriptor: &FontDescriptor,
     ) -> Result<Vec<f32>, TextError> {
-        let face = self.get_face(descriptor)?;
         let mut out = Vec::with_capacity(text.len());
         for c in text.chars() {
+            if is_zero_width(c) {
+                out.push(0.0);
+                continue;
+            }
+            let src = self.source_descriptor(c, descriptor);
+            let face = self.get_face(&src)?;
+            if face.has_fixed_sizes() && !face.is_scalable() {
+                face.load_char(c as usize, freetype::face::LoadFlag::DEFAULT)
+                    .map_err(|e| TextError::ShapingFailed(format!("load_char {c:?}: {e:?}")))?;
+                let adv = face.glyph().linear_hori_advance() as f32 / 65536.0;
+                out.push(adv * fixed_strike_scale(face, src.size));
+                continue;
+            }
             face.load_char(c as usize, freetype::face::LoadFlag::NO_HINTING | freetype::face::LoadFlag::NO_BITMAP)
                 .map_err(|e| TextError::ShapingFailed(format!("load_char {c:?}: {e:?}")))?;
             out.push(face.glyph().linear_hori_advance() as f32 / 65536.0);
         }
         Ok(out)
+    }
+
+    fn has_glyph(&mut self, descriptor: &FontDescriptor, ch: char) -> bool {
+        self.get_face(descriptor)
+            .map(|f| f.get_char_index(ch as usize).is_ok())
+            .unwrap_or(false)
+    }
+
+    /// The descriptor whose face paints `ch`: the requested one when it has the
+    /// glyph, else the first installed fallback family that does (emoji go to
+    /// Noto Color Emoji), else the requested one (its .notdef).
+    pub fn source_descriptor(&mut self, ch: char, descriptor: &FontDescriptor) -> FontDescriptor {
+        if self.has_glyph(descriptor, ch) {
+            return descriptor.clone();
+        }
+        if let Some(hit) = self.fallback_cache.get(&ch) {
+            return match hit {
+                Some(family) => FontDescriptor { family: family.clone(), ..descriptor.clone() },
+                None => descriptor.clone(),
+            };
+        }
+        let candidates: &[&str] = if is_emoji(ch) {
+            &["Noto Color Emoji", "Noto Sans Symbols 2", "Noto Sans Symbols", "DejaVu Sans"]
+        } else {
+            &["Noto Sans", "DejaVu Sans", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Sans Math", "Noto Sans CJK SC"]
+        };
+        let mut found = None;
+        for name in candidates {
+            let family = self.resolve_family([*name]);
+            if family == "sans-serif" {
+                continue;
+            }
+            let d = FontDescriptor { family: family.clone(), ..descriptor.clone() };
+            if self.has_glyph(&d, ch) {
+                found = Some(family);
+                break;
+            }
+        }
+        self.fallback_cache.insert(ch, found.clone());
+        match found {
+            Some(family) => FontDescriptor { family, ..descriptor.clone() },
+            None => descriptor.clone(),
+        }
+    }
+
+    /// Rasterize a color-bitmap glyph (emoji) to premultiplied RGBA, scaled
+    /// from the font's fixed strike to the descriptor's size. Returns
+    /// (rgba, width, height, advance, bearing_x, bearing_y) with the bearings
+    /// measured from the pen/baseline, y up. None when the char has no color
+    /// artwork.
+    pub fn rasterize_color_glyph(
+        &mut self,
+        ch: char,
+        descriptor: &FontDescriptor,
+    ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+        let src = self.source_descriptor(ch, descriptor);
+        let face = self.get_face(&src).ok()?;
+        if !face.has_color() {
+            return None;
+        }
+        face.load_char(
+            ch as usize,
+            freetype::face::LoadFlag::COLOR | freetype::face::LoadFlag::RENDER,
+        )
+        .ok()?;
+        let scale = fixed_strike_scale(face, src.size);
+        let advance = face.glyph().linear_hori_advance() as f32 / 65536.0 * scale;
+        let glyph = face.glyph();
+        let bmp = glyph.bitmap();
+        if !matches!(bmp.pixel_mode(), Ok(freetype::bitmap::PixelMode::Bgra)) {
+            return None;
+        }
+        let (sw, sh) = (bmp.width() as usize, bmp.rows() as usize);
+        let pitch = bmp.pitch().unsigned_abs() as usize;
+        let buf = bmp.buffer();
+        if sw == 0 || sh == 0 || buf.len() < pitch * (sh - 1) + sw * 4 {
+            return None;
+        }
+
+        let left = glyph.bitmap_left() as f32 * scale;
+        let top = glyph.bitmap_top() as f32 * scale;
+        let right = left + sw as f32 * scale;
+        let bottom = top - sh as f32 * scale;
+        let (x0, x1) = (left.floor() as i32, right.ceil() as i32);
+        let (y_top, y_bot) = (top.ceil() as i32, bottom.floor() as i32);
+        let (dw, dh) = ((x1 - x0).max(1) as usize, (y_top - y_bot).max(1) as usize);
+
+        // Area-average the strike into the destination grid (premultiplied
+        // BGRA in, premultiplied RGBA out).
+        let mut out = vec![0u8; dw * dh * 4];
+        for dy in 0..dh {
+            let wy0 = (y_top - dy as i32) as f32; // dest row spans [wy0-1, wy0] in y-up
+            let sy_a = (top - wy0) / scale;
+            let sy_b = (top - (wy0 - 1.0)) / scale;
+            for dx in 0..dw {
+                let wx0 = (x0 + dx as i32) as f32;
+                let sx_a = (wx0 - left) / scale;
+                let sx_b = (wx0 + 1.0 - left) / scale;
+                let mut acc = [0f32; 4];
+                let (ya, yb) = (sy_a.max(0.0).floor() as usize, (sy_b.min(sh as f32).ceil() as usize).min(sh));
+                let (xa, xb) = (sx_a.max(0.0).floor() as usize, (sx_b.min(sw as f32).ceil() as usize).min(sw));
+                for sy in ya..yb {
+                    let oy = (sy_b.min(sy as f32 + 1.0) - sy_a.max(sy as f32)).max(0.0);
+                    for sx in xa..xb {
+                        let ox = (sx_b.min(sx as f32 + 1.0) - sx_a.max(sx as f32)).max(0.0);
+                        let w = ox * oy;
+                        let i = sy * pitch + sx * 4;
+                        acc[0] += buf[i + 2] as f32 * w;
+                        acc[1] += buf[i + 1] as f32 * w;
+                        acc[2] += buf[i] as f32 * w;
+                        acc[3] += buf[i + 3] as f32 * w;
+                    }
+                }
+                // Weights are in source-pixel area; a fully covered destination
+                // pixel spans 1/scale^2 of them. Area outside the strike is
+                // transparent and contributes nothing.
+                let o = (dy * dw + dx) * 4;
+                for k in 0..4 {
+                    out[o + k] = (acc[k] * scale * scale).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        Some((out, dw as u32, dh as u32, advance, x0 as f32, y_top as f32))
     }
 }
 

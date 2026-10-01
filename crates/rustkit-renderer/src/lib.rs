@@ -5013,7 +5013,9 @@ impl Renderer {
             // artwork (e.g. non-macOS).
             #[cfg(target_os = "macos")]
             let is_color = rustkit_text::macos::is_emoji(ch);
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "linux")]
+            let is_color = rustkit_text::linux::is_emoji(ch);
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             let is_color = false;
             if is_color {
                 if let Some(entry) =
