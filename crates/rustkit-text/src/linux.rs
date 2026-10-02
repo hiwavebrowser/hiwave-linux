@@ -973,21 +973,30 @@ mod weight_tests {
     fn pair_kerning_narrows_text_below_the_sum_of_its_glyphs() {
         let mut b = LinuxTextBackend::new().unwrap();
         let fam = b.resolve_family(["system-ui"]);
-        let d = desc(&fam, 16.0, 400);
-        let whole: f32 = b.advance_widths("The quick brown fox", &d).unwrap().iter().sum();
-        let singles: f32 = "The quick brown fox"
-            .chars()
-            .map(|c| b.advance_widths(&c.to_string(), &d).unwrap()[0])
-            .sum();
+        let run = "The quick brown fox";
+        let measure = |b: &mut LinuxTextBackend, fam: &str| {
+            let d = desc(fam, 16.0, 400);
+            let whole: f32 = b.advance_widths(run, &d).unwrap().iter().sum();
+            let singles: f32 = run
+                .chars()
+                .map(|c| b.advance_widths(&c.to_string(), &d).unwrap()[0])
+                .sum();
+            (whole, singles)
+        };
+        let (whole, singles) = measure(&mut b, "DejaVu Sans");
         assert!(whole < singles - 0.5, "kerned {whole} vs unkerned {singles}");
-        // Chrome measures this run at 151.65625 after rounding up to 1/64.
-        assert!((whole - 151.656).abs() < 0.02, "{whole}");
+        // Chrome measures this run at 151.65625 after rounding up to 1/64, but only
+        // with the Noto Sans that system-ui resolves to on the capture machine.
+        if fam == "Noto Sans" {
+            let (whole, _) = measure(&mut b, &fam);
+            assert!((whole - 151.656).abs() < 0.02, "{whole}");
+        }
     }
 
     #[test]
     fn an_emoji_has_an_advance_and_color_artwork_when_the_font_is_installed() {
         let mut b = LinuxTextBackend::new().unwrap();
-        let installed = b.resolve_family(["Noto Color Emoji"]) != "sans-serif";
+        let installed = b.resolve_family(["Noto Color Emoji"]).contains("Emoji");
         if !installed {
             return;
         }
