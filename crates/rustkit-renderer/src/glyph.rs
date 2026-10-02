@@ -57,6 +57,22 @@ pub fn subpixel_phase_for(x: f32) -> u8 {
     phase.clamp(0, SUBPIXEL_QUANTIZE as i32 - 1) as u8
 }
 
+/// Where a glyph whose pen sits at device `x` is drawn: the integer column to
+/// anchor the bitmap at, and the quarter-pixel phase to rasterize it at.
+/// Linux rasterizes at the phase (Skia subpixel positioning); other platforms
+/// still draw a phase-0 bitmap at the exact fractional x.
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn pen_and_phase(x: f32) -> (f32, u8) {
+    let q = (x * SUBPIXEL_QUANTIZE as f32).round() as i64;
+    let n = SUBPIXEL_QUANTIZE as i64;
+    (q.div_euclid(n) as f32, q.rem_euclid(n) as u8)
+}
+
+#[cfg(any(target_os = "macos", windows))]
+pub fn pen_and_phase(x: f32) -> (f32, u8) {
+    (x, 0)
+}
+
 /// Cached glyph entry.
 #[derive(Debug, Clone)]
 pub struct GlyphEntry {
@@ -273,6 +289,26 @@ impl GlyphCache {
         &self.color_bind_group
     }
 
+    /// The shared FreeType backend, created on first use. None after a failed
+    /// init (callers fall back to rectangles / no glyph).
+    #[cfg(target_os = "linux")]
+    fn ft_backend(&mut self) -> Option<&mut rustkit_text::linux::LinuxTextBackend> {
+        if self.ft_failed {
+            return None;
+        }
+        if self.ft_backend.is_none() {
+            match rustkit_text::linux::LinuxTextBackend::new() {
+                Ok(b) => self.ft_backend = Some(b),
+                Err(e) => {
+                    tracing::warn!("FreeType backend init failed; rect fallback: {e:?}");
+                    self.ft_failed = true;
+                    return None;
+                }
+            }
+        }
+        self.ft_backend.as_mut()
+    }
+
     /// Get or rasterize a COLOR glyph (emoji) into the RGBA atlas. Returns the
     /// atlas entry (tex_coords into the color atlas), or None if the platform
     /// or font can't produce a color glyph for this codepoint.
@@ -303,7 +339,19 @@ impl GlyphCache {
             );
             rasterizer.rasterize_char_color(key.codepoint)
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        let raster = self.ft_backend().and_then(|backend| {
+            let descriptor = rustkit_text::FontDescriptor {
+                family: backend.resolve_family(
+                    rustkit_layout::text::FontFamilyChain::from_css_value(&key.font_family).all_families(),
+                ),
+                weight: rustkit_text::FontWeight(key.font_weight as u32),
+                style: rustkit_text::FontStyle::Normal,
+                size: key.font_size as f32 / 10.0,
+            };
+            backend.rasterize_color_glyph(key.codepoint, &descriptor)
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let raster: Option<(Vec<u8>, u32, u32, f32, f32, f32)> = None;
 
         let (rgba, gw, gh, advance, bearing_x, bearing_y) = raster?;
@@ -468,21 +516,8 @@ impl GlyphCache {
             // below negates for the baseline-relative entry contract.
             use rustkit_text::{FontDescriptor, FontStyle, FontWeight};
 
-            if self.ft_failed {
-                None
-            } else {
-                if self.ft_backend.is_none() {
-                    match rustkit_text::linux::LinuxTextBackend::new() {
-                        Ok(b) => self.ft_backend = Some(b),
-                        Err(e) => {
-                            tracing::warn!(
-                                "FreeType backend init failed; rect fallback: {e:?}"
-                            );
-                            self.ft_failed = true;
-                        }
-                    }
-                }
-                self.ft_backend.as_mut().and_then(|backend| {
+            {
+                self.ft_backend().and_then(|backend| {
                     let descriptor = FontDescriptor {
                         family: backend.resolve_family(
                             rustkit_layout::text::FontFamilyChain::from_css_value(&key.font_family).all_families(),
@@ -495,7 +530,12 @@ impl GlyphCache {
                         },
                         size: font_size,
                     };
-                    match backend.rasterize_glyph(key.codepoint, &descriptor) {
+                    match backend.rasterize_glyph_at_phase(
+                        key.codepoint,
+                        &descriptor,
+                        key.subpixel_phase,
+                        SUBPIXEL_QUANTIZE,
+                    ) {
                         Ok(g) if g.width == 0 || g.height == 0 => {
                             // Whitespace: no ink, real advance. One transparent
                             // pixel keeps the shared tail's texture upload in

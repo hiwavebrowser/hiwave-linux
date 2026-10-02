@@ -33,6 +33,7 @@ foreign-types-shared = "0.3"
 [target.'cfg(target_os = "linux")'.dependencies]
 fontconfig = "0.6"
 freetype-rs = "0.35"
+rustybuzz = "0.20"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

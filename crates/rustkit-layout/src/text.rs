@@ -65,6 +65,20 @@ pub struct FontFamilyChain {
     pub fallbacks: Vec<String>,
 }
 
+/// Names Blink treats as the platform UI font. `-apple-system` and
+/// `BlinkMacSystemFont` only mean that on macOS; on Linux they are ordinary
+/// unknown families and get skipped.
+fn is_system_ui_alias(lower: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        lower == "system-ui"
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        matches!(lower, "system-ui" | "-apple-system" | "blinkmacsystemfont")
+    }
+}
+
 impl FontFamilyChain {
     /// Create a new font family chain.
     pub fn new(primary: impl Into<String>) -> Self {
@@ -98,8 +112,15 @@ impl FontFamilyChain {
             .with_fallback("sans-serif")
     }
 
+    /// Linux: Chrome's default sans-serif is "Arial" (Liberation Sans through
+    /// fontconfig's metric alias), not fontconfig's own default sans.
+    #[cfg(target_os = "linux")]
+    pub fn sans_serif() -> Self {
+        Self::new("Arial").with_fallback("sans-serif")
+    }
+
     /// Create default font chain for sans-serif.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
     pub fn sans_serif() -> Self {
         Self::new("Segoe UI")
             .with_fallback("Arial")
@@ -120,8 +141,14 @@ impl FontFamilyChain {
             .with_fallback("serif")
     }
 
+    /// Linux: Chrome's default serif/standard family is "Times New Roman".
+    #[cfg(target_os = "linux")]
+    pub fn serif() -> Self {
+        Self::new("Times New Roman").with_fallback("serif")
+    }
+
     /// Create default font chain for serif.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
     pub fn serif() -> Self {
         Self::new("Times New Roman")
             .with_fallback("Georgia")
@@ -146,8 +173,15 @@ impl FontFamilyChain {
             .with_fallback("monospace")
     }
 
+    /// Linux: Chrome's fixed family is fontconfig's "monospace" (DejaVu Sans
+    /// Mono on stock installs).
+    #[cfg(target_os = "linux")]
+    pub fn monospace() -> Self {
+        Self::new("monospace")
+    }
+
     /// Create default font chain for monospace.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
     pub fn monospace() -> Self {
         Self::new("Cascadia Code")
             .with_fallback("Consolas")
@@ -166,8 +200,15 @@ impl FontFamilyChain {
             .with_fallback("Arial")
     }
 
+    /// Linux: `system-ui` is fontconfig's default sans (Noto Sans on stock
+    /// installs), which differs from the "Arial" generic sans-serif.
+    #[cfg(target_os = "linux")]
+    pub fn system_ui() -> Self {
+        Self::new("system-ui").with_fallback("sans-serif")
+    }
+
     /// Create system-ui font chain (platform-specific).
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
     pub fn system_ui() -> Self {
         Self::new("Segoe UI")
             .with_fallback("Roboto")
@@ -193,7 +234,7 @@ impl FontFamilyChain {
             "sans-serif" => Self::sans_serif(),
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
-            "system-ui" | "-apple-system" | "blinkmacsystemfont" => Self::system_ui(),
+            name if is_system_ui_alias(name) => Self::system_ui(),
             "cursive" => Self::new("Comic Sans MS")
                 .with_fallback("Brush Script MT")
                 .with_fallback("cursive"),
@@ -205,10 +246,7 @@ impl FontFamilyChain {
                 for fallback in families.iter().skip(1) {
                     // Recursively handle generic families in fallback chain
                     let lower = fallback.to_lowercase();
-                    if lower == "system-ui"
-                        || lower == "-apple-system"
-                        || lower == "blinkmacsystemfont"
-                    {
+                    if is_system_ui_alias(&lower) {
                         let sys_chain = Self::system_ui();
                         chain.fallbacks.push(sys_chain.primary);
                         chain.fallbacks.extend(sys_chain.fallbacks);
@@ -226,7 +264,13 @@ impl FontFamilyChain {
                     chain.fallbacks.push(".AppleSystemUIFont".to_string());
                     chain.fallbacks.push("Helvetica".to_string());
                 }
-                #[cfg(not(target_os = "macos"))]
+                // Blink's last resort for a list that names nothing installed is
+                // the standard family, not the sans default.
+                #[cfg(target_os = "linux")]
+                {
+                    chain.fallbacks.push("Times New Roman".to_string());
+                }
+                #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
                 {
                     chain.fallbacks.push("Segoe UI".to_string());
                     chain.fallbacks.push("Arial".to_string());
@@ -1637,9 +1681,13 @@ impl TextShaper {
             x_offset += advance;
         }
 
+        // Blink stores an inline's width as a LayoutUnit (1/64 px), rounding a
+        // measured text width up; the small epsilon keeps an already-exact
+        // multiple of 1/64 from being bumped by float noise.
+        let layout_width = (x_offset * 64.0 - 1e-3).ceil() / 64.0;
         let base = TextMetrics::with_font_size(size);
         let metrics = TextMetrics {
-            width: x_offset,
+            width: layout_width,
             height: ascent + descent + gap,
             ascent,
             descent,
@@ -2748,26 +2796,34 @@ mod tests {
         let sans = FontFamilyChain::from_css_value("sans-serif");
         #[cfg(target_os = "macos")]
         assert_eq!(sans.primary, "SF Pro");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        assert_eq!(sans.primary, "Arial");
+        #[cfg(windows)]
         assert_eq!(sans.primary, "Segoe UI");
 
         let mono = FontFamilyChain::from_css_value("monospace");
         #[cfg(target_os = "macos")]
         assert_eq!(mono.primary, "Menlo");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        assert_eq!(mono.primary, "monospace");
+        #[cfg(windows)]
         assert_eq!(mono.primary, "Cascadia Code");
 
         // Test system-ui and vendor-prefixed variants
         let system = FontFamilyChain::from_css_value("system-ui");
         #[cfg(target_os = "macos")]
         assert_eq!(system.primary, ".AppleSystemUIFont");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        assert_eq!(system.primary, "system-ui");
+        #[cfg(windows)]
         assert_eq!(system.primary, "Segoe UI");
 
         let apple = FontFamilyChain::from_css_value("-apple-system");
         #[cfg(target_os = "macos")]
         assert_eq!(apple.primary, ".AppleSystemUIFont");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        assert_eq!(apple.primary, "-apple-system");
+        #[cfg(windows)]
         assert_eq!(apple.primary, "Segoe UI");
     }
 
