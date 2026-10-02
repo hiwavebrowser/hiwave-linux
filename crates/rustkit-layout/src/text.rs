@@ -841,6 +841,42 @@ impl FontCache {
     }
 }
 
+/// Which backend `TextShaper::shape` actually calls on this build, and whether
+/// its advances come from a font at all.
+///
+/// This exists because the answer is not observable from the outside and the
+/// wrong answer is silent. `shape` has three bodies: DirectWrite on Windows,
+/// Core Text on macOS, and — on every other target, the one the Linux parity
+/// seat compiles — a stub that assigns `font_size * 0.5` to each ASCII
+/// character and `font_size` to each wider one, reads no font, and returns
+/// `Ok`. A caller cannot tell that apart from a successful shaping, so a
+/// parity oracle run on such a build reports geometry deltas against a fixed
+/// ruler and presents them as RustKit box-math defects
+/// (trench/digest-parity-finish-line.md, 2026-10-01).
+///
+/// The name is the provenance a capture carries so an oracle can refuse to
+/// attribute, rather than a feature flag: nothing in layout branches on it.
+pub const TEXT_SHAPER_BACKEND: &str = if cfg!(windows) {
+    "directwrite"
+} else if cfg!(target_os = "macos") {
+    "coretext"
+} else if cfg!(target_os = "linux") {
+    // LINUX (declared divergence): advances come from rustybuzz (HarfBuzz) over
+    // FreeType-opened faces, so the stub's closed form does not hold here.
+    "freetype-harfbuzz"
+} else {
+    "stub-0.5em"
+};
+
+/// Whether this build's text advances are measured from a real font face.
+///
+/// False means every advance is a constant fraction of the font size, so any
+/// box whose size or inline position depends on a text measurement is reporting
+/// that constant and not a defect. Geometry taken on such a build is MECHANICS
+/// and can never be a parity receipt.
+pub const TEXT_METRICS_ARE_FONT_DERIVED: bool =
+    cfg!(any(windows, target_os = "macos", target_os = "linux"));
+
 /// Text shaper for complex text layout.
 pub struct TextShaper {
     #[allow(dead_code)]
@@ -928,10 +964,51 @@ impl TextShaper {
                     let mut glyphs = Vec::with_capacity(text_chars.len());
                     let mut x_offset: f32 = 0.0;
 
+                    // Advances for characters the primary face has no glyph
+                    // for. Chrome takes them from the face it falls back to,
+                    // and the renderer paints emoji from Segoe UI Emoji, so
+                    // the emoji's advance must come from that face too or
+                    // the glyph is centred on the wrong width (image-gallery
+                    // placed every emoji 8 px right of Chrome). Looked up
+                    // once per shape, only when an emoji actually appears.
+                    let mut emoji_face: Option<Option<(rustkit_text::FontFace, f32)>> = None;
+                    let mut emoji_advance = |c: char| -> Option<f32> {
+                        let face = emoji_face.get_or_insert_with(|| {
+                            let family = collection.font_family_by_name("Segoe UI Emoji").ok()??;
+                            let font = family
+                                .first_matching_font(
+                                    RkFontWeight::from_u32(400),
+                                    RkFontStretch::from_u32(5),
+                                    RkFontStyle::Normal,
+                                )
+                                .ok()?;
+                            let face = font.create_font_face().ok()?;
+                            let upem = face.metrics().ok()?.design_units_per_em as f32;
+                            Some((face, size / upem))
+                        });
+                        let (face, scale) = face.as_ref()?;
+                        let ids = face.glyph_indices(&[c as u32]).ok()?;
+                        if ids[0] == 0 {
+                            return None;
+                        }
+                        let m = face.design_glyph_metrics(&ids, false).ok()?;
+                        Some(m[0].advance_width as f32 * scale)
+                    };
+
                     for (i, (&glyph_id, &c)) in
                         glyph_indices.iter().zip(text_chars.iter()).enumerate()
                     {
-                        let advance = if i < glyph_metrics.len() {
+                        let advance = if Self::is_default_ignorable(c) {
+                            // Variation selectors, joiners and the like take
+                            // no space; the primary face's .notdef would.
+                            0.0
+                        } else if glyph_id == 0 && rustkit_text::is_emoji(c) {
+                            emoji_advance(c).unwrap_or(if i < glyph_metrics.len() {
+                                glyph_metrics[i].advance_width as f32 * scale
+                            } else {
+                                size * 0.5
+                            })
+                        } else if i < glyph_metrics.len() {
                             glyph_metrics[i].advance_width as f32 * scale
                         } else {
                             size * 0.5
@@ -987,6 +1064,14 @@ impl TextShaper {
     }
 
     /// Simple shaping fallback when DirectWrite is unavailable.
+    /// Default-ignorable code points that Chrome lays out with zero
+    /// advance: variation selectors (U+FE0F asks for emoji presentation),
+    /// zero-width space/joiner/non-joiner, word joiner, BOM.
+    #[cfg(windows)]
+    fn is_default_ignorable(c: char) -> bool {
+        matches!(c as u32, 0xFE00..=0xFE0F | 0x200B..=0x200D | 0x2060 | 0xFEFF | 0xE0100..=0xE01EF)
+    }
+
     #[cfg(windows)]
     fn shape_simple(
         &self,
@@ -1886,6 +1971,19 @@ impl TextShaper {
         )
     }
 
+    /// Slack for "does this text fit on the line", in CSS px.
+    ///
+    /// A shrink-to-fit box is sized from the text's max-content width, and
+    /// that width comes back to the line breaker after a trip through
+    /// `(width + padding) - padding` and the flex/grid sizing arithmetic in
+    /// f32, where it can land a bit below the value the shaper measured. An
+    /// exact `<=` then wraps text that was measured to fit its own box:
+    /// gradient-no-radius's "to right Pink-Blue" label broke at the hyphen
+    /// with the box 129.068 wide and the text 129.068 wide. Chrome never
+    /// sees this because LayoutUnit quantises every length to 1/64 px, so
+    /// that is the slack used here.
+    const FIT_EPSILON: f32 = 1.0 / 64.0;
+
     /// Wrap text into lines that fit within the specified width.
     ///
     /// This function shapes text and breaks it into multiple lines based on:
@@ -2243,7 +2341,7 @@ impl TextShaper {
             let remaining = &text[line_start..];
             let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
 
-            if shaped.metrics.width <= cur_max {
+            if shaped.metrics.width <= cur_max + Self::FIT_EPSILON {
                 // Entire remaining text fits on one line
                 let width = shaped.metrics.width;
                 lines.push(WrappedLine {
@@ -2308,7 +2406,7 @@ impl TextShaper {
                             stretch,
                             size,
                         )?;
-                        if shaped_prefix.metrics.width <= cur_max {
+                        if shaped_prefix.metrics.width <= cur_max + Self::FIT_EPSILON {
                             fitted = offset;
                         } else {
                             break;
@@ -2420,7 +2518,7 @@ impl TextShaper {
                 self.shape(prefix, font_chain, weight, style, stretch, size)?
                     .metrics
                     .width
-                    <= max_width
+                    <= max_width + Self::FIT_EPSILON
             };
 
             if fits {
@@ -3475,6 +3573,79 @@ mod tests {
         let lines = result.unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text(), "Hello");
+    }
+
+    /// A line whose measured width comes back a few ulps under its own
+    /// max-content width (f32 round trips through padding and flex sizing)
+    /// must not wrap. Chrome's LayoutUnit hides this; FIT_EPSILON does here.
+    #[test]
+    fn text_that_measures_its_own_width_does_not_wrap_on_an_ulp() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let text = "to right Pink-Blue";
+        let measured = shaper
+            .shape(text, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 16.0)
+            .unwrap()
+            .metrics
+            .width;
+        // Two ulps below: what `(w + 24.0) - 24.0` can hand back for w in
+        // [64, 128) when the sum crosses 128.
+        let a_hair_under = measured - 2.0 * f32::EPSILON * measured;
+        assert!(a_hair_under < measured);
+        let lines = shaper
+            .wrap_text(
+                text,
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+                a_hair_under,
+                CssWordBreak::Normal,
+                CssOverflowWrap::Normal,
+            )
+            .unwrap();
+        assert_eq!(lines.len(), 1, "wrapped on an ulp: {:?}", lines.iter().map(|l| l.width).collect::<Vec<_>>());
+        // And a real shortfall still wraps.
+        let lines = shaper
+            .wrap_text(
+                text,
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+                measured - 1.0,
+                CssWordBreak::Normal,
+                CssOverflowWrap::Normal,
+            )
+            .unwrap();
+        assert_eq!(lines.len(), 2);
+    }
+
+    /// The primary face has no emoji glyph; the advance must be the one
+    /// Chrome uses (Segoe UI Emoji's), and a variation selector takes no
+    /// space. Otherwise the renderer paints the emoji from Segoe UI Emoji
+    /// centred on the wrong width.
+    #[cfg(windows)]
+    #[test]
+    fn emoji_take_the_emoji_faces_advance_and_selectors_take_none() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let w = |t: &str| {
+            shaper
+                .shape(t, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 48.0)
+                .unwrap()
+                .metrics
+                .width
+        };
+        let mountain = w("\u{1F3D4}");
+        // Segoe UI Emoji advances are a little over an em; Arial's .notdef
+        // is well under one.
+        assert!(mountain > 48.0 && mountain < 72.0, "{mountain}");
+        assert_eq!(w("\u{1F3D4}\u{FE0F}"), mountain, "FE0F must add nothing");
+        assert_eq!(w("a\u{FE0F}"), w("a"));
+        assert_eq!(w("\u{1F305}"), w("\u{1F30A}"), "emoji share the face's advance");
     }
 
     #[test]

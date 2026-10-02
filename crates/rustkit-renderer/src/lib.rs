@@ -170,6 +170,37 @@ pub struct CachedTexture {
     pub height: u32,
 }
 
+/// Shrink an RGBA image so neither side exceeds `limit`, keeping its aspect.
+/// Box filter: each output pixel is the mean of the source pixels it covers.
+/// Returns `(width, height, pixels)`.
+pub(crate) fn downscale_rgba_to_fit(width: u32, height: u32, data: &[u8], limit: u32) -> (u32, u32, Vec<u8>) {
+    let limit = limit.max(1);
+    let scale = (limit as f64 / width as f64).min(limit as f64 / height as f64).min(1.0);
+    let out_w = ((width as f64 * scale).floor() as u32).clamp(1, limit);
+    let out_h = ((height as f64 * scale).floor() as u32).clamp(1, limit);
+    let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
+    for oy in 0..out_h {
+        let y0 = (oy as u64 * height as u64 / out_h as u64) as u32;
+        let y1 = (((oy + 1) as u64 * height as u64 / out_h as u64) as u32).max(y0 + 1).min(height);
+        for ox in 0..out_w {
+            let x0 = (ox as u64 * width as u64 / out_w as u64) as u32;
+            let x1 = (((ox + 1) as u64 * width as u64 / out_w as u64) as u32).max(x0 + 1).min(width);
+            let mut acc = [0u64; 4];
+            for y in y0..y1 {
+                let row = (y as usize * width as usize + x0 as usize) * 4;
+                for px in data[row..row + (x1 - x0) as usize * 4].chunks_exact(4) {
+                    for c in 0..4 {
+                        acc[c] += px[c] as u64;
+                    }
+                }
+            }
+            let n = ((y1 - y0) as u64 * (x1 - x0) as u64).max(1);
+            out.extend(acc.iter().map(|&v| ((v + n / 2) / n) as u8));
+        }
+    }
+    (out_w, out_h, out)
+}
+
 /// Texture cache for images.
 pub struct TextureCache {
     textures: HashMap<String, CachedTexture>,
@@ -208,11 +239,27 @@ impl TextureCache {
         data: &[u8],
     ) -> &CachedTexture {
         if !self.textures.contains_key(key) {
+            // An image larger than the device allows in either direction
+            // (8192 under wgpu's default limits; hulu ships an 11501 px
+            // sprite) is downscaled to fit. `create_texture` would otherwise
+            // raise a validation error that takes the whole page down. The
+            // cache entry keeps the intrinsic size: background sizing reads
+            // it, and drawing samples by UV so the smaller texture is
+            // stretched back over the same rect.
+            let limit = device.limits().max_texture_dimension_2d;
+            let scaled;
+            let (tex_w, tex_h, data) = if width > limit || height > limit {
+                let (w, h, px) = downscale_rgba_to_fit(width, height, data, limit);
+                scaled = px;
+                (w, h, scaled.as_slice())
+            } else {
+                (width, height, data)
+            };
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(key),
                 size: wgpu::Extent3d {
-                    width,
-                    height,
+                    width: tex_w,
+                    height: tex_h,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -237,12 +284,12 @@ impl TextureCache {
                 data,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * width),
-                    rows_per_image: Some(height),
+                    bytes_per_row: Some(4 * tex_w),
+                    rows_per_image: Some(tex_h),
                 },
                 wgpu::Extent3d {
-                    width,
-                    height,
+                    width: tex_w,
+                    height: tex_h,
                     depth_or_array_layers: 1,
                 },
             );
@@ -2111,6 +2158,7 @@ impl Renderer {
                 font_family,
                 font_weight,
                 padding,
+                kind,
             } => {
                 self.draw_text_input(
                     *rect,
@@ -2127,6 +2175,35 @@ impl Renderer {
                     font_family,
                     *font_weight,
                     *padding,
+                    *kind,
+                );
+            }
+
+            DisplayCommand::ListBox {
+                rect,
+                options,
+                selected,
+                row_height,
+                font_size,
+                font_family,
+                font_weight,
+                text_color,
+                background_color,
+                border_color,
+                border_width,
+            } => {
+                self.draw_list_box(
+                    *rect,
+                    options,
+                    selected,
+                    *row_height,
+                    *font_size,
+                    font_family,
+                    *font_weight,
+                    *text_color,
+                    *background_color,
+                    *border_color,
+                    *border_width,
                 );
             }
 
@@ -4523,7 +4600,10 @@ impl Renderer {
         font_family: &str,
         font_weight: u16,
         padding: [f32; 4],
+        kind: rustkit_layout::TextControlKind,
     ) {
+        let menu_list = kind == rustkit_layout::TextControlKind::MenuList;
+
         // Draw background
         self.draw_solid_rect(rect, background_color);
 
@@ -4550,12 +4630,24 @@ impl Renderer {
         // form_text_seat for what the old formula got wrong).
         let (text_x, text_top, ascent, descent) =
             Self::form_text_seat(rect, border_width, padding, font_family, font_size);
+        // A drop-down's label sits 4px inside its padding edge (Chrome
+        // CfT-148: "Option 1" at border + 4 on a bare select, at border +
+        // padding + 4 on a padded one).
+        let text_x = if menu_list {
+            text_x + MENU_LIST_LABEL_INSET
+        } else {
+            text_x
+        };
 
         let (display_text, display_color) = if value.is_empty() {
             (placeholder, placeholder_color)
         } else {
             (value, text_color)
         };
+
+        if menu_list {
+            self.draw_menu_list_arrow(rect, text_color);
+        }
 
         if !display_text.is_empty() {
             self.draw_text_with_metrics(
@@ -4588,6 +4680,87 @@ impl Renderer {
         }
     }
     
+    /// The drop-down arrow of a `<select>`: a chevron in the control's text
+    /// colour, centred vertically, at a fixed distance from the right edge.
+    /// Chrome CfT-148 measures the same at 13.333px and at 18px with
+    /// `padding: 8px 12px`: about 7.5 wide and 4 tall, its centre 8.75px
+    /// inside the border box, whatever the author padding or font size.
+    fn draw_menu_list_arrow(&mut self, rect: Rect, color: Color) {
+        let (cx, cy) = menu_list_arrow_centre(rect);
+        self.process_command(&DisplayCommand::Polyline {
+            points: vec![(cx - 3.75, cy - 2.0), (cx, cy + 2.0), (cx + 3.75, cy - 2.0)],
+            color,
+            width: 1.75,
+        });
+    }
+
+    /// Draw a list box: the frame, then one row per option, clipped to the
+    /// inside of the frame (a list box with more options than rows scrolls;
+    /// the rows past its height are not painted).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_list_box(
+        &mut self,
+        rect: Rect,
+        options: &[String],
+        selected: &[usize],
+        row_height: f32,
+        font_size: f32,
+        font_family: &str,
+        font_weight: u16,
+        text_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
+    ) {
+        self.draw_solid_rect(rect, background_color);
+        self.draw_border(
+            rect,
+            border_color,
+            border_width,
+            border_width,
+            border_width,
+            border_width,
+        );
+
+        let inner = Rect::new(
+            rect.x + border_width,
+            rect.y + border_width,
+            (rect.width - 2.0 * border_width).max(0.0),
+            (rect.height - 2.0 * border_width).max(0.0),
+        );
+        let (ascent, _descent) = Self::fallback_run_metrics(font_family, font_size);
+        self.push_clip(inner);
+        for (index, label) in options.iter().enumerate() {
+            let row = list_box_row_rect(inner, row_height, index);
+            if row.y >= inner.y + inner.height {
+                break;
+            }
+            // Chrome CfT-148, list box without focus: a selected row is
+            // rgb(206,206,206) with rgb(16,16,16) text.
+            let is_selected = selected.contains(&index);
+            if is_selected {
+                self.draw_solid_rect(row, LIST_BOX_SELECTED_ROW);
+            }
+            self.draw_text_with_metrics(
+                label,
+                row.x + LIST_BOX_OPTION_INSET,
+                row.y,
+                if is_selected {
+                    LIST_BOX_SELECTED_TEXT
+                } else {
+                    text_color
+                },
+                font_size,
+                font_family,
+                font_weight,
+                0,
+                None,
+                Some(ascent),
+            );
+        }
+        self.pop_clip();
+    }
+
     /// Draw a button.
     #[allow(clippy::too_many_arguments)]
     fn draw_button(
@@ -4799,6 +4972,7 @@ impl Renderer {
 
         let mut cursor_x = x;
         let atlas_size = self.glyph_cache.atlas_size() as f32;
+        let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
         // Glyph entries are baseline-relative (ADVANCE CONTRACT): layout's
         // ascent when shipped, one per-run fallback otherwise.
         let baseline = y
@@ -4813,6 +4987,7 @@ impl Renderer {
                 font_size: (font_size * 10.0) as u32,
                 font_weight,
                 font_style,
+                web_face,
             };
 
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
@@ -4994,6 +5169,7 @@ impl Renderer {
 
         // Get atlas size before the loop to avoid borrow issues
         let atlas_size = self.glyph_cache.atlas_size() as f32;
+        let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
 
         for (char_idx, ch) in text.chars().enumerate() {
             let (pen_x, subpixel_phase) = glyph::pen_and_phase(cursor_x);
@@ -5004,6 +5180,7 @@ impl Renderer {
                 font_size: (font_size * 10.0) as u32,
                 font_weight,
                 font_style,
+                web_face,
             };
 
             // Color-glyph (emoji) path: paint the real color-bitmap artwork via
@@ -5015,7 +5192,9 @@ impl Renderer {
             let is_color = rustkit_text::macos::is_emoji(ch);
             #[cfg(target_os = "linux")]
             let is_color = rustkit_text::linux::is_emoji(ch);
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(windows)]
+            let is_color = rustkit_text::is_emoji(ch);
+            #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
             let is_color = false;
             if is_color {
                 if let Some(entry) =
@@ -6391,6 +6570,32 @@ fn multiply_matrices_2d(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_oversized_image_is_downscaled_to_the_limit_keeping_its_aspect() {
+        // 20x10 solid red, limit 8: longest side becomes 8, the other 4.
+        let data = vec![255u8, 0, 0, 255].repeat(20 * 10);
+        let (w, h, px) = super::downscale_rgba_to_fit(20, 10, &data, 8);
+        assert_eq!((w, h), (8, 4));
+        assert_eq!(px.len(), 8 * 4 * 4);
+        assert!(px.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn downscaling_averages_the_source_pixels_it_covers() {
+        // 2x1: black and white, to 1x1: mid grey.
+        let data = vec![0, 0, 0, 255, 255, 255, 255, 255];
+        let (w, h, px) = super::downscale_rgba_to_fit(2, 1, &data, 1);
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(px, vec![128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn an_image_within_the_limit_is_left_alone() {
+        let data = vec![7u8; 3 * 2 * 4];
+        let (w, h, px) = super::downscale_rgba_to_fit(3, 2, &data, 8);
+        assert_eq!((w, h, px), (3, 2, data));
+    }
+
     use super::*;
 
     // ==================== Transform origin (n48) ====================
@@ -7574,6 +7779,74 @@ mod outer_shadow_tests {
         let border_box = Rect::new(0.0, 0.0, 100.0, 100.0);
         let shadow = Rect::new(10.0, 10.0, 80.0, 80.0);
         assert!(Renderer::outer_shadow_paint_rects(border_box, shadow, 0.0, 1.0).is_empty());
+    }
+}
+
+/// How far inside its padding edge a drop-down `<select>` seats its label.
+const MENU_LIST_LABEL_INSET: f32 = 4.0;
+/// Horizontal padding of a list-box option row (Chrome's `option` padding).
+const LIST_BOX_OPTION_INSET: f32 = 2.0;
+/// A selected list-box row, and its text, in a list box without focus.
+const LIST_BOX_SELECTED_ROW: Color = Color {
+    r: 206,
+    g: 206,
+    b: 206,
+    a: 1.0,
+};
+const LIST_BOX_SELECTED_TEXT: Color = Color {
+    r: 16,
+    g: 16,
+    b: 16,
+    a: 1.0,
+};
+
+/// Centre of a drop-down's arrow in its border box `rect`.
+fn menu_list_arrow_centre(rect: Rect) -> (f32, f32) {
+    (rect.x + rect.width - 8.75, rect.y + rect.height / 2.0)
+}
+
+/// Row `index` of a list box whose frame encloses `inner`.
+fn list_box_row_rect(inner: Rect, row_height: f32, index: usize) -> Rect {
+    Rect::new(
+        inner.x,
+        inner.y + row_height * index as f32,
+        inner.width,
+        row_height,
+    )
+}
+
+#[cfg(test)]
+mod select_paint_tests {
+    use super::*;
+
+    /// Chrome CfT-148, bare `<select>` at (156.19, 875) 137x19: the chevron
+    /// spans x 280.5..288.5 and y 882..886 — centred on the control's
+    /// height, clear of the right border.
+    #[test]
+    fn the_drop_down_arrow_sits_inside_the_right_edge_at_mid_height() {
+        let rect = Rect::new(156.1875, 875.0, 137.0, 19.0);
+        let (cx, cy) = menu_list_arrow_centre(rect);
+        assert!((cx - 284.5).abs() <= 0.5, "arrow centre x {cx}");
+        assert_eq!(cy, 884.5);
+        // The same distance from the right edge on a padded 155x40 select.
+        let big = Rect::new(239.45, 167.0, 155.0, 40.0);
+        let (bx, by) = menu_list_arrow_centre(big);
+        assert_eq!(big.x + big.width - bx, rect.x + rect.width - cx);
+        assert_eq!(by, 187.0);
+    }
+
+    /// Chrome's option rows stack from the inside of the frame: 16px rows
+    /// at y = 906, 922, 938 in a list box whose border box starts at 905.
+    #[test]
+    fn list_box_rows_stack_from_the_inside_of_the_frame() {
+        let inner = Rect::new(157.1875, 906.0, 37.05, 48.0);
+        let ys: Vec<f32> = (0..4)
+            .map(|i| list_box_row_rect(inner, 16.0, i).y)
+            .collect();
+        assert_eq!(ys, vec![906.0, 922.0, 938.0, 954.0]);
+        // The fourth option starts at the frame's inner bottom: not painted.
+        assert!(ys[3] >= inner.y + inner.height);
+        assert_eq!(list_box_row_rect(inner, 16.0, 1).width, inner.width);
     }
 }
 

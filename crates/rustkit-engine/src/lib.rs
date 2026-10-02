@@ -4232,6 +4232,20 @@ impl Engine {
                     } else {
                         Some(entries.iter().rposition(|(_, s)| *s).unwrap_or(0))
                     };
+                    // What a list box highlights: with `multiple`, every
+                    // option carrying `selected`; without, only the last
+                    // one. No fallback to the first option — that is the
+                    // drop-down's rule (`selected_index` above).
+                    let multiple = attributes.contains_key("multiple");
+                    let mut selected: Vec<usize> = entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (_, s))| *s)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !multiple && selected.len() > 1 {
+                        selected.drain(..selected.len() - 1);
+                    }
                     let options: Vec<String> = entries.into_iter().map(|(t, _)| t).collect();
 
                     // size > 1 (or `multiple` without size, which Chrome
@@ -4239,13 +4253,14 @@ impl Engine {
                     let size = attributes
                         .get("size")
                         .and_then(|s| s.parse().ok())
-                        .unwrap_or(if attributes.contains_key("multiple") { 4 } else { 0 });
+                        .unwrap_or(if multiple { 4 } else { 0 });
 
                     let mut b = LayoutBox::new(
                         BoxType::FormControl(rustkit_layout::FormControlType::Select {
                             options,
                             selected_index,
                             size,
+                            selected,
                         }),
                         style,
                     );
@@ -4743,27 +4758,34 @@ impl Engine {
         // for every element, half of all cascade time.
         if let (Some(ix), Some(buckets)) = (index.as_ref(), indexed) {
             // Every rule in these buckets ends in the pseudo, and the index
-            // holds its prepared base selector, base keys and specificity:
-            // the same tests as the string path below, computed once.
+            // holds its prepared base selector and specificity. As in the
+            // cascade, a candidate goes straight to the matcher: the bucket
+            // it came from already stands in for the subject prefilter.
             for g in buckets.candidates(tag_name, attributes) {
                 let gi = g as usize;
                 let Some(prepared) = ix.pseudo_prepared[gi].as_deref() else {
                     continue;
                 };
+                #[cfg(test)]
+                CANDIDATE_VISITS.with(|n| n.set(n.get() + 1));
+                let matched = SelectorMatcher.selector_matches_prepared(
+                    prepared,
+                    tag_name,
+                    attributes,
+                    ancestors,
+                    siblings_before,
+                    sib,
+                );
                 // No base keys means an empty base, which admits any element.
-                let admitted = ix.pseudo_keys[gi]
-                    .as_deref()
-                    .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes));
-                if admitted
-                    && SelectorMatcher.selector_matches_prepared(
-                        prepared,
-                        tag_name,
-                        attributes,
-                        ancestors,
-                        siblings_before,
-                        sib,
-                    )
-                {
+                debug_assert!(
+                    !matched
+                        || ix.pseudo_keys[gi]
+                            .as_deref()
+                            .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes)),
+                    "the subject prefilter rejects {:?}, which matches <{tag_name}>",
+                    ix.rule(stylesheets, g).selector
+                );
+                if matched {
                     matching_rules.push((ix.specificity[gi], ix.rule(stylesheets, g)));
                 }
             }
@@ -4868,9 +4890,15 @@ impl Engine {
             } else {
                 &matching_rules
             };
+            let reverted = reverted_layer_properties(rules.iter().map(|r| r.1), important_pass);
             for (_, rule) in rules {
                 for declaration in &rule.declarations {
                     if declaration.important != important_pass {
+                        continue;
+                    }
+                    if !reverted.is_empty()
+                        && reverted.contains(&(rule.layer_order, declaration.property.as_str()))
+                    {
                         continue;
                     }
                     let value_str = match &declaration.value {
@@ -5391,25 +5419,38 @@ impl Engine {
 
         for (rule_index, rule) in rules {
             // With an index, `rule_index` is the global index `g`.
-            let may_match = match index.as_ref() {
-                Some(ix) => Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
-                None => self.rule_may_match(&rule.selector, tag_name, attributes),
-            };
-            if !may_match {
-                continue;
-            }
             let matched = match index.as_ref() {
-                Some(ix) => SelectorMatcher.matched_specificity(
-                    &ix.prepared[rule_index],
-                    &ix.member_specificity[rule_index],
-                    ix.specificity[rule_index],
-                    tag_name,
-                    attributes,
-                    ancestors,
-                    siblings_before,
-                    sib,
-                ),
+                // No subject prefilter here: a candidate is already filed
+                // under one of this element's own keys, so the prefilter
+                // passed 95-99.6% of them (wikipedia, cnn, github) and cost
+                // 7-8% of github's and cnn's cascade to say so. The matcher
+                // tests the same subject compound first. Debug builds hold
+                // the prefilter to its contract instead.
+                Some(ix) => {
+                    #[cfg(test)]
+                    CANDIDATE_VISITS.with(|n| n.set(n.get() + 1));
+                    let matched = SelectorMatcher.matched_specificity(
+                        &ix.prepared[rule_index],
+                        &ix.member_specificity[rule_index],
+                        ix.specificity[rule_index],
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    );
+                    debug_assert!(
+                        matched.is_none()
+                            || Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
+                        "the subject prefilter rejects {:?}, which matches <{tag_name}>",
+                        rule.selector
+                    );
+                    matched
+                }
                 None => {
+                    if !self.rule_may_match(&rule.selector, tag_name, attributes) {
+                        continue;
+                    }
                     let selector = rule.selector.trim();
                     SelectorMatcher.matched_specificity(
                         &SelectorMatcher.prepared_selector(selector),
@@ -5513,9 +5554,18 @@ impl Engine {
         // `style="color: red !important"` handed "red !important" to the
         // value parser, which dropped the declaration.
         for important_pass in [false, true] {
+            let reverted = reverted_layer_properties(
+                rules_for(important_pass).iter().map(|r| r.0),
+                important_pass,
+            );
             for (rule, specificity, _) in rules_for(important_pass) {
                 for decl in &rule.declarations {
                     if decl.important != important_pass {
+                        continue;
+                    }
+                    if !reverted.is_empty()
+                        && reverted.contains(&(rule.layer_order, decl.property.as_str()))
+                    {
                         continue;
                     }
                     // Extract string value from PropertyValue
@@ -8378,9 +8428,17 @@ impl Engine {
                     ix.main.file(key, g);
                 }
                 ix.keys.push(keys);
-                ix.specificity.push(SelectorMatcher.selector_specificity(&rule.selector));
-                ix.member_specificity
-                    .push(SelectorMatcher.list_member_specificity(rule.selector.trim()));
+                let members = SelectorMatcher.list_member_specificity(rule.selector.trim());
+                // `selector_specificity` splits a list with the same
+                // `split_top_level_commas` and takes its members' max, so a
+                // list's specificity is the max of the members just computed.
+                // A single selector (no members) is scored whole.
+                let whole = match members.iter().map(|&(_, spec)| spec).max() {
+                    Some(max) => max,
+                    None => SelectorMatcher.selector_specificity(&rule.selector),
+                };
+                ix.specificity.push(whole);
+                ix.member_specificity.push(members);
                 ix.prepared.push(SelectorMatcher.prepared_selector(rule.selector.trim()));
                 let mut pseudo_keys = None;
                 let mut pseudo_prepared = None;
@@ -8468,20 +8526,27 @@ impl Engine {
         tag_name: &str,
         attributes: &HashMap<String, String>,
     ) -> bool {
-        #[cfg(test)]
-        PREFILTER_VISITS.with(|n| n.set(n.get() + 1));
+        Self::keys_may_match_keyed(keys, &KeyedElement::of(tag_name, attributes))
+    }
+
+    /// `keys_may_match` for a caller that tests many rules against one
+    /// element: `KeyedElement::of` looks the element's `id` and `class` up
+    /// once, instead of once per key of every candidate rule (11% of
+    /// wikipedia's cascade went to those repeated attribute lookups).
+    fn keys_may_match_keyed(keys: &[SubjectKey], element: &KeyedElement) -> bool {
         keys.iter().any(|k| {
-            k.id.as_deref()
-                .map_or(true, |id| attributes.get("id").map(String::as_str) == Some(id))
+            k.id.as_deref().map_or(true, |id| element.id == Some(id))
                 && k.tag
                     .as_deref()
-                    .map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
+                    .map_or(true, |t| t.eq_ignore_ascii_case(element.tag_name))
                 && k.class.as_deref().map_or(true, |c| {
-                    attributes
-                        .get("class")
+                    element
+                        .class
                         .is_some_and(|cl| cl.split_whitespace().any(|x| x == c))
                 })
-                && k.attr.as_deref().map_or(true, |a| attributes.contains_key(a))
+                && k.attr
+                    .as_deref()
+                    .map_or(true, |a| element.attributes.contains_key(a))
         })
     }
 
@@ -8566,34 +8631,23 @@ impl Engine {
             out.push(key)
         }
 
-        fn keys_for(engine: &Engine, selector: &str, out: &mut Vec<SubjectKey>) {
-            let selector = selector.trim();
-            if !SelectorMatcher::selector_list_is_valid(selector) {
-                return;
-            }
-            if selector.contains(',') {
-                let members = SelectorMatcher::split_top_level_commas(selector);
-                if members.len() != 1 || members[0] != selector {
+        // Read off the prepared selector, which has already validated, split
+        // and tokenized the string the way the matcher does (`Never` for an
+        // invalid, pseudo-element or subject-less selector), so the index
+        // no longer repeats that work per rule (~150 ms of github's index).
+        fn keys_for(engine: &Engine, prepared: &PreparedSelector, out: &mut Vec<SubjectKey>) {
+            match prepared {
+                PreparedSelector::Never => {}
+                PreparedSelector::List(members) => {
                     for m in members {
                         keys_for(engine, m, out);
                     }
-                    return;
                 }
-            }
-            if selector.contains("::")
-                || selector.ends_with(":before")
-                || selector.ends_with(":after")
-                || selector.contains(":before ")
-                || selector.contains(":after ")
-            {
-                return;
-            }
-            let tokens = SelectorMatcher.tokenize_selector(selector);
-            match tokens.last() {
-                Some((compound, combinator)) if combinator.is_empty() => {
-                    keys_for_compound(engine, compound, out)
+                PreparedSelector::Complex { tokens, .. } => {
+                    if let Some((compound, _)) = tokens.last() {
+                        keys_for_compound(engine, compound, out)
+                    }
                 }
-                _ => {}
             }
         }
 
@@ -8602,7 +8656,7 @@ impl Engine {
                 return k.clone();
             }
             let mut v = Vec::new();
-            keys_for(self, selector, &mut v);
+            keys_for(self, &SelectorMatcher.prepared_selector(selector.trim()), &mut v);
             let v = Rc::new(v);
             let mut cache = cache.borrow_mut();
             // Selectors are page-controlled; keep a runaway page from
@@ -9760,11 +9814,20 @@ impl SelectorMatcher {
         let mut classes = 0; // (b)
         let mut tags = 0; // (c)
 
-        // Handle comma-separated selectors - take max specificity
-        if selector.contains(',') {
+        // A selector list takes the specificity of its most specific member.
+        // Split on top-level commas only: `:is( a, b)` is one member, and a
+        // plain `split(',')` cut it into `:is( a` and `b)`. Then the
+        // whitespace split below severed `:is(` from its argument, and the
+        // functional-pseudo-class branch sliced an inverted range and
+        // panicked. Five of the top-80 live sites (nytimes, hbo, uber,
+        // caranddriver, salesforce) put whitespace or newlines inside `:is()`.
+        // Only a list of two or more members recurses: a lone `:is(a, b)`
+        // splits to itself and would recurse without end.
+        let members = SelectorMatcher::split_top_level_commas(selector);
+        if members.len() > 1 {
             let mut max_spec = (0, 0, 0);
-            for part in selector.split(',') {
-                let spec = SelectorMatcher.selector_specificity(part.trim());
+            for part in members {
+                let spec = SelectorMatcher.selector_specificity(part);
                 if spec > max_spec {
                     max_spec = spec;
                 }
@@ -9772,14 +9835,12 @@ impl SelectorMatcher {
             return max_spec;
         }
 
-        // Process each part of the selector (space-separated for descendants)
-        for part in selector.split_whitespace() {
-            // Skip combinators
-            if part == ">" || part == "+" || part == "~" {
-                continue;
-            }
-
-            let chars: Vec<char> = part.chars().collect();
+        // Walk the whole member. Whitespace and the combinators fall through
+        // the `_` arm, and the functional pseudo-class arms consume their
+        // parenthesised argument whole, whitespace included, so no
+        // pre-splitting on whitespace is needed (or safe).
+        {
+            let chars: Vec<char> = selector.chars().collect();
             let mut i = 0;
 
             while i < chars.len() {
@@ -9860,8 +9921,11 @@ impl SelectorMatcher {
                                         }
                                         i += 1;
                                     }
-                                    let arg: String =
-                                        chars[arg_start..i.saturating_sub(1)].iter().collect();
+                                    // An unclosed `:is(` ends the walk at
+                                    // `i == arg_start`; the range must not
+                                    // run backwards.
+                                    let arg_end = i.saturating_sub(1).max(arg_start);
+                                    let arg: String = chars[arg_start..arg_end].iter().collect();
                                     let (a, b, c) = SelectorMatcher.selector_specificity(&arg);
                                     ids += a;
                                     classes += b;
@@ -10026,14 +10090,7 @@ impl Engine {
             .get_surface_size(view.viewhost_id)
             .unwrap_or((0, 0));
 
-        let wrapper = serde_json::json!({
-            "version": 1,
-            "viewport": {
-                "width": width,
-                "height": height
-            },
-            "root": layout_json
-        });
+        let wrapper = layout_export_wrapper(layout_json, width, height);
 
         let json_str = serde_json::to_string_pretty(&wrapper)
             .map_err(|e| EngineError::RenderError(format!("JSON serialization failed: {}", e)))?;
@@ -10321,6 +10378,7 @@ impl Engine {
         fn display_command_op_name(cmd: &Cmd) -> &'static str {
             match cmd {
                 Cmd::TextInput { .. } => "text_input",
+                Cmd::ListBox { .. } => "list_box",
                 Cmd::Button { .. } => "button",
                 Cmd::FocusRing { .. } => "focus_ring",
                 Cmd::Caret { .. } => "caret",
@@ -13453,6 +13511,37 @@ fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32,
     (min_x, min_y, max_x - min_x, max_y - min_y)
 }
 
+/// Wrap a serialised layout tree with the provenance an oracle needs.
+///
+/// Split out of `export_layout_json` so it can be asserted on directly. The
+/// two text fields are the provenance a capture carries so a gate can REFUSE,
+/// not a feature flag: nothing in layout or paint reads them back.
+///
+/// `TextShaper::shape` has three bodies. The one compiled on any target that is
+/// neither Windows nor macOS is a stub — it assigns `font_size * 0.5` to each
+/// ASCII character, reads no font, and returns `Ok`. A capture taken on such a
+/// build carries geometry measured against a fixed ruler while looking exactly
+/// like a capture that shaped, and Gate A cannot tell the two apart from the
+/// rects alone. For 57 nights it did not try, and the Linux trench seat's
+/// boards were read as RustKit box-math deltas throughout
+/// (trench/digest-parity-finish-line.md, 2026-10-01).
+fn layout_export_wrapper(
+    layout_json: serde_json::Value,
+    width: u32,
+    height: u32,
+) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "viewport": {
+            "width": width,
+            "height": height
+        },
+        "text_backend": rustkit_layout::TEXT_SHAPER_BACKEND,
+        "text_metrics_font_derived": rustkit_layout::TEXT_METRICS_ARE_FONT_DERIVED,
+        "root": layout_json
+    })
+}
+
 /// Convert one layout box to its JSON form for `export_layout_json`.
 ///
 /// Module-level rather than nested so it can be tested directly: the engine
@@ -15922,6 +16011,56 @@ mod tests {
             id_spec > multi_class_spec,
             "ID should beat multiple classes"
         );
+    }
+
+    #[test]
+    fn specificity_of_is_and_not_with_whitespace_inside_the_parens() {
+        // nytimes: newlines inside `:is(...)`. The old splitter cut on the
+        // comma inside the parens, then on the whitespace, and panicked on
+        // the `:is(` fragment.
+        assert_eq!(SelectorMatcher.selector_specificity(":is( a, b)"), (0, 0, 1));
+        assert_eq!(SelectorMatcher.selector_specificity(":is(
+  #a,
+  .b
+) c"), (1, 0, 1));
+        assert_eq!(SelectorMatcher.selector_specificity(":not( .x )"), (0, 1, 0));
+        assert_eq!(SelectorMatcher.selector_specificity(":where( #a, .b )"), (0, 0, 0));
+        // Descendants and combinators still count, with any spacing.
+        assert_eq!(SelectorMatcher.selector_specificity("div  >  .a ~ #b"), (1, 1, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("ul li a"), (0, 0, 3));
+        // A list still takes its most specific member, split at the top level.
+        assert_eq!(SelectorMatcher.selector_specificity(":is(a, b), #c"), (1, 0, 0));
+    }
+
+    #[test]
+    fn an_unclosed_functional_pseudo_class_does_not_panic() {
+        // Malformed input must not take the whole page down.
+        assert_eq!(SelectorMatcher.selector_specificity(":is("), (0, 0, 0));
+        assert_eq!(SelectorMatcher.selector_specificity(":not("), (0, 0, 0));
+        // The unclosed argument is dropped, not counted; only the `a` remains.
+        assert_eq!(SelectorMatcher.selector_specificity("a :is( b"), (0, 0, 1));
+    }
+
+    #[test]
+    fn a_list_scores_the_max_of_its_member_specificities() {
+        // build_rule_index takes a list's specificity from the members it
+        // has already scored instead of rescanning the whole selector.
+        for sel in [
+            "a, .b, #c",
+            " ul li ,  .x > .y ",
+            ":is(a, b), #c",
+            ":is( #a, .b ) c, d",
+            "[data-x=\"a,b\"], .c",
+            "a:not(.x, .y), b",
+            "a,,b",
+        ] {
+            let members = SelectorMatcher.list_member_specificity(sel.trim());
+            let max = members.iter().map(|&(_, spec)| spec).max();
+            assert_eq!(max, Some(SelectorMatcher.selector_specificity(sel)), "{sel}");
+        }
+        // A single selector has no members and is scored whole.
+        assert!(SelectorMatcher.list_member_specificity(":is(a, b)").is_empty());
+        assert!(SelectorMatcher.list_member_specificity("div > p").is_empty());
     }
 }
 
@@ -18445,8 +18584,9 @@ mod visual_rect_tests {
 thread_local! {
     /// How many times the full selector matcher ran on this thread.
     static FULL_SELECTOR_MATCHES: Cell<u64> = const { Cell::new(0) };
-    /// How many rules the subject prefilter was asked about on this thread.
-    static PREFILTER_VISITS: Cell<u64> = const { Cell::new(0) };
+    /// How many rule-index candidates were tried against an element on this
+    /// thread (the cascade's and the `::before`/`::after` lists').
+    static CANDIDATE_VISITS: Cell<u64> = const { Cell::new(0) };
     /// How many times a selector string was tokenized on this thread.
     static SELECTOR_TOKENIZATIONS: Cell<u64> = const { Cell::new(0) };
     /// How many selectors the ancestor filter rejected on this thread.
@@ -18841,7 +18981,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
-        PREFILTER_VISITS.with(|n| n.set(0));
+        CANDIDATE_VISITS.with(|n| n.set(0));
         let style = engine.compute_style_for_element(
             "div",
             &attrs(&[("class", "hit"), ("id", "main")]),
@@ -18852,13 +18992,13 @@ mod rule_prefilter_tests {
             SiblingContext::SOLE,
             None,
         );
-        let visits = PREFILTER_VISITS.with(|n| n.get());
+        let visits = CANDIDATE_VISITS.with(|n| n.get());
 
         assert_eq!(style.color, rustkit_css::Color::new(0, 0, 255, 1.0));
         assert!(
             visits <= 1,
             "1,500 rules filed under other subjects must not be visited; \
-             the prefilter ran {visits} times"
+             {visits} candidates were"
         );
     }
 
@@ -19110,7 +19250,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
-        PREFILTER_VISITS.with(|n| n.set(0));
+        CANDIDATE_VISITS.with(|n| n.set(0));
         let host = attrs(&[("class", "hit"), ("id", "main")]);
         let before = engine.create_pseudo_element(
             "div", &host, sheets, &vars, &[], &[], SiblingContext::SOLE, "::before",
@@ -19118,14 +19258,14 @@ mod rule_prefilter_tests {
         let after = engine.create_pseudo_element(
             "div", &host, sheets, &vars, &[], &[], SiblingContext::SOLE, "::after",
         );
-        let visits = PREFILTER_VISITS.with(|n| n.get());
+        let visits = CANDIDATE_VISITS.with(|n| n.get());
 
         assert!(before.is_some(), ".hit::before must still generate its box");
         assert!(after.is_none());
         assert!(
             visits <= 1,
             "1,200 pseudo rules filed under other subjects must not be \
-             visited; the prefilter ran {visits} times"
+             visited; {visits} candidates were"
         );
     }
 
@@ -19338,7 +19478,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
-        PREFILTER_VISITS.with(|n| n.set(0));
+        CANDIDATE_VISITS.with(|n| n.set(0));
         let style = engine.compute_style_for_element(
             "div",
             &attrs(&[("data-hit", ""), ("class", "card")]),
@@ -19349,13 +19489,13 @@ mod rule_prefilter_tests {
             SiblingContext::SOLE,
             None,
         );
-        let visits = PREFILTER_VISITS.with(|n| n.get());
+        let visits = CANDIDATE_VISITS.with(|n| n.get());
 
         assert_eq!(style.color, rustkit_css::Color::new(0, 0, 255, 1.0));
         assert!(
             visits <= 1,
             "1,500 attribute / :where / :is / :root rules the element can't \
-             match must not be visited; the prefilter ran {visits} times"
+             match must not be visited; {visits} candidates were"
         );
     }
 
@@ -19575,6 +19715,116 @@ mod cascade_wire_tests {
         let css = "@layer a, b; @layer b { #x::before { content: \"\"; display: block; width: 7px; background: #0f0 } } \
                    @layer a { #x::before { background: #f00 } }";
         assert_eq!(background_of(css, X, 7.0), GREEN);
+    }
+
+    // `revert-layer` (CSS Cascade 5 §7.3.3): linkedin's layered bundle hides
+    // its hero with `display: none` and shows it on desktop with
+    // `display: revert-layer`, both in the `overrides` layer.
+    const RED: (u8, u8, u8) = (255, 0, 0);
+
+    #[test]
+    fn revert_layer_rolls_back_to_the_layer_below() {
+        let css = "@layer a, b; @layer a { .c { background-color: #0f0 } } \
+                   @layer b { .c { background-color: #f00 } #x { background-color: revert-layer } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn revert_layer_only_counts_when_it_wins_its_own_layer() {
+        // The layer's winner is the id rule's red, so the lower-specificity
+        // `revert-layer` is an ordinary loser.
+        let css = "@layer a, b; @layer a { .c { background-color: #0f0 } } \
+                   @layer b { #x { background-color: #f00 } .c { background-color: revert-layer } }";
+        assert_eq!(background_of(css, X, 50.0), RED);
+    }
+
+    #[test]
+    fn revert_layer_leaves_the_layers_above_alone() {
+        let css = "@layer a, b, c; @layer a { .c { background-color: #f00 } } \
+                   @layer b { .c { background-color: revert-layer } } \
+                   @layer c { .c { background-color: #0f0 } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn an_unlayered_revert_layer_rolls_back_to_the_layered_result() {
+        let css = "@layer a { .c { background-color: #0f0 } } \
+                   .c { background-color: #f00 } #x { background-color: revert-layer }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn an_important_revert_layer_rolls_back_among_important_declarations() {
+        // Important layers run in reverse, so `b` is the lower one here.
+        let css = "@layer a, b; @layer b { .c { background-color: #0f0 !important } } \
+                   @layer a { .c { background-color: #f00 !important } \
+                              #x { background-color: revert-layer !important } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn revert_layer_shows_what_the_same_layer_hid() {
+        // linkedin's shape: `display: none`, then `revert-layer` in the same
+        // layer, back to the atoms layer's display. A hidden box is not in
+        // the tree at all, so `background_of` panics without the rollback.
+        // (linkedin puts the `revert-layer` under `@media`; an ad-hoc build
+        // has no viewport and keeps no conditional rule, so that part is
+        // checked on the saved page with a release build instead.)
+        let css = "@layer atoms, overrides; \
+                   @layer atoms { .c { display: grid; background-color: #0f0 } } \
+                   @layer overrides { .c { display: none } #x { display: revert-layer } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn a_pseudo_element_reverts_its_layer_too() {
+        let css = "@layer a, b; \
+                   @layer a { #x::before { content: \"\"; display: block; width: 7px; background-color: #0f0 } } \
+                   @layer b { #x::before { background-color: #f00 } #x::before { background-color: revert-layer } }";
+        assert_eq!(background_of(css, X, 7.0), GREEN);
+    }
+
+    // CSS nesting: linkedin's layered bundle stacks its hero with
+    // `.stack { display: grid; & > * { grid-area: 1/-1 } }`.
+    const IN_P: &str = r#"<div class="p"><div id="x" class="c" style="width:50px;height:10px"></div></div>"#;
+
+    #[test]
+    fn a_nested_rule_styles_the_parents_child() {
+        assert_eq!(background_of(".p { & > .c { background: #0f0 } }", IN_P, 50.0), GREEN);
+        assert_eq!(background_of(".p { .c { background: #0f0 } }", IN_P, 50.0), GREEN);
+    }
+
+    #[test]
+    fn a_nested_rule_under_a_complex_parent_list_matches() {
+        let css = ".q, .p > div { & { background: #0f0 } }";
+        assert_eq!(background_of(css, IN_P, 50.0), GREEN);
+    }
+
+    #[test]
+    fn the_rule_after_a_nested_rule_still_applies() {
+        let css = ".p { & .zz { color: red } } #x { background: #0f0 }";
+        assert_eq!(background_of(css, IN_P, 50.0), GREEN);
+    }
+
+    #[test]
+    fn nested_grid_area_stacks_the_children() {
+        let e = engine();
+        let html = r#"<html><head><style>
+            body { margin: 0 }
+            .stack { display: grid; & > * { grid-area: 1/-1; min-width: 0 } }
+            </style></head><body><div class="stack">
+            <div style="width:30px;height:20px"></div><div style="width:40px;height:20px"></div>
+            </div></body></html>"#;
+        let d = Document::parse_html(html).expect("parse");
+        let layout = e.build_layout_from_document(&d, &[]);
+        let y = |w: f32| {
+            find(&layout, &|b| matches!(b.style.width, rustkit_css::Length::Px(v) if v == w))
+                .expect("box")
+                .dimensions
+                .content
+                .y
+        };
+        assert_eq!(y(30.0), y(40.0), "both items sit in the one stacked cell");
     }
 
     // transform (#48)
@@ -20939,6 +21189,27 @@ impl RuleBuckets {
     }
 }
 
+/// What a rule's subject keys are tested against, read off an element once:
+/// its tag, its `id` and `class` attribute values, and (for a key that names
+/// an attribute) the attribute map itself.
+struct KeyedElement<'a> {
+    tag_name: &'a str,
+    id: Option<&'a str>,
+    class: Option<&'a str>,
+    attributes: &'a HashMap<String, String>,
+}
+
+impl<'a> KeyedElement<'a> {
+    fn of(tag_name: &'a str, attributes: &'a HashMap<String, String>) -> Self {
+        KeyedElement {
+            tag_name,
+            id: attributes.get("id").map(String::as_str),
+            class: attributes.get("class").map(String::as_str),
+            attributes,
+        }
+    }
+}
+
 /// The order `!important` declarations cascade in when layers are involved:
 /// layer order reversed (CSS Cascade 5 §6.4), then specificity and source
 /// order as usual. `rules` is already in normal order. `None` when that order
@@ -20957,6 +21228,51 @@ fn layered_important_order<'a>(
             .cmp(&(std::cmp::Reverse(b.0.layer_order), b.1, b.2))
     });
     Some(out)
+}
+
+/// CSS Cascade 5 §7.3.3, `revert-layer`: the (layer, property) pairs one
+/// importance pass must skip. When the declaration that wins a property
+/// WITHIN a layer is `revert-layer`, that layer contributes nothing for the
+/// property and the result of the layers below it stands. In the unlayered
+/// rules it rolls back to the layered result. `rules` is in the pass's cascade
+/// order, so the last declaration seen for a pair is its winner.
+///
+/// The keyword was dropped as an unknown value, which left the same layer's
+/// earlier declaration in force: linkedin hides its hero with
+/// `.h { display: none }` and shows it on desktop with
+/// `@media (min-width: 768px) { .d { display: revert-layer } }`, both in one
+/// layer, so the hero never appeared.
+///
+/// Pairs are matched by property name, so a `revert-layer` longhand does not
+/// roll back a shorthand declared in the same layer. Empty (no allocation) on
+/// any element no `revert-layer` declaration reaches.
+fn reverted_layer_properties<'a>(
+    rules: impl Iterator<Item = &'a Rule>,
+    important: bool,
+) -> Vec<(u32, &'a str)> {
+    let mut winners: Vec<((u32, &'a str), bool)> = Vec::new();
+    for rule in rules {
+        for decl in &rule.declarations {
+            if decl.important != important {
+                continue;
+            }
+            let reverts = matches!(
+                &decl.value,
+                rustkit_css::PropertyValue::Specified(s)
+                    if s.len() >= 12 && s.trim().eq_ignore_ascii_case("revert-layer")
+            );
+            if !reverts && winners.is_empty() {
+                continue;
+            }
+            let key = (rule.layer_order, decl.property.as_str());
+            match winners.iter_mut().find(|w| w.0 == key) {
+                Some(w) => w.1 = reverts,
+                None if reverts => winners.push((key, true)),
+                None => {}
+            }
+        }
+    }
+    winners.into_iter().filter(|w| w.1).map(|w| w.0).collect()
 }
 
 /// The selector a `…::before`/`…:before` rule matches its host with, as
@@ -22927,6 +23243,136 @@ mod css_url_base_engine_tests {
         let paths = requested.lock().unwrap().clone();
         assert!(paths.iter().any(|p| p == "/assets/font.woff2"), "font not fetched from the sheet's directory: {paths:?}");
         assert!(!paths.iter().any(|p| p == "/font.woff2"), "font fetched against the document URL: {paths:?}");
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod web_font_format_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    const AHEM_TTF: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+    const AHEM_WOFF: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.woff");
+    const AHEM_WOFF2: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.woff2");
+
+    // Four 20px lines of "XXXXX" at x=20, 30px apart from y=20. Ahem's "X"
+    // is a solid em square; Helvetica's is two strokes.
+    const PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+@font-face { font-family: FormatTtf; src: url(/Ahem.ttf) format("truetype"); }
+@font-face { font-family: FormatWoff; src: url(/Ahem.woff) format("woff"); }
+@font-face { font-family: FormatWoff2; src: url(/Ahem.woff2) format("woff2"); }
+body { margin: 20px; font-size: 20px; background: white; color: black; }
+p { margin: 0 0 10px 0; line-height: 20px; }
+</style></head><body>
+<p style="font-family: FormatTtf">XXXXX</p>
+<p style="font-family: FormatWoff">XXXXX</p>
+<p style="font-family: FormatWoff2">XXXXX</p>
+<p style="font-family: Helvetica">XXXXX</p>
+</body></html>"#;
+
+    fn serve() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (ctype, body): (&str, &[u8]) =
+                    match head.split_whitespace().nth(1).unwrap_or("") {
+                        "/" => ("text/html", PAGE.as_bytes()),
+                        "/Ahem.ttf" => ("font/ttf", AHEM_TTF),
+                        "/Ahem.woff" => ("font/woff", AHEM_WOFF),
+                        "/Ahem.woff2" => ("font/woff2", AHEM_WOFF2),
+                        _ => ("text/plain", b""),
+                    };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        port
+    }
+
+    /// Share of dark pixels in the 96x16 block inside line `line`'s five
+    /// glyph cells (2px in from every edge), read from a binary PPM.
+    fn ink(ppm: &[u8], line: usize) -> f32 {
+        let mut fields = Vec::new();
+        let mut pos = 0;
+        while fields.len() < 4 {
+            let start = pos;
+            while !ppm[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            fields.push(std::str::from_utf8(&ppm[start..pos]).unwrap());
+            pos += 1;
+        }
+        assert_eq!(fields[0], "P6");
+        let width: usize = fields[1].parse().unwrap();
+        let pixels = &ppm[pos..];
+        let top = 20 + 30 * line;
+        let mut dark = 0;
+        for y in top + 2..top + 18 {
+            for x in 22..118 {
+                let p = &pixels[(y * width + x) * 3..][..3];
+                if p.iter().all(|&c| c < 96) {
+                    dark += 1;
+                }
+            }
+        }
+        dark as f32 / (96.0 * 16.0)
+    }
+
+    #[test]
+    fn ttf_woff_and_woff2_faces_paint_their_own_glyphs_after_a_fallback_first_paint() {
+        let port = serve();
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 400,
+                height: 200,
+            })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // The document is laid out and painted once before its fonts are
+        // fetched, so the fallback has already drawn every "X" by the time
+        // the three faces install.
+        rt.block_on(engine.load_url(
+            view,
+            Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap(),
+        ))
+        .expect("load_url");
+        engine.render_view(view).expect("render");
+        let path = std::env::temp_dir().join(format!("rustkit-web-font-formats-{port}.ppm"));
+        engine
+            .capture_frame(view, path.to_str().unwrap())
+            .expect("capture");
+        let ppm = std::fs::read(&path).expect("frame");
+        let _ = std::fs::remove_file(&path);
+
+        for (line, format) in ["ttf", "woff", "woff2"].into_iter().enumerate() {
+            let share = ink(&ppm, line);
+            assert!(
+                share > 0.98,
+                "{format}: {:.0}% of the glyph cells are ink; Ahem fills them, a fallback font does not",
+                share * 100.0
+            );
+        }
+        let control = ink(&ppm, 3);
+        assert!(
+            (0.02..0.6).contains(&control),
+            "the Helvetica control line is {:.0}% ink; the probe is not reading glyph cells",
+            control * 100.0
+        );
     }
 }
 
@@ -24999,3 +25445,222 @@ mod css_content_escape_tests {
 
 #[cfg(test)]
 mod linux_carried_tests;
+
+#[cfg(test)]
+mod text_provenance_tests {
+    //! The capture must declare which shaper produced its advances, and the
+    //! declaration must match what the shaper actually does.
+    //!
+    //! Two halves, and they fail differently. `layout_export_wrapper` emitting
+    //! the fields is what lets Gate A refuse; the constants being TRUE of this
+    //! build is what makes the refusal mean something. A declaration that says
+    //! `coretext` on a stub build is worse than no declaration at all, because
+    //! the gate would then trust it.
+
+    use super::layout_export_wrapper;
+
+    #[test]
+    fn the_layout_export_declares_its_text_shaper() {
+        let doc = layout_export_wrapper(serde_json::json!({"type": "block"}), 800, 600);
+
+        assert_eq!(
+            doc["text_backend"],
+            serde_json::json!(rustkit_layout::TEXT_SHAPER_BACKEND),
+            "a capture that does not name its shaper cannot be attributed, and \
+             Gate A treats an absent field as untrusted rather than as a font"
+        );
+        assert_eq!(
+            doc["text_metrics_font_derived"],
+            serde_json::json!(rustkit_layout::TEXT_METRICS_ARE_FONT_DERIVED),
+            "the boolean is what the gate branches on; the name is for humans"
+        );
+        assert!(
+            doc["text_metrics_font_derived"].is_boolean(),
+            "the gate reads only a real boolean as a yes, so a string or a \
+             number here would silently read as 'did not say'"
+        );
+        // The pre-existing shape is part of the contract: every consumer of
+        // layout.json joins on `root` and filters on `viewport`.
+        assert_eq!(doc["version"], serde_json::json!(1));
+        assert_eq!(doc["viewport"]["width"], serde_json::json!(800));
+        assert_eq!(doc["viewport"]["height"], serde_json::json!(600));
+        assert_eq!(doc["root"]["type"], serde_json::json!("block"));
+    }
+
+    #[test]
+    fn the_declared_backend_matches_what_shaping_actually_does() {
+        // The stub's closed form, transcribed from the non-Windows, non-macOS
+        // body of `TextShaper::shape` (crates/rustkit-layout/src/text.rs):
+        //     let advance = if c.is_ascii() { size * 0.5 } else { size };
+        // Measuring it is the only way to catch a constant that says one thing
+        // while the compiled `shape` does another.
+        let measure = |s: &str| {
+            rustkit_layout::measure_text_advanced(
+                s,
+                "system-ui, sans-serif",
+                16.0,
+                rustkit_css::FontWeight::NORMAL,
+                rustkit_css::FontStyle::Normal,
+            )
+            .width
+        };
+        let stub_holds = (measure(" ") - 8.0).abs() < 1e-3
+            && (measure("mm") - 16.0).abs() < 1e-3
+            && (measure("iiii") - 32.0).abs() < 1e-3;
+
+        if rustkit_layout::TEXT_METRICS_ARE_FONT_DERIVED {
+            assert!(
+                !stub_holds,
+                "this build claims font-derived advances, but ' ', 'mm' and \
+                 'iiii' all measure exactly font_size * 0.5 per character. No \
+                 real face gives a space and an 'm' the same advance, so the \
+                 stub is what ran and the claim is false — a parity receipt \
+                 taken here would be measured against a ruler, not a font."
+            );
+            assert!(
+                rustkit_layout::TEXT_SHAPER_BACKEND == "coretext"
+                    || rustkit_layout::TEXT_SHAPER_BACKEND == "directwrite"
+                    || rustkit_layout::TEXT_SHAPER_BACKEND == "freetype-harfbuzz",
+                "a font-derived build must name the backend that read the font"
+            );
+        } else {
+            assert!(
+                stub_holds,
+                "this build declares the stub, so the stub's closed form must \
+                 hold. If it no longer does, a real shaper was wired in on this \
+                 target and TEXT_METRICS_ARE_FONT_DERIVED is now understating \
+                 it — which makes every gate here refuse a board it could \
+                 attribute."
+            );
+            assert_eq!(
+                rustkit_layout::TEXT_SHAPER_BACKEND, "stub-0.5em",
+                "the name carried into the capture must say it is a stub, since \
+                 that string is what a reader of the board sees"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod control_semantics_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, DisplayList, Rect};
+
+    /// The page's display list, one `Debug` string per command — what
+    /// `--dump-display-list` writes for a control, and what the renderer is
+    /// handed.
+    fn painted(html: &str) -> Vec<String> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        root.layout(&cb);
+        DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect()
+    }
+
+    #[test]
+    fn a_password_value_never_reaches_the_display_list() {
+        // The control-paint path dropped `input_type`, so a password's value
+        // was handed to the renderer (and written to every display-list
+        // dump) as plain text. Chrome paints one bullet per character.
+        let ops = painted(
+            r#"<!DOCTYPE html><body><input type="password" value="hunter2secret">
+               <input type="PASSWORD" value="swordfish">
+               <input type="text" value="visible text">
+               <input type="password" placeholder="Your password"></body>"#,
+        );
+        let all = ops.join("\n");
+        assert!(
+            !all.contains("hunter2secret"),
+            "password value in the display list:\n{all}"
+        );
+        assert!(
+            !all.contains("swordfish"),
+            "type is ASCII case-insensitive:\n{all}"
+        );
+        let bullets = |n: usize| format!("value: \"{}\"", "\u{2022}".repeat(n));
+        assert!(
+            all.contains(&bullets(13)),
+            "13 characters paint 13 bullets:\n{all}"
+        );
+        assert!(
+            all.contains(&bullets(9)),
+            "9 characters paint 9 bullets:\n{all}"
+        );
+        // Guards: other input types and a password's placeholder still paint.
+        assert!(all.contains("visible text"));
+        assert!(all.contains("Your password"));
+    }
+
+    #[test]
+    fn a_list_box_reaches_paint_with_every_option_and_its_selection() {
+        // `<select size>` / `<select multiple>` painted as a text input
+        // showing one option. Chrome paints a row per option and highlights
+        // the selected ones.
+        let ops = painted(
+            r#"<!DOCTYPE html><body>
+               <select multiple size="3"><option>Item 1</option><option selected>Item 2</option>
+                 <option selected>Item 3</option><option>Item 4</option></select>
+               <select size="2"><option selected>one</option><option selected>two</option><option>three</option></select>
+               <select size="4"><option>alpha</option><option>beta</option></select>
+               <select multiple><option>m1</option><option>m2</option></select></body>"#,
+        );
+        let boxes: Vec<&String> = ops.iter().filter(|o| o.starts_with("ListBox")).collect();
+        assert_eq!(boxes.len(), 4, "four list boxes, got:\n{}", ops.join("\n"));
+        assert!(
+            boxes[0].contains(r#"options: ["Item 1", "Item 2", "Item 3", "Item 4"]"#),
+            "{}",
+            boxes[0]
+        );
+        assert!(
+            boxes[0].contains("selected: [1, 2]"),
+            "multiple keeps both: {}",
+            boxes[0]
+        );
+        assert!(
+            boxes[1].contains("selected: [1]"),
+            "single keeps the last: {}",
+            boxes[1]
+        );
+        assert!(
+            boxes[2].contains("selected: []"),
+            "no fallback to the first option: {}",
+            boxes[2]
+        );
+        assert!(
+            boxes[3].contains(r#"options: ["m1", "m2"]"#),
+            "{}",
+            boxes[3]
+        );
+        assert!(boxes[3].contains("selected: []"), "{}", boxes[3]);
+    }
+
+    #[test]
+    fn a_drop_down_reaches_paint_as_a_menu_list() {
+        // A `<select>` and an `<input>` were the same command, so the
+        // renderer could not draw the arrow.
+        let ops = painted(
+            r#"<!DOCTYPE html><body>
+               <select><option>hours</option><option selected>days</option></select>
+               <input value="typed"><textarea>notes</textarea></body>"#,
+        );
+        let kind_of = |value: &str| {
+            let op = ops
+                .iter()
+                .find(|o| o.contains(&format!("value: \"{value}\"")))
+                .unwrap_or_else(|| panic!("no control showing {value}:\n{}", ops.join("\n")));
+            ["MenuList", "TextArea", "Password", "Text"]
+                .into_iter()
+                .find(|k| op.contains(&format!("kind: {k}")))
+                .unwrap_or("none")
+        };
+        assert_eq!(kind_of("days"), "MenuList");
+        assert_eq!(kind_of("typed"), "Text");
+        assert_eq!(kind_of("notes"), "TextArea");
+    }
+}
