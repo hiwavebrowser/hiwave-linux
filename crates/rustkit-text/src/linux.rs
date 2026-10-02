@@ -1003,7 +1003,20 @@ mod weight_tests {
         let d = desc("sans-serif", 16.0, 400);
         let adv = b.advance_widths("\u{1F600}", &d).unwrap();
         assert!(adv[0] > 4.0, "{adv:?}");
-        let (rgba, w, h, ..) = b.rasterize_color_glyph('\u{1F600}', &d).expect("color glyph");
+        let Some((rgba, w, h, ..)) = b.rasterize_color_glyph('\u{1F600}', &d) else {
+            let src = b.source_descriptor('\u{1F600}', &d);
+            let why = match b.get_face(&src) {
+                Err(e) => format!("get_face failed: {e:?}"),
+                Ok(f) if !f.has_color() => format!("{} has no color flag", src.family),
+                Ok(f) => format!(
+                    "{} load: {:?}, pixel mode: {:?}",
+                    src.family,
+                    f.load_char(0x1F600, freetype::face::LoadFlag::COLOR | freetype::face::LoadFlag::RENDER),
+                    f.glyph().bitmap().pixel_mode()
+                ),
+            };
+            panic!("no color glyph: {why}");
+        };
         assert_eq!(rgba.len(), (w * h * 4) as usize);
         assert!(rgba.chunks(4).any(|p| p[3] > 0));
     }
