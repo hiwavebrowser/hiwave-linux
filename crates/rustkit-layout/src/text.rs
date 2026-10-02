@@ -1681,9 +1681,13 @@ impl TextShaper {
             x_offset += advance;
         }
 
+        // Blink stores an inline's width as a LayoutUnit (1/64 px), rounding a
+        // measured text width up; the small epsilon keeps an already-exact
+        // multiple of 1/64 from being bumped by float noise.
+        let layout_width = (x_offset * 64.0 - 1e-3).ceil() / 64.0;
         let base = TextMetrics::with_font_size(size);
         let metrics = TextMetrics {
-            width: x_offset,
+            width: layout_width,
             height: ascent + descent + gap,
             ascent,
             descent,

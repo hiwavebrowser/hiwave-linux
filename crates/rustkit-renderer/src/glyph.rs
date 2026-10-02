@@ -289,6 +289,26 @@ impl GlyphCache {
         &self.color_bind_group
     }
 
+    /// The shared FreeType backend, created on first use. None after a failed
+    /// init (callers fall back to rectangles / no glyph).
+    #[cfg(target_os = "linux")]
+    fn ft_backend(&mut self) -> Option<&mut rustkit_text::linux::LinuxTextBackend> {
+        if self.ft_failed {
+            return None;
+        }
+        if self.ft_backend.is_none() {
+            match rustkit_text::linux::LinuxTextBackend::new() {
+                Ok(b) => self.ft_backend = Some(b),
+                Err(e) => {
+                    tracing::warn!("FreeType backend init failed; rect fallback: {e:?}");
+                    self.ft_failed = true;
+                    return None;
+                }
+            }
+        }
+        self.ft_backend.as_mut()
+    }
+
     /// Get or rasterize a COLOR glyph (emoji) into the RGBA atlas. Returns the
     /// atlas entry (tex_coords into the color atlas), or None if the platform
     /// or font can't produce a color glyph for this codepoint.
@@ -319,7 +339,19 @@ impl GlyphCache {
             );
             rasterizer.rasterize_char_color(key.codepoint)
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        let raster = self.ft_backend().and_then(|backend| {
+            let descriptor = rustkit_text::FontDescriptor {
+                family: backend.resolve_family(
+                    rustkit_layout::text::FontFamilyChain::from_css_value(&key.font_family).all_families(),
+                ),
+                weight: rustkit_text::FontWeight(key.font_weight as u32),
+                style: rustkit_text::FontStyle::Normal,
+                size: key.font_size as f32 / 10.0,
+            };
+            backend.rasterize_color_glyph(key.codepoint, &descriptor)
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let raster: Option<(Vec<u8>, u32, u32, f32, f32, f32)> = None;
 
         let (rgba, gw, gh, advance, bearing_x, bearing_y) = raster?;
@@ -484,21 +516,8 @@ impl GlyphCache {
             // below negates for the baseline-relative entry contract.
             use rustkit_text::{FontDescriptor, FontStyle, FontWeight};
 
-            if self.ft_failed {
-                None
-            } else {
-                if self.ft_backend.is_none() {
-                    match rustkit_text::linux::LinuxTextBackend::new() {
-                        Ok(b) => self.ft_backend = Some(b),
-                        Err(e) => {
-                            tracing::warn!(
-                                "FreeType backend init failed; rect fallback: {e:?}"
-                            );
-                            self.ft_failed = true;
-                        }
-                    }
-                }
-                self.ft_backend.as_mut().and_then(|backend| {
+            {
+                self.ft_backend().and_then(|backend| {
                     let descriptor = FontDescriptor {
                         family: backend.resolve_family(
                             rustkit_layout::text::FontFamilyChain::from_css_value(&key.font_family).all_families(),
