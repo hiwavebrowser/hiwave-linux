@@ -1016,6 +1016,10 @@ mod weight_tests {
                 ),
             };
             eprintln!("FAILED emoji diagnosis: {why}");
+            let fam = b.resolve_family(["Noto Color Emoji"]);
+            let ed = desc(&fam, 16.0, 400);
+            eprintln!("FAILED emoji diagnosis2: resolved={fam:?} has_glyph={} face_ok={}", b.has_glyph(&ed, '\u{1F600}'), b.get_face(&ed).is_ok());
+            eprintln!("FAILED emoji diagnosis3: is_emoji={}", is_emoji('\u{1F600}'));
             panic!("no color glyph: {why}");
         };
         assert_eq!(rgba.len(), (w * h * 4) as usize);
