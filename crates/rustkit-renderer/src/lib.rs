@@ -4805,11 +4805,9 @@ impl Renderer {
             + layout_ascent.unwrap_or_else(|| Self::fallback_run_ascent(font_family, font_size));
 
         for (char_idx, ch) in text.chars().enumerate() {
+            let (pen_x, subpixel_phase) = glyph::pen_and_phase(cursor_x);
             let key = GlyphKey {
-                // FROZEN AT 0 until the rasterizer can draw at a phase --
-                // see GlyphKey::subpixel_phase. Pixels are bit-identical to
-                // before this field existed.
-                subpixel_phase: 0,
+                subpixel_phase,
                 codepoint: ch,
                 font_family: font_family.to_string(),
                 font_size: (font_size * 10.0) as u32,
@@ -4818,7 +4816,7 @@ impl Renderer {
             };
 
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
-                let glyph_x = cursor_x + entry.offset[0];
+                let glyph_x = pen_x + entry.offset[0];
                 let glyph_y = baseline + entry.offset[1];
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                 let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
@@ -4998,11 +4996,9 @@ impl Renderer {
         let atlas_size = self.glyph_cache.atlas_size() as f32;
 
         for (char_idx, ch) in text.chars().enumerate() {
+            let (pen_x, subpixel_phase) = glyph::pen_and_phase(cursor_x);
             let key = GlyphKey {
-                // FROZEN AT 0 until the rasterizer can draw at a phase --
-                // see GlyphKey::subpixel_phase. Pixels are bit-identical to
-                // before this field existed.
-                subpixel_phase: 0,
+                subpixel_phase,
                 codepoint: ch,
                 font_family: font_family.to_string(),
                 font_size: (font_size * 10.0) as u32,
@@ -5064,7 +5060,7 @@ impl Renderer {
 
             // Clone the entry to avoid borrow issues
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
-                let glyph_x = cursor_x + entry.offset[0];
+                let glyph_x = pen_x + entry.offset[0];
                 let glyph_y = baseline + entry.offset[1];
 
                 // PAINT-0: sample chars only — x (ex-height), H (cap), g

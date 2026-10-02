@@ -57,6 +57,22 @@ pub fn subpixel_phase_for(x: f32) -> u8 {
     phase.clamp(0, SUBPIXEL_QUANTIZE as i32 - 1) as u8
 }
 
+/// Where a glyph whose pen sits at device `x` is drawn: the integer column to
+/// anchor the bitmap at, and the quarter-pixel phase to rasterize it at.
+/// Linux rasterizes at the phase (Skia subpixel positioning); other platforms
+/// still draw a phase-0 bitmap at the exact fractional x.
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn pen_and_phase(x: f32) -> (f32, u8) {
+    let q = (x * SUBPIXEL_QUANTIZE as f32).round() as i64;
+    let n = SUBPIXEL_QUANTIZE as i64;
+    (q.div_euclid(n) as f32, q.rem_euclid(n) as u8)
+}
+
+#[cfg(any(target_os = "macos", windows))]
+pub fn pen_and_phase(x: f32) -> (f32, u8) {
+    (x, 0)
+}
+
 /// Cached glyph entry.
 #[derive(Debug, Clone)]
 pub struct GlyphEntry {
@@ -495,7 +511,12 @@ impl GlyphCache {
                         },
                         size: font_size,
                     };
-                    match backend.rasterize_glyph(key.codepoint, &descriptor) {
+                    match backend.rasterize_glyph_at_phase(
+                        key.codepoint,
+                        &descriptor,
+                        key.subpixel_phase,
+                        SUBPIXEL_QUANTIZE,
+                    ) {
                         Ok(g) if g.width == 0 || g.height == 0 => {
                             // Whitespace: no ink, real advance. One transparent
                             // pixel keeps the shared tail's texture upload in
