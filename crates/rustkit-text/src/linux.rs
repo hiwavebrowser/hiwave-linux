@@ -1015,6 +1015,7 @@ mod weight_tests {
                     f.glyph().bitmap().pixel_mode()
                 ),
             };
+            eprintln!("FAILED emoji diagnosis: {why}");
             panic!("no color glyph: {why}");
         };
         assert_eq!(rgba.len(), (w * h * 4) as usize);
