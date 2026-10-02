@@ -161,7 +161,113 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// LINUX (declared divergence): the registry holds the raw bytes and
+/// `LinuxTextBackend::get_face` opens them as FreeType memory faces, so the
+/// same face measures (layout) and paints (renderer). FreeType validates the
+/// container at install time; a face it rejects is dropped and counted, never
+/// kept as a name with no glyphs. FreeType reads TrueType, OpenType and WOFF;
+/// WOFF2 needs a brotli-enabled FreeType and installs as nothing otherwise.
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::WebFontFace;
+    use std::collections::HashMap;
+    use std::sync::{Arc, OnceLock, RwLock};
+
+    struct Face {
+        weight: u16,
+        italic: bool,
+        data: Arc<Vec<u8>>,
+    }
+
+    struct Active {
+        tag: String,
+        families: HashMap<String, Vec<Face>>,
+    }
+
+    fn slot() -> &'static RwLock<Active> {
+        static SLOT: OnceLock<RwLock<Active>> = OnceLock::new();
+        SLOT.get_or_init(|| {
+            RwLock::new(Active {
+                tag: String::new(),
+                families: HashMap::new(),
+            })
+        })
+    }
+
+    fn key(family: &str) -> String {
+        family.trim().to_ascii_lowercase()
+    }
+
+    pub fn install(tag: &str, faces: &[WebFontFace]) -> usize {
+        {
+            let active = slot().read().unwrap();
+            if !tag.is_empty() && active.tag == tag {
+                return active.families.values().map(Vec::len).sum();
+            }
+        }
+        let library = freetype::Library::init().ok();
+        let mut families: HashMap<String, Vec<Face>> = HashMap::new();
+        let mut accepted = 0usize;
+        for face in faces {
+            if face.data.len() < 12 {
+                continue;
+            }
+            let parses = library
+                .as_ref()
+                .map(|lib| lib.new_memory_face((*face.data).clone(), 0).is_ok())
+                .unwrap_or(false);
+            if !parses {
+                continue;
+            }
+            accepted += 1;
+            families.entry(key(&face.family)).or_default().push(Face {
+                weight: face.weight,
+                italic: face.italic,
+                data: face.data.clone(),
+            });
+        }
+        let mut active = slot().write().unwrap();
+        active.tag = tag.to_string();
+        active.families = families;
+        super::bump_generation();
+        accepted
+    }
+
+    pub fn clear() {
+        let mut active = slot().write().unwrap();
+        if !active.tag.is_empty() || !active.families.is_empty() {
+            super::bump_generation();
+        }
+        active.tag.clear();
+        active.families.clear();
+    }
+
+    pub fn is_installed(family: &str) -> bool {
+        slot().read().unwrap().families.contains_key(&key(family))
+    }
+
+    fn select<'a>(faces: &'a [Face], weight: u16, italic: bool) -> Option<&'a Face> {
+        faces.iter().min_by_key(|f| {
+            let style_penalty: u32 = if f.italic == italic { 0 } else { 10_000 };
+            style_penalty + (f.weight as i32 - weight as i32).unsigned_abs()
+        })
+    }
+
+    /// The bytes of the registered face of `family` closest to the requested style.
+    pub fn lookup_data(family: &str, weight: u16, italic: bool) -> Option<Arc<Vec<u8>>> {
+        let active = slot().read().unwrap();
+        let faces = active.families.get(&key(family))?;
+        select(faces, weight, italic).map(|f| f.data.clone())
+    }
+
+    pub fn lookup_descriptor(family: &str, weight: u16, italic: bool) -> Option<(u16, bool)> {
+        let active = slot().read().unwrap();
+        let faces = active.families.get(&key(family))?;
+        select(faces, weight, italic).map(|f| (f.weight, f.italic))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod imp {
     use super::WebFontFace;
 
@@ -186,6 +292,67 @@ pub use imp::{clear, install, is_installed, lookup_descriptor};
 
 #[cfg(target_os = "macos")]
 pub use imp::lookup;
+
+#[cfg(target_os = "linux")]
+pub use imp::lookup_data;
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    const AHEM: &[u8] = include_bytes!("../tests/fixtures/Ahem.ttf");
+
+    fn ahem_face(family: &str, weight: u16, italic: bool) -> WebFontFace {
+        WebFontFace {
+            family: family.to_string(),
+            weight,
+            italic,
+            data: Arc::new(AHEM.to_vec()),
+        }
+    }
+
+    // The slot is process-wide; every test holds this for its whole body.
+    fn slot_guard() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn an_installed_face_resolves_by_family_case_insensitively() {
+        let _slot = slot_guard();
+        let faces = [ahem_face("WebfontsTestAhem", 400, false)];
+        assert_eq!(install("l1", &faces), 1, "FreeType accepts the TrueType Ahem");
+        let data = lookup_data("WEBFONTSTESTAHEM", 400, false).expect("registered family resolves");
+        assert_eq!(data.len(), AHEM.len());
+        assert!(!is_installed("DejaVu Sans"), "system fonts are not web fonts");
+    }
+
+    #[test]
+    fn garbage_bytes_are_rejected_not_registered() {
+        let _slot = slot_guard();
+        let junk = WebFontFace {
+            family: "WebfontsTestJunk".to_string(),
+            weight: 400,
+            italic: false,
+            data: Arc::new(vec![0u8; 64]),
+        };
+        assert_eq!(install("l2", &[junk]), 0);
+        assert!(!is_installed("WebfontsTestJunk"));
+    }
+
+    #[test]
+    fn installing_a_different_set_bumps_the_generation() {
+        let _slot = slot_guard();
+        install("l3a", &[ahem_face("WebfontsTestGen", 400, false)]);
+        let before = generation();
+        install("l3a", &[ahem_face("WebfontsTestGen", 400, false)]);
+        assert_eq!(generation(), before, "re-installing the same tag is a no-op");
+        install("l3b", &[ahem_face("WebfontsTestGen", 700, false)]);
+        assert!(generation() > before);
+        assert_eq!(lookup_descriptor("WebfontsTestGen", 400, false), Some((700, false)));
+    }
+}
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {

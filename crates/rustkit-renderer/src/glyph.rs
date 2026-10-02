@@ -81,6 +81,9 @@ pub struct GlyphCache {
     /// logging per glyph.
     #[cfg(all(unix, not(target_os = "macos")))]
     ft_failed: bool,
+    /// Web-font generation the atlas was filled under: a family name can map
+    /// to a different face after a new set installs, so the atlas is dropped.
+    webfont_generation: u64,
     atlas: wgpu::Texture,
     _atlas_view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
@@ -239,6 +242,7 @@ impl GlyphCache {
             ft_backend: None,
             #[cfg(all(unix, not(target_os = "macos")))]
             ft_failed: false,
+            webfont_generation: rustkit_text::webfonts::generation(),
             atlas_size,
             entries: HashMap::new(),
             next_x: 1, // Start at 1 to avoid edge artifacts
@@ -374,6 +378,11 @@ impl GlyphCache {
         queue: &wgpu::Queue,
         key: &GlyphKey,
     ) -> Option<GlyphEntry> {
+        let generation = rustkit_text::webfonts::generation();
+        if generation != self.webfont_generation {
+            self.clear();
+            self.webfont_generation = generation;
+        }
         if let Some(entry) = self.entries.get(key) {
             return Some(entry.clone());
         }

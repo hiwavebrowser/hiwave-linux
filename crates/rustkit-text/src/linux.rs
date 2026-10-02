@@ -34,6 +34,9 @@ pub struct LinuxTextBackend {
     default_size: f32,
     /// Candidate name -> installed family (None = not installed).
     family_cache: HashMap<String, Option<String>>,
+    /// `webfonts::generation()` the caches were filled under; a change means a
+    /// family name may now resolve to a different face.
+    webfont_generation: u64,
 }
 
 impl LinuxTextBackend {
@@ -55,7 +58,17 @@ impl LinuxTextBackend {
             face_cache: HashMap::new(),
             default_size: 16.0,
             family_cache: HashMap::new(),
+            webfont_generation: crate::webfonts::generation(),
         })
+    }
+
+    fn sync_webfonts(&mut self) {
+        let generation = crate::webfonts::generation();
+        if generation != self.webfont_generation {
+            self.face_cache.clear();
+            self.family_cache.clear();
+            self.webfont_generation = generation;
+        }
     }
 
     /// Find a font file matching the descriptor.
@@ -92,12 +105,22 @@ impl LinuxTextBackend {
             }
         );
 
+        self.sync_webfonts();
         if !self.face_cache.contains_key(&key) {
-            let path = self.find_font(descriptor)?;
-            let face = self
-                .ft_library
-                .new_face(&path, 0)
-                .map_err(|e| TextError::FontNotFound(format!("Failed to load font: {:?}", e)))?;
+            let italic = !matches!(descriptor.style, FontStyle::Normal);
+            let web = crate::webfonts::lookup_data(&descriptor.family, descriptor.weight.0 as u16, italic);
+            let face = match web {
+                Some(data) => self
+                    .ft_library
+                    .new_memory_face((*data).clone(), 0)
+                    .map_err(|e| TextError::FontNotFound(format!("Failed to load web font: {:?}", e)))?,
+                None => {
+                    let path = self.find_font(descriptor)?;
+                    self.ft_library
+                        .new_face(&path, 0)
+                        .map_err(|e| TextError::FontNotFound(format!("Failed to load font: {:?}", e)))?
+                }
+            };
             self.face_cache.insert(key.clone(), face);
         }
 
@@ -196,10 +219,16 @@ impl LinuxTextBackend {
     /// both resolve through this so the face that is measured is the face that
     /// is painted.
     pub fn resolve_family<'a>(&mut self, candidates: impl IntoIterator<Item = &'a str>) -> String {
+        self.sync_webfonts();
         for raw in candidates {
             let name = raw.trim().trim_matches(|c| c == '"' || c == '\'');
             if name.is_empty() {
                 continue;
+            }
+            // A face the document registered via @font-face outranks every
+            // platform lookup — the family may exist nowhere else.
+            if crate::webfonts::is_installed(name) {
+                return name.to_string();
             }
             if let Some(hit) = self.family_cache.get(name) {
                 if let Some(hit) = hit {
@@ -417,6 +446,40 @@ mod tests {
         let back: f32 = b.advance_widths("Hello", &desc("sans-serif", 10.0, 400)).unwrap().iter().sum();
         assert!((large / small - 2.0).abs() < 0.01, "20px must be twice 10px, got {small} vs {large}");
         assert!((back - small).abs() < 0.001, "returning to 10px must restore 10px widths");
+    }
+
+    #[test]
+    fn a_registered_web_font_is_measured_from_its_own_bytes() {
+        const AHEM: &[u8] = include_bytes!("../tests/fixtures/Ahem.ttf");
+        let mut backend = LinuxTextBackend::new().expect("backend");
+        let family = "WebfontsLinuxAhemProbe";
+        assert_eq!(backend.resolve_family([family]), "sans-serif", "not installed yet");
+
+        crate::webfonts::install(
+            "linux-probe",
+            &[crate::webfonts::WebFontFace {
+                family: family.to_string(),
+                weight: 400,
+                italic: false,
+                data: std::sync::Arc::new(AHEM.to_vec()),
+            }],
+        );
+        // Second call after the install: the stale "not installed" entry must
+        // not be served from the family cache.
+        assert_eq!(backend.resolve_family([family]), family);
+        let descriptor = FontDescriptor {
+            family: family.to_string(),
+            weight: FontWeight(400),
+            style: FontStyle::Normal,
+            size: 20.0,
+        };
+        let adv = backend.advance_widths("XX", &descriptor).expect("web face measures");
+        assert!(
+            adv.len() == 2 && adv.iter().all(|a| (a - 20.0).abs() < 0.01),
+            "Ahem advances are 1em (16.16 fixed): {adv:?}"
+        );
+        crate::webfonts::clear();
+        assert_eq!(backend.resolve_family([family]), "sans-serif", "cleared set is forgotten");
     }
 
     #[test]
