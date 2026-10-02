@@ -186,6 +186,12 @@ fn main() {
 /// The user agent the shipping RustKit content view sends
 /// (hiwave-app/src/webview_rustkit.rs). Live sites branch on it, so a URL
 /// capture must present as the product does, not as a test tool.
+///
+/// On Linux that is the honest platform string (rustkit_http::default_user_agent):
+/// claiming Macintosh/Safari from a Linux build is a lie live sites will act on.
+#[cfg(target_os = "linux")]
+const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) HiWave/1.0 RustKit/1.0";
+#[cfg(not(target_os = "linux"))]
 const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0";
 
 fn run_capture(args: &Args) -> CaptureResult {
