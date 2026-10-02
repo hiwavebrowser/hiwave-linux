@@ -996,32 +996,19 @@ mod weight_tests {
     #[test]
     fn an_emoji_has_an_advance_and_color_artwork_when_the_font_is_installed() {
         let mut b = LinuxTextBackend::new().unwrap();
-        let installed = b.resolve_family(["Noto Color Emoji"]).contains("Emoji");
-        if !installed {
+        if !b.resolve_family(["Noto Color Emoji"]).contains("Emoji") {
             return;
         }
-        let d = desc("sans-serif", 16.0, 400);
+        // A primary face without the glyph, so the color fallback is what's
+        // under test. (DejaVu Sans carries a monochrome U+1F600.)
+        let primary = b.resolve_family(["Liberation Sans"]);
+        let d = desc(&primary, 16.0, 400);
+        if b.has_glyph(&d, '\u{1F600}') {
+            return;
+        }
         let adv = b.advance_widths("\u{1F600}", &d).unwrap();
         assert!(adv[0] > 4.0, "{adv:?}");
-        let Some((rgba, w, h, ..)) = b.rasterize_color_glyph('\u{1F600}', &d) else {
-            let src = b.source_descriptor('\u{1F600}', &d);
-            let why = match b.get_face(&src) {
-                Err(e) => format!("get_face failed: {e:?}"),
-                Ok(f) if !f.has_color() => format!("{} has no color flag", src.family),
-                Ok(f) => format!(
-                    "{} load: {:?}, pixel mode: {:?}",
-                    src.family,
-                    f.load_char(0x1F600, freetype::face::LoadFlag::COLOR | freetype::face::LoadFlag::RENDER),
-                    f.glyph().bitmap().pixel_mode()
-                ),
-            };
-            eprintln!("FAILED emoji diagnosis: {why}");
-            let fam = b.resolve_family(["Noto Color Emoji"]);
-            let ed = desc(&fam, 16.0, 400);
-            eprintln!("FAILED emoji diagnosis2: resolved={fam:?} has_glyph={} face_ok={}", b.has_glyph(&ed, '\u{1F600}'), b.get_face(&ed).is_ok());
-            eprintln!("FAILED emoji diagnosis3: is_emoji={}", is_emoji('\u{1F600}'));
-            panic!("no color glyph: {why}");
-        };
+        let (rgba, w, h, ..) = b.rasterize_color_glyph('\u{1F600}', &d).expect("color glyph");
         assert_eq!(rgba.len(), (w * h * 4) as usize);
         assert!(rgba.chunks(4).any(|p| p[3] > 0));
     }
