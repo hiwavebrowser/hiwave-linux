@@ -166,7 +166,10 @@ pub mod linux;
 
 
 #[cfg(windows)]
-pub use win::{FontCollection, FontFace, FontFamily, Font};
+pub use win::{face_by_id, intern_face, Font, FontCollection, FontFace, FontFamily};
+
+pub mod emoji;
+pub use emoji::is_emoji;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
