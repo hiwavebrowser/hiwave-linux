@@ -30,6 +30,9 @@ mod flex_item_relayout_tests;
 #[cfg(test)]
 mod flex_resolve_tests;
 
+#[cfg(test)]
+mod shaped_run_tests;
+
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
     calculate_caret_position, calculate_selection_rects, render_button, render_checkbox,
@@ -57,8 +60,9 @@ pub use scroll::{
 pub use text::{
     apply_text_transform, collapse_whitespace, FontCache, FontCacheKey, FontDisplay, FontFaceRule,
     FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
-    TextMetrics, TextShaper, TopLevelSite,
+    TextMetrics, TextShaper, TopLevelSite, TEXT_METRICS_ARE_FONT_DERIVED, TEXT_SHAPER_BACKEND,
 };
+pub use text::{FaceIdentity, FaceSynthesis, GlyphRun, RunGlyph};
 
 use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
 use std::cmp::Ordering;
@@ -353,7 +357,7 @@ pub(crate) fn form_control_intrinsic_size(
                 // Inline listbox: 16px per visible row + 2px border.
                 (
                     widest + 2.0 * ua_scale,
-                    (16.0 * *size as f32 + 2.0) * ua_scale,
+                    list_box_row_height(font_size) * *size as f32 + 2.0 * ua_scale,
                 )
             } else {
                 // Dropdown: widest option plus the arrow well.
@@ -1263,7 +1267,41 @@ pub enum FormControlType {
         /// size > 1 (or `multiple`) renders as an inline listbox, not a
         /// dropdown — Chrome CfT-148 builds 16px per visible row + 2px.
         size: u32,
+        /// Every selected option, ascending. A list box paints each one:
+        /// `multiple` can carry several, and a list box whose options have
+        /// no `selected` carries none (HTML §4.10.7 — only a drop-down
+        /// falls back to its first option).
+        selected: Vec<usize>,
     },
+}
+
+/// What a `DisplayCommand::TextInput` is, beyond a line of text in a frame.
+/// The control's type used to stop at layout: every text-like control
+/// reached paint as the same command, so a password painted its value and a
+/// `<select>` painted as an input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextControlKind {
+    /// `<input>` of a text-like type.
+    #[default]
+    Text,
+    /// `<input type=password>`. `value` holds one bullet per character;
+    /// the characters themselves never enter the display list.
+    Password,
+    /// `<textarea>`.
+    TextArea,
+    /// A drop-down `<select>`: `value` is the selected option's label and
+    /// the painter adds the arrow.
+    MenuList,
+}
+
+/// The glyph a password field paints for each character of its value
+/// (Chrome's `-webkit-text-security: disc`).
+pub const PASSWORD_MASK: char = '\u{2022}';
+
+/// Height of one option row in a list box at `font_size` (Chrome CfT-148:
+/// 16px at the 13.333px UA control font).
+fn list_box_row_height(font_size: f32) -> f32 {
+    16.0 * font_size / (40.0 / 3.0)
 }
 
 /// Stacking context for z-index ordering.
@@ -1434,7 +1472,7 @@ fn is_zero_length(l: &Length) -> bool {
 }
 
 /// A layout box in the layout tree.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LayoutBox {
     /// Box type.
     pub box_type: BoxType,
@@ -5921,32 +5959,187 @@ pub struct HitTestAncestor {
     pub position: Position,
 }
 
-/// Border radius values for each corner.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BorderRadius {
-    pub top_left: f32,
-    pub top_right: f32,
-    pub bottom_right: f32,
-    pub bottom_left: f32,
+/// One corner's used radii in px: the horizontal and vertical semi-axes of
+/// its quarter ellipse. A circle has `h == v`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CornerRadius {
+    pub h: f32,
+    pub v: f32,
 }
 
-impl BorderRadius {
-    /// Create uniform border radius.
-    pub fn uniform(radius: f32) -> Self {
-        Self {
-            top_left: radius,
-            top_right: radius,
-            bottom_right: radius,
-            bottom_left: radius,
+impl CornerRadius {
+    /// A quarter circle of radius `r`.
+    pub fn circular(r: f32) -> Self {
+        Self { h: r, v: r }
+    }
+
+    /// A corner with either radius zero is square (CSS Backgrounds 3 §5.1).
+    pub fn is_zero(&self) -> bool {
+        self.h <= 0.0 || self.v <= 0.0
+    }
+
+    /// The radii of the curve `dx` in from the vertical edge and `dy` in from
+    /// the horizontal one: the padding edge for border widths (§5.2). Square
+    /// once either inset swallows its radius.
+    pub fn inset(&self, dx: f32, dy: f32) -> Self {
+        let inner = Self {
+            h: (self.h - dx).max(0.0),
+            v: (self.v - dy).max(0.0),
+        };
+        if inner.is_zero() {
+            Self::default()
+        } else {
+            inner
         }
     }
 
-    /// Check if all radii are zero (no rounding).
+    /// The radii of a shadow's corner when the box's shape is grown by
+    /// `spread` px, or shrunk by a negative one (CSS Backgrounds 3 §6.1.1).
+    ///
+    /// A radius grows by the spread. One smaller than the spread grows by
+    /// less, `spread * (1 + (r / spread - 1)^3)`, so a nearly square corner
+    /// stays nearly square and a square one stays square.
+    pub fn spread(&self, spread: f32) -> Self {
+        if self.is_zero() || spread == 0.0 {
+            return *self;
+        }
+        let grow = |r: f32| {
+            if spread > 0.0 && r < spread {
+                r + spread * (1.0 + (r / spread - 1.0).powi(3))
+            } else {
+                (r + spread).max(0.0)
+            }
+        };
+        let out = Self {
+            h: grow(self.h),
+            v: grow(self.v),
+        };
+        if out.is_zero() {
+            Self::default()
+        } else {
+            out
+        }
+    }
+}
+
+/// Border radius values for each corner.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BorderRadius {
+    pub top_left: CornerRadius,
+    pub top_right: CornerRadius,
+    pub bottom_right: CornerRadius,
+    pub bottom_left: CornerRadius,
+}
+
+impl BorderRadius {
+    /// Create uniform, circular border radius.
+    pub fn uniform(radius: f32) -> Self {
+        let corner = CornerRadius::circular(radius);
+        Self {
+            top_left: corner,
+            top_right: corner,
+            bottom_right: corner,
+            bottom_left: corner,
+        }
+    }
+
+    /// Check if every corner is square (no rounding).
     pub fn is_zero(&self) -> bool {
-        self.top_left == 0.0
-            && self.top_right == 0.0
-            && self.bottom_right == 0.0
-            && self.bottom_left == 0.0
+        self.top_left.is_zero()
+            && self.top_right.is_zero()
+            && self.bottom_right.is_zero()
+            && self.bottom_left.is_zero()
+    }
+
+    /// The radii as they are used on a `width` x `height` box: negative
+    /// values dropped, a corner with one zero radius made square, and all of
+    /// them scaled by one factor so that adjacent corners do not overlap
+    /// (CSS Backgrounds 3 §5.5):
+    /// `f = min(1, width / (two radii along a horizontal side), height / (two
+    /// radii along a vertical side))`.
+    ///
+    /// One factor for all eight radii keeps every corner's shape. It is
+    /// applied as `side * (r / sum)` for the side that overlaps most, so two
+    /// equal radii on that side come out at exactly half of it: four equal
+    /// circular radii give `min(r, width / 2, height / 2)` to the bit.
+    pub fn fitted(&self, width: f32, height: f32) -> Self {
+        let clean = |c: CornerRadius| {
+            let c = CornerRadius {
+                h: c.h.max(0.0),
+                v: c.v.max(0.0),
+            };
+            if c.is_zero() {
+                CornerRadius::default()
+            } else {
+                c
+            }
+        };
+        let (tl, tr, br, bl) = (
+            clean(self.top_left),
+            clean(self.top_right),
+            clean(self.bottom_right),
+            clean(self.bottom_left),
+        );
+        // The side whose radii overlap most: (side length, sum of its two).
+        let mut tightest: Option<(f32, f32)> = None;
+        for (side, sum) in [
+            (width.max(0.0), tl.h + tr.h),
+            (width.max(0.0), bl.h + br.h),
+            (height.max(0.0), tl.v + bl.v),
+            (height.max(0.0), tr.v + br.v),
+        ] {
+            let tighter = match tightest {
+                Some((s, total)) => side / sum < s / total,
+                None => true,
+            };
+            if sum > side && tighter {
+                tightest = Some((side, sum));
+            }
+        }
+        let Some((side, sum)) = tightest else {
+            return Self {
+                top_left: tl,
+                top_right: tr,
+                bottom_right: br,
+                bottom_left: bl,
+            };
+        };
+        let scale = |c: CornerRadius| CornerRadius {
+            h: side * (c.h / sum),
+            v: side * (c.v / sum),
+        };
+        Self {
+            top_left: scale(tl),
+            top_right: scale(tr),
+            bottom_right: scale(br),
+            bottom_left: scale(bl),
+        }
+    }
+
+    /// The radii of the same box drawn `sx` times as wide and `sy` times as
+    /// tall.
+    pub fn scaled(&self, sx: f32, sy: f32) -> Self {
+        let scale = |c: CornerRadius| CornerRadius {
+            h: c.h * sx,
+            v: c.v * sy,
+        };
+        Self {
+            top_left: scale(self.top_left),
+            top_right: scale(self.top_right),
+            bottom_right: scale(self.bottom_right),
+            bottom_left: scale(self.bottom_left),
+        }
+    }
+
+    /// The radii of this shape grown by `spread` px on every side: the
+    /// corners of a box shadow (see `CornerRadius::spread`).
+    pub fn spread(&self, spread: f32) -> Self {
+        Self {
+            top_left: self.top_left.spread(spread),
+            top_right: self.top_right.spread(spread),
+            bottom_right: self.bottom_right.spread(spread),
+            bottom_left: self.bottom_left.spread(spread),
+        }
     }
 }
 
@@ -5991,6 +6184,16 @@ pub enum DisplayCommand {
         /// positions the baseline at y + ascent instead of consulting a
         /// third per-glyph shaper.
         ascent: Option<f32>,
+        /// SHAPED-RUN CONTRACT, slice S0
+        /// (docs/SHAPED_RUN_CONTRACT_2026-09-30.md): the frozen run layout
+        /// shaped for this line. When present, paint places ITS glyph ids
+        /// from ITS face and resolves no family list; `advances` is then
+        /// this run's per-character projection and `font_family` is kept
+        /// for the old path only. `None` where the run is outside the slice
+        /// (a fallback character, an emoji, a platform whose shaper does
+        /// not name its face) and on the legacy callers; paint then walks
+        /// `text` as before. A lane that edits the emitter keeps this field.
+        run: Option<std::sync::Arc<GlyphRun>>,
     },
     /// Draw text decoration line (underline, strikethrough, overline).
     TextDecoration {
@@ -6028,6 +6231,10 @@ pub enum DisplayCommand {
         size: BackgroundSize,
         /// Background position (0-1 range)
         position: (f32, f32),
+        /// Px added to the position: a `background-position` length
+        /// (`10px 20px`, a sprite's `-40px -30px`). Zero on an axis
+        /// positioned by a percentage or keyword.
+        offset: (f32, f32),
         /// Background repeat
         repeat: BackgroundRepeat,
     },
@@ -6045,6 +6252,10 @@ pub enum DisplayCommand {
         color: Color,
         /// Box rectangle (shadow is drawn outside this box, or inside if inset)
         rect: Rect,
+        /// The box's used border-box corner radii. The shadow's shape is
+        /// this shape moved and spread, and an outer shadow is clipped to
+        /// outside this shape (CSS Backgrounds 3 §6.1).
+        border_radius: BorderRadius,
         /// Whether this is an inset shadow
         inset: bool,
     },
@@ -6105,6 +6316,25 @@ pub enum DisplayCommand {
         /// a bare UA control). `rect` is the border box; the text line is
         /// seated inside border + padding, as Chrome's inner editor is.
         padding: [f32; 4],
+        /// Which control this is; see `TextControlKind`.
+        kind: TextControlKind,
+    },
+    /// Draw a list box (`<select>` with `size > 1` or `multiple`): one row
+    /// per option inside the frame, the selected rows highlighted, rows past
+    /// the frame clipped.
+    ListBox {
+        rect: Rect,
+        options: Vec<String>,
+        /// Indices into `options` of the selected rows.
+        selected: Vec<usize>,
+        row_height: f32,
+        font_size: f32,
+        font_family: String,
+        font_weight: u16,
+        text_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
     },
     /// Draw a button.
     Button {
@@ -6486,6 +6716,154 @@ impl BackgroundRepeat {
                 | BackgroundRepeat::Round
         )
     }
+}
+
+/// Where each copy of a background image goes: the tiles intersecting
+/// `container` for an image of `image_width` x `image_height`, sized by
+/// `size`, placed by `position` (0-1 per axis) plus `offset` px and laid
+/// out by `repeat`.
+/// Tiles are unclipped; the painter clips them to `container`.
+///
+/// Moved out of the renderer so the raster lane and the engine's SVG
+/// splice (a vector background is painted as commands, not a texture)
+/// place the same tiles.
+pub fn background_tiles(
+    container: Rect,
+    size: &BackgroundSize,
+    position: (f32, f32),
+    offset: (f32, f32),
+    repeat: BackgroundRepeat,
+    image_width: f32,
+    image_height: f32,
+) -> Vec<Rect> {
+    let mut tiles = Vec::new();
+    if image_width == 0.0 || image_height == 0.0 {
+        return tiles;
+    }
+
+    let (bg_width, bg_height) = size.compute_size(container, image_width, image_height);
+    if bg_width == 0.0 || bg_height == 0.0 {
+        return tiles;
+    }
+
+    let mut start_x = container.x + (container.width - bg_width) * position.0 + offset.0;
+    let mut start_y = container.y + (container.height - bg_height) * position.1 + offset.1;
+
+    // Adjust size and spacing for space/round modes
+    let mut adjusted_bg_width = bg_width;
+    let mut adjusted_bg_height = bg_height;
+    let mut spacing_x = 0.0_f32;
+    let mut spacing_y = 0.0_f32;
+
+    match repeat {
+        BackgroundRepeat::Space => {
+            // Calculate how many full images fit
+            let fit_count_x = (container.width / bg_width).floor().max(1.0);
+            let fit_count_y = (container.height / bg_height).floor().max(1.0);
+
+            // Calculate spacing to evenly distribute
+            if fit_count_x > 1.0 {
+                let total_image_width = fit_count_x * bg_width;
+                let remaining_space_x = container.width - total_image_width;
+                spacing_x = remaining_space_x / (fit_count_x - 1.0);
+            }
+
+            if fit_count_y > 1.0 {
+                let total_image_height = fit_count_y * bg_height;
+                let remaining_space_y = container.height - total_image_height;
+                spacing_y = remaining_space_y / (fit_count_y - 1.0);
+            }
+
+            // Start at container edge for space mode
+            start_x = container.x;
+            start_y = container.y;
+        }
+        BackgroundRepeat::Round => {
+            // Calculate integer repetitions by rounding
+            let repetitions_x = (container.width / bg_width).round().max(1.0);
+            let repetitions_y = (container.height / bg_height).round().max(1.0);
+
+            // Scale image to fit exactly
+            adjusted_bg_width = container.width / repetitions_x;
+            adjusted_bg_height = container.height / repetitions_y;
+
+            // Start at container edge for round mode
+            start_x = container.x;
+            start_y = container.y;
+        }
+        _ => {}
+    }
+
+    // Determine tiling based on repeat
+    let (tile_x, tile_y) = match repeat {
+        BackgroundRepeat::Repeat => (true, true),
+        BackgroundRepeat::RepeatX => (true, false),
+        BackgroundRepeat::RepeatY => (false, true),
+        BackgroundRepeat::NoRepeat => (false, false),
+        BackgroundRepeat::Space => (true, true),
+        BackgroundRepeat::Round => (true, true),
+    };
+
+    if !tile_x && !tile_y {
+        // Single image - drawn at the calculated position
+        tiles.push(Rect {
+            x: start_x,
+            y: start_y,
+            width: adjusted_bg_width,
+            height: adjusted_bg_height,
+        });
+        return tiles;
+    }
+
+    let x_start = if tile_x && repeat != BackgroundRepeat::Space && repeat != BackgroundRepeat::Round {
+        // Find the leftmost position that's visible (for repeat mode)
+        let tiles_left = ((start_x - container.x) / adjusted_bg_width).ceil() as i32;
+        start_x - (tiles_left as f32 * adjusted_bg_width)
+    } else {
+        start_x
+    };
+
+    let y_start = if tile_y && repeat != BackgroundRepeat::Space && repeat != BackgroundRepeat::Round {
+        let tiles_up = ((start_y - container.y) / adjusted_bg_height).ceil() as i32;
+        start_y - (tiles_up as f32 * adjusted_bg_height)
+    } else {
+        start_y
+    };
+
+    let mut y = y_start;
+    while y < container.y + container.height {
+        let mut x = x_start;
+        while x < container.x + container.width {
+            let tile_rect = Rect {
+                x,
+                y,
+                width: adjusted_bg_width,
+                height: adjusted_bg_height,
+            };
+
+            // Only tiles visible within the container
+            if tile_rect.x + tile_rect.width > container.x
+                && tile_rect.y + tile_rect.height > container.y
+                && tile_rect.x < container.x + container.width
+                && tile_rect.y < container.y + container.height
+            {
+                tiles.push(tile_rect);
+            }
+
+            if tile_x {
+                x += adjusted_bg_width + spacing_x;
+            } else {
+                break;
+            }
+        }
+
+        if tile_y {
+            y += adjusted_bg_height + spacing_y;
+        } else {
+            break;
+        }
+    }
+    tiles
 }
 
 /// Parse a CSS length value to pixels
@@ -6957,7 +7335,11 @@ impl DisplayList {
 
     /// Render box shadows (must be called before background).
     fn render_box_shadows(&mut self, layout_box: &LayoutBox) {
+        if layout_box.style.box_shadows.is_empty() {
+            return;
+        }
         let box_rect = layout_box.dimensions.border_box();
+        let border_radius = self.border_radius_px(layout_box);
 
         // Render outer shadows first (in order, first shadow is top-most)
         for shadow in &layout_box.style.box_shadows {
@@ -6969,6 +7351,7 @@ impl DisplayList {
                     spread_radius: shadow.spread_radius,
                     color: shadow.color,
                     rect: box_rect,
+                    border_radius,
                     inset: false,
                 });
             }
@@ -6977,7 +7360,11 @@ impl DisplayList {
 
     /// Render inset box shadows (called after background).
     fn render_inset_shadows(&mut self, layout_box: &LayoutBox) {
+        if layout_box.style.box_shadows.is_empty() {
+            return;
+        }
         let box_rect = layout_box.dimensions.border_box();
+        let border_radius = self.border_radius_px(layout_box);
 
         for shadow in &layout_box.style.box_shadows {
             if shadow.is_visible() && shadow.inset {
@@ -6988,6 +7375,7 @@ impl DisplayList {
                     spread_radius: shadow.spread_radius,
                     color: shadow.color,
                     rect: box_rect,
+                    border_radius,
                     inset: true,
                 });
             }
@@ -6997,13 +7385,12 @@ impl DisplayList {
     /// Render background.
     /// Supports multiple background layers painted bottom-to-top.
     /// Respects background-clip property (border-box, padding-box, content-box).
-    /// The box's border-box corner radii, resolved to pixels.
+    /// The box's border-box corner radii as used: resolved to pixels per
+    /// axis and reduced so adjacent corners do not overlap.
     ///
-    /// Percentages resolve against the border box WIDTH for every corner. That
-    /// is not what CSS says (the vertical radius resolves against height), but
-    /// it is what the background painter has always done, and the overflow clip
-    /// has to round exactly where the background rounds or the two disagree by
-    /// a pixel and the clip cuts into the paint it is supposed to contain.
+    /// The background, the border and the overflow clip all start from this
+    /// one value, so they round in the same place; if they resolved radii
+    /// separately the clip could cut into the paint it is meant to contain.
     fn border_radius_px(&self, layout_box: &LayoutBox) -> BorderRadius {
         let s = &layout_box.style;
         let border_rect = layout_box.dimensions.border_box();
@@ -7012,26 +7399,21 @@ impl DisplayList {
             _ => 16.0,
         };
         let root_font_size = self.root_font_size;
-        BorderRadius {
-            top_left: s
-                .border_top_left_radius
+        // A percentage is of the border box's width for the horizontal
+        // radius and of its height for the vertical one (§5.1).
+        let corner = |c: &rustkit_css::CornerRadius| CornerRadius {
+            h: c.horizontal
                 .to_px(font_size, root_font_size, border_rect.width),
-            top_right: s.border_top_right_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
-            bottom_right: s.border_bottom_right_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
-            bottom_left: s.border_bottom_left_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
+            v: c.vertical
+                .to_px(font_size, root_font_size, border_rect.height),
+        };
+        BorderRadius {
+            top_left: corner(&s.border_top_left_radius),
+            top_right: corner(&s.border_top_right_radius),
+            bottom_right: corner(&s.border_bottom_right_radius),
+            bottom_left: corner(&s.border_bottom_left_radius),
         }
+        .fitted(border_rect.width, border_rect.height)
     }
 
     /// The rounded clip a box imposes on its descendants, if any.
@@ -7081,18 +7463,14 @@ impl DisplayList {
             return None;
         }
 
-        // Each corner shrinks by the THICKER of its two borders. BorderRadius
-        // is one scalar per corner, so an elliptical inner radius cannot be
-        // expressed; taking the thicker border rounds less than Chrome would,
-        // which errs toward clipping too little rather than eating paint that
-        // belongs on screen. With no border — every case this currently fires
-        // on — it is exact.
-        let inset = |r: f32, a: f32, b: f32| (r - a.max(b)).max(0.0);
+        // Each corner's horizontal radius shrinks by the vertical border it
+        // meets and its vertical radius by the horizontal one, so unequal
+        // borders give an elliptical padding edge (§5.2).
         let inner = BorderRadius {
-            top_left: inset(radius.top_left, d.border.left, d.border.top),
-            top_right: inset(radius.top_right, d.border.right, d.border.top),
-            bottom_right: inset(radius.bottom_right, d.border.right, d.border.bottom),
-            bottom_left: inset(radius.bottom_left, d.border.left, d.border.bottom),
+            top_left: radius.top_left.inset(d.border.left, d.border.top),
+            top_right: radius.top_right.inset(d.border.right, d.border.top),
+            bottom_right: radius.bottom_right.inset(d.border.right, d.border.bottom),
+            bottom_left: radius.bottom_left.inset(d.border.left, d.border.bottom),
         };
 
         Some((padding_rect, inner))
@@ -7388,8 +7766,8 @@ impl DisplayList {
                 // For URL backgrounds, emit a BackgroundImage command
                 // The actual image dimensions would come from the image cache
                 // For now, use container size as fallback
-                let size = self.convert_background_size(&layer.size);
-                let position = self.convert_background_position(&layer.position);
+                let size = self.convert_background_size(&layer.size, container);
+                let (position, offset) = self.convert_background_position(&layer.position);
                 let repeat = self.convert_background_repeat(layer.repeat);
 
                 self.commands.push(DisplayCommand::BackgroundImage {
@@ -7397,6 +7775,7 @@ impl DisplayList {
                     rect: container,
                     size,
                     position,
+                    offset,
                     repeat,
                 });
             }
@@ -7499,29 +7878,37 @@ impl DisplayList {
     }
 
     /// Convert rustkit_css::BackgroundSize to layout BackgroundSize.
-    fn convert_background_size(&self, size: &rustkit_css::BackgroundSize) -> BackgroundSize {
+    ///
+    /// A percentage rides the css `Explicit` variant as a negative value
+    /// and is resolved here against `container`, as
+    /// `calculate_background_rect` does for gradients: the painter knows
+    /// only px.
+    fn convert_background_size(&self, size: &rustkit_css::BackgroundSize, container: Rect) -> BackgroundSize {
+        let resolve = |v: f32, extent: f32| if v < 0.0 { extent * (-v / 100.0) } else { v };
         match size {
             rustkit_css::BackgroundSize::Auto => BackgroundSize::Auto,
             rustkit_css::BackgroundSize::Cover => BackgroundSize::Cover,
             rustkit_css::BackgroundSize::Contain => BackgroundSize::Contain,
             rustkit_css::BackgroundSize::Explicit { width, height } => BackgroundSize::Explicit {
-                width: *width,
-                height: *height,
+                width: width.map(|w| resolve(w, container.width)),
+                height: height.map(|h| resolve(h, container.height)),
             },
         }
     }
 
-    /// Convert rustkit_css::BackgroundPosition to (f32, f32) tuple.
-    fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> (f32, f32) {
-        let x = match &pos.x {
-            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
-            rustkit_css::BackgroundPositionValue::Px(_) => 0.0, // Will be handled in rendering
+    /// Convert rustkit_css::BackgroundPosition to the command's
+    /// `(position, offset)`: a percentage is the 0-1 position with no
+    /// offset, a length is position 0 with that many px of offset, and a
+    /// far-edge offset or `calc()` is both.
+    fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> ((f32, f32), (f32, f32)) {
+        let axis = |v: &rustkit_css::BackgroundPositionValue| match v {
+            rustkit_css::BackgroundPositionValue::Percent(p) => (*p, 0.0),
+            rustkit_css::BackgroundPositionValue::Px(px) => (0.0, *px),
+            rustkit_css::BackgroundPositionValue::Calc { percent, px } => (*percent, *px),
         };
-        let y = match &pos.y {
-            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
-            rustkit_css::BackgroundPositionValue::Px(_) => 0.0,
-        };
-        (x, y)
+        let (x, offset_x) = axis(&pos.x);
+        let (y, offset_y) = axis(&pos.y);
+        ((x, y), (offset_x, offset_y))
     }
 
     /// Convert rustkit_css::BackgroundRepeat to layout BackgroundRepeat.
@@ -7739,7 +8126,14 @@ impl DisplayList {
                 // (GradientText was skipped by the old continue-before-shape
                 // and re-owned pitch + baseline in paint — the last dual
                 // text path.)
-                let mut advances = shape_line_advances(&text, style, font_size);
+                let shaped = shape_line(&text, style, font_size);
+                let mut advances = shaped.as_ref().and_then(char_advances_of);
+                // SHAPED-RUN CONTRACT (S0): the same shape call, frozen with
+                // the justification slack in it. `advances` above is its
+                // projection onto characters and stays for the old path.
+                let line_run = shaped
+                    .as_ref()
+                    .and_then(|shaped| GlyphRun::freeze(shaped, justify_space));
                 // A justified line widens each word separator by the slack
                 // layout distributed (TextLine::justify_space). Only the
                 // per-char advance path can carry it: when shaping fell back
@@ -7759,7 +8153,7 @@ impl DisplayList {
                 // edge and paint `…` in the run's own font. Without per-char
                 // advances there is nothing to cut against — the run paints
                 // as laid out and the clip alone applies.
-                let (text, advances, text_width) = match (self.ellipsis.as_mut(), &advances) {
+                let (text, advances, text_width, line_run) = match (self.ellipsis.as_mut(), &advances) {
                     (Some(scope), Some(adv)) => {
                         let ellipsis_advance = shape_line_advances("\u{2026}", style, font_size)
                             .and_then(|a| a.first().copied())
@@ -7776,16 +8170,27 @@ impl DisplayList {
                                 .width
                             });
                         match scope.cut(&text, x, line_top, adv, ellipsis_advance) {
-                            TextOverflowCut::Keep => (text, advances, text_width),
+                            TextOverflowCut::Keep => (text, advances, text_width, line_run),
                             TextOverflowCut::Hide => continue,
                             TextOverflowCut::Cut {
                                 text,
                                 advances,
                                 width,
-                            } => (text, Some(advances), width),
+                            } => {
+                                // The run is cut where the characters were:
+                                // the kept glyphs, then the ellipsis shaped
+                                // alone in the same face (as its advance was).
+                                let kept = advances.len().saturating_sub(1);
+                                let line_run = line_run.and_then(|run| {
+                                    shape_line("\u{2026}", style, font_size)
+                                        .and_then(|tail| GlyphRun::freeze(&tail, 0.0))
+                                        .and_then(|tail| run.cut_with_tail(kept, &tail))
+                                });
+                                (text, Some(advances), width, line_run)
+                            }
                         }
                     }
-                    _ => (text, advances, text_width),
+                    _ => (text, advances, text_width, line_run),
                 };
 
                 // Check if this is gradient text (background-clip: text with gradient and transparent fill)
@@ -7832,6 +8237,7 @@ impl DisplayList {
                     },
                     advances,
                     ascent: Some(seat_ascent),
+                    run: line_run.map(std::sync::Arc::new),
                 });
 
                 // Draw text decorations
@@ -7990,7 +8396,31 @@ impl DisplayList {
                     layout_box.style.color,
                 );
 
-                self.commands.push(cmd);
+                // Replaced content is trimmed to the content edge curve
+                // (CSS Backgrounds 3 §5.3): the border radius inset by the
+                // border and padding beside each corner. `img { border-radius:
+                // 50% }` is how most avatars are written, with no
+                // `overflow: hidden` box around them.
+                let radius = self.border_radius_px(layout_box);
+                let (b, p) = (&dims.border, &dims.padding);
+                let content_radius = BorderRadius {
+                    top_left: radius.top_left.inset(b.left + p.left, b.top + p.top),
+                    top_right: radius.top_right.inset(b.right + p.right, b.top + p.top),
+                    bottom_right: radius
+                        .bottom_right
+                        .inset(b.right + p.right, b.bottom + p.bottom),
+                    bottom_left: radius.bottom_left.inset(b.left + p.left, b.bottom + p.bottom),
+                };
+                if content_radius.is_zero() {
+                    self.commands.push(cmd);
+                } else {
+                    self.commands.push(DisplayCommand::PushClipRounded {
+                        rect: container,
+                        radius: content_radius,
+                    });
+                    self.commands.push(cmd);
+                    self.commands.push(DisplayCommand::PopClip);
+                }
             }
             BoxType::FormControl(control) => {
                 self.render_form_control(layout_box, control);
@@ -8051,11 +8481,26 @@ impl DisplayList {
 
         match control {
             FormControlType::TextInput {
-                value, placeholder, ..
+                value,
+                placeholder,
+                input_type,
             } => {
+                // A password paints one bullet per character. Masked HERE,
+                // so the value is in no display command, dump or frame.
+                let password = input_type.eq_ignore_ascii_case("password");
+                let value = if password {
+                    value.chars().map(|_| PASSWORD_MASK).collect()
+                } else {
+                    value.clone()
+                };
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
-                    value: value.clone(),
+                    kind: if password {
+                        TextControlKind::Password
+                    } else {
+                        TextControlKind::Text
+                    },
+                    value,
                     placeholder: placeholder.clone(),
                     font_size,
                     font_family: font_family.clone(),
@@ -8085,6 +8530,7 @@ impl DisplayList {
             } => {
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
+                    kind: TextControlKind::TextArea,
                     value: value.clone(),
                     placeholder: placeholder.clone(),
                     font_size,
@@ -8201,10 +8647,35 @@ impl DisplayList {
             }
             FormControlType::Select {
                 options,
+                selected,
+                size,
+                ..
+            } if *size > 1 => {
+                self.commands.push(DisplayCommand::ListBox {
+                    rect,
+                    options: options.clone(),
+                    selected: selected.clone(),
+                    row_height: list_box_row_height(font_size),
+                    font_size,
+                    font_family: font_family.clone(),
+                    font_weight,
+                    text_color,
+                    background_color: bg_color,
+                    border_color: if border_color.a > 0.0 {
+                        border_color
+                    } else {
+                        Color::new(200, 200, 200, 1.0)
+                    },
+                    border_width,
+                });
+            }
+            FormControlType::Select {
+                options,
                 selected_index,
                 ..
             } => {
-                // Draw as a text input with dropdown arrow
+                // A drop-down: the selected option's label, and the arrow
+                // the painter draws for `MenuList`.
                 let display_text = selected_index
                     .and_then(|i| options.get(i))
                     .cloned()
@@ -8212,6 +8683,7 @@ impl DisplayList {
 
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
+                    kind: TextControlKind::MenuList,
                     value: display_text,
                     placeholder: String::new(),
                     font_size,
@@ -8388,15 +8860,13 @@ fn shape_text_metrics(
     }
 }
 
-/// Per-CHAR advances from the layout shaper, letter/word-spacing applied
-/// (ADVANCE CONTRACT, text-stack unification 2026-07-11). Returns None when
-/// shaping fails or when glyph count != char count (ligature clusters) — the
-/// renderer then falls back to its own advances instead of misaligning.
-pub fn shape_line_advances(
+/// One line of `text` shaped in `style`, letter/word-spacing applied: the
+/// single shape call behind `shape_line_advances` and `shape_line_run`.
+fn shape_line(
     text: &str,
     style: &rustkit_css::ComputedStyle,
     font_size: f32,
-) -> Option<Vec<f32>> {
+) -> Option<ShapedRun> {
     let letter_spacing = match style.letter_spacing {
         Length::Px(px) => px,
         Length::Em(em) => em * font_size,
@@ -8422,10 +8892,46 @@ pub fn shape_line_advances(
         )
         .ok()?;
     run.apply_spacing(letter_spacing, word_spacing);
-    if run.glyphs.len() != text.chars().count() {
+    Some(run)
+}
+
+/// The per-character projection of a shaped line: `None` when a glyph is
+/// not one character (the vector cannot describe it).
+fn char_advances_of(run: &ShapedRun) -> Option<Vec<f32>> {
+    if run.glyphs.len() != run.text.chars().count() {
         return None;
     }
     Some(run.glyphs.iter().map(|g| g.advance).collect())
+}
+
+/// Per-CHAR advances from the layout shaper, letter/word-spacing applied
+/// (ADVANCE CONTRACT, text-stack unification 2026-07-11). Returns None when
+/// shaping fails or when glyph count != char count (ligature clusters) — the
+/// renderer then falls back to its own advances instead of misaligning.
+pub fn shape_line_advances(
+    text: &str,
+    style: &rustkit_css::ComputedStyle,
+    font_size: f32,
+) -> Option<Vec<f32>> {
+    shape_line(text, style, font_size)
+        .as_ref()
+        .and_then(char_advances_of)
+}
+
+/// The frozen run for one line of `text` in `style` (SHAPED-RUN CONTRACT,
+/// slice S0): the shape `shape_line_advances` projects, kept whole.
+/// `justify_space` is added to each word separator before the freeze.
+/// `None` when shaping fails or the run is outside the slice
+/// (`GlyphRun::freeze`).
+pub fn shape_line_run(
+    text: &str,
+    style: &rustkit_css::ComputedStyle,
+    font_size: f32,
+    justify_space: f32,
+) -> Option<GlyphRun> {
+    shape_line(text, style, font_size)
+        .as_ref()
+        .and_then(|run| GlyphRun::freeze(run, justify_space))
 }
 
 /// Simple text measurement (fallback when shaping is unavailable).
@@ -8652,6 +9158,132 @@ mod tests {
         assert_eq!(blink_baseline_offset(16.0, 15.46875, 3.375), 14.0);
     }
 
+    /// The one tile a no-repeat url background paints in a 300x200 box,
+    /// for a 240x210 image.
+    fn url_background_tile(size: rustkit_css::BackgroundSize) -> Rect {
+        url_background_tile_at(size, rustkit_css::BackgroundPosition::default())
+    }
+
+    fn url_background_tile_at(
+        size: rustkit_css::BackgroundSize,
+        position: rustkit_css::BackgroundPosition,
+    ) -> Rect {
+        let mut style = ComputedStyle::new();
+        style.background_layers = vec![rustkit_css::BackgroundLayer {
+            image: rustkit_css::BackgroundImage::Url("dinosaur.png".to_string()),
+            size,
+            position,
+            repeat: rustkit_css::BackgroundRepeat::NoRepeat,
+            ..Default::default()
+        }];
+        let mut card = LayoutBox::new(BoxType::Block, style);
+        card.dimensions.content = Rect::new(10.0, 20.0, 300.0, 200.0);
+
+        let list = DisplayList::build(&card);
+        let (rect, size, position, offset, repeat) = list
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::BackgroundImage { rect, size, position, offset, repeat, .. } => {
+                    Some((*rect, size.clone(), *position, *offset, *repeat))
+                }
+                _ => None,
+            })
+            .expect("a url background must emit a BackgroundImage command");
+        let tiles = background_tiles(rect, &size, position, offset, repeat, 240.0, 210.0);
+        assert_eq!(tiles.len(), 1, "{tiles:?}");
+        tiles[0]
+    }
+
+    #[test]
+    fn test_url_background_percentage_size_resolves_against_its_box() {
+        // Percentages ride the Explicit variant as negative values. The
+        // gradient lane resolves them (calculate_background_rect); the url
+        // lane passed them through, so `background-size: 50% auto` reached
+        // the painter as a -50px image and painted nothing (Chrome paints
+        // it 150 wide, 131.25 tall in a 300x200 box).
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: Some(-50.0),
+            height: None,
+        });
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (10.0, 20.0, 150.0, 131.25));
+
+        // `auto 100%`: the height is the box's, the width keeps the ratio.
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: None,
+            height: Some(-100.0),
+        });
+        assert_eq!((tile.y, tile.height), (20.0, 200.0));
+        assert!((tile.width - 200.0 * 240.0 / 210.0).abs() < 0.01, "{tile:?}");
+
+        // Control: a px size is not a percentage.
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        });
+        assert_eq!((tile.width, tile.height), (100.0, 50.0));
+    }
+
+    #[test]
+    fn test_url_background_px_position_offsets_the_image() {
+        // `background-position: 10px 20px` reached the painter as 0 0 (the
+        // px arm was "handled in rendering", which never happened), so a
+        // sprite sheet always showed its top-left cell.
+        let px = rustkit_css::BackgroundPositionValue::Px;
+        let size = rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        };
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: px(10.0), y: px(20.0) },
+        );
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (20.0, 40.0, 100.0, 50.0));
+
+        // A sprite cell: negative offsets pull the image up and left.
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: px(-40.0), y: px(-30.0) },
+        );
+        assert_eq!((tile.x, tile.y), (-30.0, -10.0));
+
+        // Mixed: px on one axis, a percentage on the other.
+        let tile = url_background_tile_at(
+            size,
+            rustkit_css::BackgroundPosition {
+                x: px(10.0),
+                y: rustkit_css::BackgroundPositionValue::Percent(1.0),
+            },
+        );
+        assert_eq!((tile.x, tile.y), (20.0, 170.0));
+    }
+
+    #[test]
+    fn test_url_background_far_edge_offset_is_a_percentage_plus_px() {
+        // `right 5px bottom 10px`: on the far edges, then back by the
+        // offsets. 100x50 image in the 300x200 box at 10,20.
+        let calc = |percent, px| rustkit_css::BackgroundPositionValue::Calc { percent, px };
+        let size = rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        };
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: calc(1.0, -5.0), y: calc(1.0, -10.0) },
+        );
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (205.0, 160.0, 100.0, 50.0));
+
+        // `calc(50% + 4px)` on one axis.
+        let tile = url_background_tile_at(
+            size,
+            rustkit_css::BackgroundPosition {
+                x: calc(0.5, 4.0),
+                y: rustkit_css::BackgroundPositionValue::Percent(0.0),
+            },
+        );
+        assert_eq!((tile.x, tile.y), (114.0, 20.0));
+    }
+
     #[test]
     fn test_oversized_gradient_paint_is_clipped_to_its_box() {
         // The gradient-backgrounds "-45deg Rainbow" card: `background-size:
@@ -8785,10 +9417,14 @@ mod tests {
     fn scaled_gradient_card(radius_px: f32) -> LayoutBox {
         let mut style = ComputedStyle::new();
         if radius_px > 0.0 {
-            style.border_top_left_radius = Length::Px(radius_px);
-            style.border_top_right_radius = Length::Px(radius_px);
-            style.border_bottom_right_radius = Length::Px(radius_px);
-            style.border_bottom_left_radius = Length::Px(radius_px);
+            style.border_top_left_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+            style.border_top_right_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+            style.border_bottom_right_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+            style.border_bottom_left_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
         }
         style.background_layers = vec![rustkit_css::BackgroundLayer {
             image: rustkit_css::BackgroundImage::Gradient(rustkit_css::Gradient::Linear(
@@ -8858,7 +9494,12 @@ mod tests {
                 radius.bottom_right,
                 radius.bottom_left
             ),
-            (16.0, 16.0, 16.0, 16.0),
+            (
+                CornerRadius::circular(16.0),
+                CornerRadius::circular(16.0),
+                CornerRadius::circular(16.0),
+                CornerRadius::circular(16.0)
+            ),
             "the clip must carry the box's own radius on all four corners"
         );
         assert!(
@@ -9273,10 +9914,12 @@ mod tests {
 
     fn rounded_overflow_parent(radius_px: f32, hidden: bool) -> LayoutBox {
         let mut style = ComputedStyle::new();
-        style.border_top_left_radius = Length::Px(radius_px);
-        style.border_top_right_radius = Length::Px(radius_px);
-        style.border_bottom_right_radius = Length::Px(radius_px);
-        style.border_bottom_left_radius = Length::Px(radius_px);
+        style.border_top_left_radius = rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+        style.border_top_right_radius = rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+        style.border_bottom_right_radius =
+            rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+        style.border_bottom_left_radius =
+            rustkit_css::CornerRadius::circular(Length::Px(radius_px));
         if hidden {
             style.overflow_x = rustkit_css::Overflow::Hidden;
             style.overflow_y = rustkit_css::Overflow::Hidden;
@@ -9332,7 +9975,7 @@ mod tests {
         assert_eq!(rect.width, 237.0, "the border box");
         assert_eq!(widths, [5.0; 4]);
         assert_eq!(colors[0], Color::BLACK);
-        assert_eq!(radius.bottom_left, 12.0);
+        assert_eq!(radius.bottom_left, CornerRadius::circular(12.0));
         assert!(
             !list.commands.iter().any(|c| matches!(c, DisplayCommand::SolidColor(col, _) if *col == Color::BLACK)),
             "the square strips must not also paint"
@@ -9370,7 +10013,7 @@ mod tests {
         let (rect, radius) = rounded_clip(&list).expect(
             "a rounded box that clips its overflow must push a rounded clip for its children",
         );
-        assert_eq!(radius.top_left, 12.0);
+        assert_eq!(radius.top_left, CornerRadius::circular(12.0));
         assert_eq!(rect.width, 227.0);
 
         let push = list
@@ -9696,9 +10339,125 @@ mod tests {
         assert_eq!(rect.x, border_box.x + 4.0);
         assert_eq!(rect.width, border_box.width - 8.0);
         assert_eq!(
-            radius.top_left, 8.0,
+            radius.top_left,
+            CornerRadius::circular(8.0),
             "12px radius inside a 4px border is 8px"
         );
+    }
+
+    #[test]
+    fn unequal_borders_give_the_overflow_clip_an_elliptical_radius() {
+        // CSS Backgrounds 3 §5.2: the padding edge's horizontal radius is the
+        // outer one less the vertical border beside it, and its vertical
+        // radius the outer one less the horizontal border. One scalar per
+        // corner could only take the thicker border off both.
+        let mut parent = rounded_overflow_parent(12.0, true);
+        parent.dimensions.border = EdgeSizes {
+            top: 10.0,
+            right: 2.0,
+            bottom: 14.0,
+            left: 4.0,
+        };
+
+        let list = DisplayList::build(&under_root(parent));
+        let (_, radius) = rounded_clip(&list).expect("must still clip");
+        assert_eq!(radius.top_left, CornerRadius { h: 8.0, v: 2.0 });
+        assert_eq!(radius.top_right, CornerRadius { h: 10.0, v: 2.0 });
+        assert_eq!(
+            radius.bottom_right,
+            CornerRadius::default(),
+            "a 14px border swallows the 12px vertical radius: that corner is square"
+        );
+        assert_eq!(radius.bottom_left, CornerRadius::default());
+    }
+
+    /// CSS Backgrounds 3 §6.1.1: a shadow's corner radius is the box's plus
+    /// the spread, less for a radius smaller than the spread, and a square
+    /// corner stays square.
+    #[test]
+    fn a_shadows_corner_radius_grows_with_the_spread() {
+        let corner = CornerRadius { h: 20.0, v: 10.0 };
+        assert_eq!(corner.spread(6.0), CornerRadius { h: 26.0, v: 16.0 });
+        assert_eq!(corner.spread(0.0), corner);
+        assert_eq!(CornerRadius::default().spread(6.0), CornerRadius::default());
+
+        // r = 2 under a 10px spread: 2 + 10 * (1 + (0.2 - 1)^3) = 6.88.
+        let small = CornerRadius::circular(2.0).spread(10.0);
+        assert!((small.h - 6.88).abs() < 1e-4 && (small.v - 6.88).abs() < 1e-4, "{small:?}");
+
+        // A negative spread shrinks the curve, and squares it at zero.
+        assert_eq!(corner.spread(-4.0), CornerRadius { h: 16.0, v: 6.0 });
+        assert_eq!(corner.spread(-10.0), CornerRadius::default());
+
+        let all = BorderRadius::uniform(8.0).spread(4.0);
+        assert_eq!(all, BorderRadius::uniform(12.0));
+    }
+
+    #[test]
+    fn fitting_scales_every_radius_by_one_factor() {
+        // §5.5. 200x400: the top side holds 150 + 150, so f = 200/300.
+        let fitted = BorderRadius {
+            top_left: CornerRadius::circular(150.0),
+            top_right: CornerRadius::circular(150.0),
+            bottom_right: CornerRadius { h: 30.0, v: 15.0 },
+            bottom_left: CornerRadius::default(),
+        }
+        .fitted(200.0, 400.0);
+        assert_eq!(fitted.top_left, CornerRadius::circular(100.0));
+        assert_eq!(fitted.bottom_right, CornerRadius { h: 20.0, v: 10.0 });
+        assert_eq!(fitted.bottom_left, CornerRadius::default());
+
+        // Nothing overlaps: unchanged, even with a radius past half the box.
+        let lone = BorderRadius {
+            top_left: CornerRadius { h: 180.0, v: 90.0 },
+            ..BorderRadius::default()
+        };
+        assert_eq!(lone.fitted(200.0, 100.0), lone);
+
+        // The vertical sides count too. 200x100: the right side holds
+        // 150 + 15 and is the tightest, f = 100/165.
+        let fitted = BorderRadius {
+            top_left: CornerRadius::circular(150.0),
+            top_right: CornerRadius::circular(150.0),
+            bottom_right: CornerRadius { h: 30.0, v: 15.0 },
+            bottom_left: CornerRadius::default(),
+        }
+        .fitted(200.0, 100.0);
+        assert!((fitted.top_right.v - 150.0 * 100.0 / 165.0).abs() < 1e-3);
+        assert!((fitted.top_right.v + fitted.bottom_right.v - 100.0).abs() < 1e-3);
+
+        // Four equal circular radii: exactly half the shorter side, as
+        // before, whatever the radius and the side are.
+        assert_eq!(
+            BorderRadius::uniform(9999.0).fitted(200.0, 100.0),
+            BorderRadius::uniform(50.0)
+        );
+        for (r, w, h) in [
+            (9999.0_f32, 311.59375_f32, 37.59375_f32),
+            (1e6, 73.3, 1280.7),
+            (24.0, 40.1, 31.9),
+        ] {
+            assert_eq!(
+                BorderRadius::uniform(r).fitted(w, h),
+                BorderRadius::uniform(w.min(h) / 2.0),
+                "uniform {r} on {w}x{h}"
+            );
+        }
+
+        // One zero axis makes the corner square, so it takes no room.
+        let half_zero = BorderRadius {
+            top_left: CornerRadius { h: 500.0, v: 0.0 },
+            top_right: CornerRadius::circular(40.0),
+            ..BorderRadius::default()
+        };
+        let fitted = half_zero.fitted(200.0, 100.0);
+        assert_eq!(fitted.top_left, CornerRadius::default());
+        assert_eq!(fitted.top_right, CornerRadius::circular(40.0));
+        assert!(BorderRadius {
+            top_left: CornerRadius { h: 5.0, v: 0.0 },
+            ..BorderRadius::default()
+        }
+        .is_zero());
     }
 
     #[test]
@@ -11230,6 +11989,95 @@ mod tests {
         assert_eq!(frame(none), 0.0);
     }
 
+    #[test]
+    fn a_password_control_paints_one_bullet_per_character() {
+        let mut field = n53_control(FormControlType::TextInput {
+            value: "pässword".to_string(),
+            placeholder: "Password".to_string(),
+            input_type: "password".to_string(),
+        });
+        field.dimensions.content = Rect::new(0.0, 0.0, 149.0, 19.0);
+        field.focused_caret = Some(3);
+        let list = DisplayList::build(&field);
+        let (value, placeholder, kind, caret) = list
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::TextInput {
+                    value,
+                    placeholder,
+                    kind,
+                    caret_position,
+                    ..
+                } => Some((value.clone(), placeholder.clone(), *kind, *caret_position)),
+                _ => None,
+            })
+            .expect("a TextInput command");
+        // Per character, not per byte: the caret index (in characters)
+        // still lands between the right two bullets.
+        assert_eq!(value, "\u{2022}".repeat(8));
+        assert_eq!(kind, TextControlKind::Password);
+        assert_eq!(caret, Some(3));
+        assert_eq!(placeholder, "Password");
+    }
+
+    #[test]
+    fn a_list_box_command_carries_its_rows_and_a_drop_down_does_not_become_one() {
+        let select = |size: u32, selected: Vec<usize>| {
+            let mut b = n53_control(FormControlType::Select {
+                options: ["Item 1", "Item 2", "Item 3", "Item 4"]
+                    .map(String::from)
+                    .to_vec(),
+                selected_index: Some(0),
+                size,
+                selected,
+            });
+            let mut cb = Dimensions::default();
+            cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+            b.layout(&cb);
+            DisplayList::build(&b).commands
+        };
+        // Three visible rows of 16px in the 50px box layout builds (Chrome
+        // CfT-148: options at +1, +17, +33; the fourth is scrolled out).
+        let commands = select(3, vec![1, 2]);
+        let list_box = commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::ListBox {
+                    rect,
+                    options,
+                    selected,
+                    row_height,
+                    ..
+                } => Some((*rect, options.len(), selected.clone(), *row_height)),
+                _ => None,
+            })
+            .expect("a ListBox command");
+        assert!((list_box.0.height - 50.0).abs() < 0.01, "{:?}", list_box.0);
+        assert!(
+            (list_box.3 - 16.0).abs() < 0.01,
+            "row height {}",
+            list_box.3
+        );
+        assert_eq!((list_box.1, list_box.2), (4, vec![1, 2]));
+        assert!(!commands
+            .iter()
+            .any(|c| matches!(c, DisplayCommand::TextInput { .. })));
+
+        // size 0 / 1 is a drop-down: its selected label, kind MenuList.
+        for size in [0, 1] {
+            let commands = select(size, Vec::new());
+            assert!(commands.iter().any(|c| matches!(
+                c,
+                DisplayCommand::TextInput { value, kind: TextControlKind::MenuList, .. }
+                    if value == "Item 1"
+            )));
+            assert!(!commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::ListBox { .. })));
+        }
+    }
+
     fn n53_text_input() -> LayoutBox {
         n53_control(FormControlType::TextInput {
             value: String::new(),
@@ -11568,6 +12416,7 @@ mod tests {
                 options: options.iter().map(|o| o.to_string()).collect(),
                 selected_index: None,
                 size,
+                selected: Vec::new(),
             })
         };
         let listbox = width(sel(&["Item 1", "Item 2", "Item 3", "Item 4"], 3));
@@ -11585,6 +12434,76 @@ mod tests {
             (short - 60.0).abs() <= 3.0,
             "dropdown 'Select': Chrome 60, got {short}"
         );
+    }
+
+    #[test]
+    fn a_shrink_to_fit_box_is_as_wide_as_its_spaced_text() {
+        // new_tab's logo: "HIWAVE" at 48px with `letter-spacing: 0.5rem`
+        // inside an inline-block. The intrinsic width left the spacing out,
+        // so the box was 48px narrower than the line laid out in it
+        // (165.66 against Chrome's 214.80).
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 1280.0, 0.0);
+
+        // The box is an inline-block in a block, or an item of a flex row,
+        // through `layout()` or the collapse path the engine's page layout
+        // runs.
+        for flex_item in [false, true] {
+            for collapse_path in [false, true] {
+                let width_with = |letter_spacing: Length, word_spacing: Length, text: &str| {
+                    let mut text_style = ComputedStyle::new();
+                    text_style.font_family = "Helvetica".to_string();
+                    text_style.font_size = Length::Px(48.0);
+                    text_style.letter_spacing = letter_spacing;
+                    text_style.word_spacing = word_spacing;
+
+                    let mut wrapper_style = text_style.clone();
+                    let mut parent_style = ComputedStyle::new();
+                    if flex_item {
+                        parent_style.display = rustkit_css::Display::Flex;
+                    } else {
+                        wrapper_style.display = rustkit_css::Display::InlineBlock;
+                    }
+                    let mut wrapper = LayoutBox::new(BoxType::Block, wrapper_style);
+                    wrapper
+                        .children
+                        .push(LayoutBox::new(BoxType::Text(text.to_string()), text_style));
+
+                    let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+                    parent.children.push(wrapper);
+                    if collapse_path {
+                        let mut mc = MarginCollapseContext::new();
+                        let mut fc = FloatContext::new();
+                        parent.layout_with_collapse(&cb, &mut mc, &mut fc);
+                    } else {
+                        parent.layout(&cb);
+                    }
+                    parent.children[0].dimensions.content.width
+                };
+                let case = format!("flex_item={flex_item} collapse_path={collapse_path}");
+
+                let plain = width_with(Length::Zero, Length::Zero, "HIWAVE");
+                assert!(plain > 100.0, "{case}: sanity: {plain}");
+                // Six letters, 8px after each.
+                let px = width_with(Length::Px(8.0), Length::Zero, "HIWAVE");
+                assert!(
+                    (px - (plain + 48.0)).abs() < 0.01,
+                    "{case}: px: {px} vs {plain} + 48"
+                );
+                let rem = width_with(Length::Rem(0.5), Length::Zero, "HIWAVE");
+                assert!(
+                    (rem - (plain + 48.0)).abs() < 0.01,
+                    "{case}: rem: {rem} vs {plain} + 48"
+                );
+                // `word-spacing` widens each space.
+                let words = width_with(Length::Zero, Length::Zero, "HI WAVE");
+                let spaced = width_with(Length::Zero, Length::Px(10.0), "HI WAVE");
+                assert!(
+                    (spaced - (words + 10.0)).abs() < 0.01,
+                    "{case}: word: {spaced} vs {words} + 10"
+                );
+            }
+        }
     }
 
     #[test]
@@ -12583,6 +13502,7 @@ mod tests {
                 size: 1,
                 options: vec!["A longer option text".to_string(), "Short".to_string()],
                 selected_index: None,
+                selected: Vec::new(),
             },
             FormControlType::TextArea {
                 rows: 2,
@@ -15806,10 +16726,10 @@ mod border_radius_emit_tests {
     fn box_with(radius: Length, bg: Color) -> LayoutBox {
         let mut s = ComputedStyle::new();
         s.background_color = bg;
-        s.border_top_left_radius = radius.clone();
-        s.border_top_right_radius = radius.clone();
-        s.border_bottom_right_radius = radius.clone();
-        s.border_bottom_left_radius = radius;
+        s.border_top_left_radius = rustkit_css::CornerRadius::circular(radius.clone());
+        s.border_top_right_radius = rustkit_css::CornerRadius::circular(radius.clone());
+        s.border_bottom_right_radius = rustkit_css::CornerRadius::circular(radius.clone());
+        s.border_bottom_left_radius = rustkit_css::CornerRadius::circular(radius);
         let mut b = LayoutBox::new(BoxType::Block, s);
         b.dimensions.content.width = 80.0;
         b.dimensions.content.height = 40.0;

@@ -933,6 +933,7 @@ mod tests {
 
     #[test]
     fn a_registered_web_font_is_measured_from_its_own_bytes() {
+        let _slot = crate::webfonts::slot_test_guard();
         const AHEM: &[u8] = include_bytes!("../tests/fixtures/Ahem.ttf");
         let mut backend = LinuxTextBackend::new().expect("backend");
         let family = "WebfontsLinuxAhemProbe";
@@ -1056,6 +1057,7 @@ mod weight_tests {
 
     #[test]
     fn a_variable_web_font_takes_the_exact_weight_not_the_nearest_named_instance() {
+        let _slot = crate::webfonts::slot_test_guard();
         let path = "/usr/share/fonts/truetype/ubuntu/Ubuntu[wdth,wght].ttf";
         let Ok(bytes) = std::fs::read(path) else { return };
         crate::webfonts::install(

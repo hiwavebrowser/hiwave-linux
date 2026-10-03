@@ -139,6 +139,7 @@ pub fn render_background_image(
             },
             size: size.clone(),
             position,
+            offset: (0.0, 0.0),
             repeat,
         });
     } else {
@@ -181,6 +182,7 @@ pub fn render_background_image(
                         rect: tile_rect,
                         size: size.clone(),
                         position,
+                        offset: (0.0, 0.0),
                         repeat,
                     });
                 }
@@ -242,6 +244,7 @@ pub fn render_broken_image(
                 font_style: 0,
                 advances: None,
                 ascent: None,
+                run: None,
             });
         }
     }

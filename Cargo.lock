@@ -774,8 +774,6 @@ dependencies = [
 [[package]]
 name = "boa_parser"
 version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cc142dac798cdc6e2dbccfddeb50f36d2523bb977a976e19bdb3ae19b740804"
 dependencies = [
  "bitflags 2.13.2",
  "boa_ast",
@@ -5316,7 +5314,9 @@ name = "rustkit-engine"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytes",
  "futures",
+ "http",
  "rustkit-bindings",
  "rustkit-compositor",
  "rustkit-core",
@@ -5391,7 +5391,6 @@ dependencies = [
  "futures",
  "lru",
  "rustkit-codecs",
- "rustkit-http",
  "rustkit-image",
  "serde",
  "serde_json",
@@ -5409,10 +5408,12 @@ version = "0.1.0"
 dependencies = [
  "boa_engine",
  "boa_gc",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -5486,6 +5487,7 @@ dependencies = [
  "tracing-subscriber",
  "wgpu 24.0.5",
  "windows 0.61.3",
+ "windows-numerics",
 ]
 
 [[package]]

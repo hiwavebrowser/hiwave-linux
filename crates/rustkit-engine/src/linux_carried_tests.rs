@@ -2933,8 +2933,13 @@ mod rounded_rect_tests {
     }
     fn corners(css: &str) -> (Length, Length, Length, Length) {
         let s = st(css);
-        (s.border_top_left_radius, s.border_top_right_radius,
-         s.border_bottom_right_radius, s.border_bottom_left_radius)
+        let all = [&s.border_top_left_radius, &s.border_top_right_radius,
+                   &s.border_bottom_right_radius, &s.border_bottom_left_radius];
+        for c in all {
+            assert_eq!(c.horizontal, c.vertical, "a one-value radius is circular");
+        }
+        (s.border_top_left_radius.horizontal.clone(), s.border_top_right_radius.horizontal.clone(),
+         s.border_bottom_right_radius.horizontal.clone(), s.border_bottom_left_radius.horizontal.clone())
     }
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3016,10 +3021,10 @@ mod rounded_rect_tests {
     fn a_longhands_set_one_corner_each() {
         let _gpu = gpu_serial();
         let s = st("border-top-left-radius: 7px; border-bottom-right-radius: 9px");
-        assert_eq!(s.border_top_left_radius, Length::Px(7.0));
-        assert_eq!(s.border_bottom_right_radius, Length::Px(9.0));
-        assert_eq!(s.border_top_right_radius, Length::Zero, "untouched corners stay 0");
-        assert_eq!(s.border_bottom_left_radius, Length::Zero);
+        assert_eq!(s.border_top_left_radius, rustkit_css::CornerRadius::circular(Length::Px(7.0)));
+        assert_eq!(s.border_bottom_right_radius, rustkit_css::CornerRadius::circular(Length::Px(9.0)));
+        assert_eq!(s.border_top_right_radius, rustkit_css::CornerRadius::circular(Length::Zero), "untouched corners stay 0");
+        assert_eq!(s.border_bottom_left_radius, rustkit_css::CornerRadius::circular(Length::Zero));
     }
 
     #[test]
@@ -3028,7 +3033,7 @@ mod rounded_rect_tests {
         let mut s = ComputedStyle::new();
         apply_inline_style_decls(&mut s, "border-radius: 8px");
         apply_inline_style_decls(&mut s, "border-radius: banana");
-        assert_eq!(s.border_top_left_radius, Length::Px(8.0),
+        assert_eq!(s.border_top_left_radius, rustkit_css::CornerRadius::circular(Length::Px(8.0)),
                    "a typo must not reset corners it never mentioned");
     }
 
@@ -3042,7 +3047,8 @@ mod rounded_rect_tests {
         );
         assert_eq!(r.len(), 1, "one background must emit one rounded command; got {r:?}");
         assert_eq!((r[0].top_left, r[0].top_right, r[0].bottom_right, r[0].bottom_left),
-                   (1.0, 2.0, 3.0, 4.0),
+                   (rustkit_layout::CornerRadius::circular(1.0), rustkit_layout::CornerRadius::circular(2.0),
+                    rustkit_layout::CornerRadius::circular(3.0), rustkit_layout::CornerRadius::circular(4.0)),
                    "each corner must arrive at its own value, in CSS order");
     }
 
@@ -3065,7 +3071,7 @@ mod rounded_rect_tests {
             r#"<html><head><style>div{background:#f00;width:200px;height:200px;font-size:32px;border-radius:2em}</style></head><body><div></div></body></html>"#,
         );
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].top_left, 64.0, "2em at font-size 32px is 64px");
+        assert_eq!(r[0].top_left, rustkit_layout::CornerRadius::circular(64.0), "2em at font-size 32px is 64px");
     }
 }
 
