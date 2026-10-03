@@ -393,6 +393,14 @@ mod imp {
     }
 }
 
+/// LINUX (declared divergence): the registry holds the raw bytes and
+/// `LinuxTextBackend::get_face` opens them as FreeType memory faces, so the
+/// same face measures (layout) and paints (renderer). `inspect` vets the
+/// container (size caps, header and table directory) before FreeType sees the
+/// bytes, as on macOS; FreeType then validates the face, and one it rejects is
+/// dropped and counted, never kept as a name with no glyphs. FreeType reads
+/// TrueType, OpenType and WOFF; WOFF2 needs a brotli-enabled FreeType and
+/// installs as nothing otherwise.
 #[cfg(target_os = "linux")]
 mod imp {
     use super::WebFontFace;
@@ -436,7 +444,7 @@ mod imp {
         let mut families: HashMap<String, Vec<Face>> = HashMap::new();
         let mut accepted = 0usize;
         for face in faces {
-            if face.data.len() < 12 {
+            if super::inspect(&face.data).is_err() {
                 continue;
             }
             let parses = library
@@ -716,6 +724,32 @@ mod linux_tests {
         };
         assert_eq!(install("l2", &[junk]), 0);
         assert!(!is_installed("WebfontsTestJunk"));
+    }
+
+    #[test]
+    fn a_face_the_container_check_rejects_never_reaches_freetype() {
+        let _slot = slot_guard();
+        let woff = include_bytes!("../tests/fixtures/Ahem.woff");
+        let mut huge = woff.to_vec();
+        huge[16..20].copy_from_slice(&u32::MAX.to_be_bytes());
+        let mut bad_length = woff.to_vec();
+        bad_length[8..12].copy_from_slice(&((woff.len() as u32) + 1).to_be_bytes());
+        let cut_ttf = &AHEM[..AHEM.len() - 40];
+        for (name, bytes) in [
+            ("WebfontsTestHuge", huge.as_slice()),
+            ("WebfontsTestBadLength", bad_length.as_slice()),
+            ("WebfontsTestCutTtf", cut_ttf),
+        ] {
+            assert!(inspect(bytes).is_err(), "{name}: premise, inspect rejects it");
+            let face = WebFontFace {
+                family: name.to_string(),
+                weight: 400,
+                italic: false,
+                data: Arc::new(bytes.to_vec()),
+            };
+            assert_eq!(install(name, &[face]), 0, "{name}");
+            assert!(!is_installed(name), "{name}");
+        }
     }
 
     #[test]
