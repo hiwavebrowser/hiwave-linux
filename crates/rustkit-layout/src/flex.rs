@@ -291,6 +291,14 @@ pub fn layout_flex_container_in(
     layout_flex_container_at(container, container_box, positioning_cb, None)
 }
 
+/// As [`layout_flex_container`], for a container that is a grid item whose
+/// grid has already fixed its used inner HEIGHT (its row, less its own
+/// edges). The container's box must already carry that height.
+pub(crate) fn layout_flex_container_at_used_height(container: &mut LayoutBox, used_inner_height: f32) {
+    let container_box = container.dimensions.clone();
+    layout_flex_container_at(container, &container_box, None, Some(used_inner_height));
+}
+
 /// As [`layout_flex_container_in`], for a container that is itself a flex
 /// item whose parent flex has already fixed its used inner HEIGHT.
 ///
@@ -379,7 +387,12 @@ fn layout_flex_container_at(
     // For column direction, cross axis is horizontal (width)
     let has_definite_cross_size = match cross_axis {
         Axis::Vertical => {
-            used_inner_height.is_some() || !matches!(container.style.height, Length::Auto)
+            // `fit-content` is sized by content, as `auto` is. Counted as
+            // definite, a wrapping row stretched its lines over the height
+            // the block pre-pass had stacked its items to: linkedin's topic
+            // pills were 570 tall each.
+            used_inner_height.is_some()
+                || !matches!(container.style.height, Length::Auto | Length::FitContent)
         }
         // A block-level flex container with `width: auto` still has a
         // DEFINITE used width — it resolves against its containing block.
@@ -1148,7 +1161,10 @@ fn layout_flex_container_at(
             // of text it contains, which is exactly what happened when the
             // re-anchor re-ran this pass to re-justify the line.
             container.dimensions.content.height = used_main;
-        } else if matches!(container.style.height, rustkit_css::Length::Auto) {
+        } else if matches!(
+            container.style.height,
+            rustkit_css::Length::Auto | rustkit_css::Length::FitContent
+        ) {
             container.dimensions.content.height = content_size;
         } else if container.dimensions.content.height == 0.0 {
             let explicit = match container.style.height {
@@ -2495,7 +2511,12 @@ fn content_border_height(b: &LayoutBox) -> f32 {
     let pb = d.padding.vertical() + d.border.vertical();
     let pct_height = match b.style.height {
         Length::Px(h) => return spec_height_to_border_box(b, h),
-        Length::Auto => false,
+        // `fit-content` is content-sized like `auto`. On the `_` arm it read
+        // the box's own height, which for a squeezed `flex: 1` item is the 0
+        // it was squeezed to: linkedin's hero wrapper (`flex: 1; height:
+        // fit-content` in an auto-height column) stayed 0 tall around 5697px
+        // of content.
+        Length::Auto | Length::FitContent => false,
         Length::Percent(_) => true,
         // Any other length (vh, em, calc…) is already resolved.
         _ => return d.content.height + pb,
