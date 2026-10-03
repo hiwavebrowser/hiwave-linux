@@ -462,6 +462,27 @@ pub enum Length {
     Calc(Box<CalcSum>),
 }
 
+/// One corner of `border-radius`: the two radii of its quarter ellipse
+/// (CSS Backgrounds 3 §5.1). A percentage in `horizontal` refers to the
+/// border box's width and one in `vertical` to its height, so the pair
+/// cannot be folded into one length before layout.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CornerRadius {
+    pub horizontal: Length,
+    pub vertical: Length,
+}
+
+impl CornerRadius {
+    /// Both radii the same length: the one-value form, a quarter circle
+    /// unless the length is a percentage of a non-square box.
+    pub fn circular(radius: Length) -> Self {
+        Self {
+            horizontal: radius.clone(),
+            vertical: radius,
+        }
+    }
+}
+
 impl Length {
     /// Compute the absolute pixel value.
     ///
@@ -987,6 +1008,9 @@ pub enum BackgroundPositionValue {
     Percent(f32),
     /// Pixel offset from the start.
     Px(f32),
+    /// A percentage (0.0 = start, 1.0 = end) plus a pixel offset:
+    /// `right 10px` is 100% - 10px, and `calc(50% + 4px)` is itself.
+    Calc { percent: f32, px: f32 },
 }
 
 impl Default for BackgroundPositionValue {
@@ -1005,6 +1029,9 @@ impl BackgroundPositionValue {
                 (container_size - image_size) * pct
             }
             BackgroundPositionValue::Px(px) => *px,
+            BackgroundPositionValue::Calc { percent, px } => {
+                (container_size - image_size) * percent + px
+            }
         }
     }
 }
@@ -2299,8 +2326,8 @@ impl BorderStyle {
 /// Primer declares hundreds of `--*` on `:root`, and an element that
 /// overrode one of them used to copy every one of them (~11% of github's
 /// cascade). A lookup walks the chain, first layer that names the property
-/// wins; past `MAX_DEPTH` layers everything above the bottom layer is
-/// collapsed into one, so lookups stay bounded.
+/// wins; past `MAX_DEPTH` layers the small layers on top are collapsed into
+/// one, so lookups stay bounded (`MAX_LAYERS` at most).
 #[derive(Clone, Default)]
 pub struct CustomProperties {
     /// `None` hides an inherited value (`initial`, or a reference cycle).
@@ -2311,6 +2338,11 @@ pub struct CustomProperties {
 
 impl CustomProperties {
     const MAX_DEPTH: u32 = 6;
+    /// A layer with at least this many entries is shared by a collapse, not
+    /// copied into it.
+    const LARGE_LAYER: usize = 64;
+    /// The longest chain large layers can build before they are copied too.
+    const MAX_LAYERS: u32 = 32;
 
     /// One flat layer.
     pub fn from_map(map: std::collections::HashMap<String, String>) -> Self {
@@ -2333,16 +2365,25 @@ impl CustomProperties {
                 depth: parent.depth + 1,
             };
         }
-        // Collapse the layers above the bottom one and keep the bottom shared.
-        // The bottom is usually `:root` with hundreds of entries (Primer);
-        // copying it at every sixth layer was ~15% of github's cascade. The
-        // upper layers are small, and a `None` in them still has to mask the
-        // bottom, so masks are kept.
+        // Collapse the small layers on top into one and keep sharing from the
+        // nearest large layer down, or from the bottom. The bottom is usually
+        // `:root` with hundreds of entries (Primer); copying it at every
+        // sixth layer was ~15% of github's cascade. A page can declare
+        // another large set above the bottom (a theme scope on `<html>` or a
+        // container), and a collapse below that layer shares it the same
+        // way. A `None` in a collapsed layer still has to mask the layers
+        // under it, so masks are kept.
         let mut above = vec![parent];
-        while let Some(p) = above.last().and_then(|l| l.parent.as_ref()) {
-            above.push(p);
+        loop {
+            let top = *above.last().expect("starts with the parent");
+            let shared =
+                top.own.len() >= Self::LARGE_LAYER && top.depth + 1 < Self::MAX_LAYERS;
+            match top.parent.as_ref() {
+                Some(p) if !shared => above.push(p),
+                _ => break,
+            }
         }
-        let bottom = above.pop().expect("chain has a parent").clone();
+        let base = above.pop().expect("starts with the parent").clone();
         let mut merged: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         for layer in above.into_iter().rev() {
@@ -2353,8 +2394,8 @@ impl CustomProperties {
         merged.extend(own);
         Self {
             own: merged,
-            depth: bottom.depth + 1,
-            parent: Some(bottom),
+            depth: base.depth + 1,
+            parent: Some(base),
         }
     }
 
@@ -2454,11 +2495,12 @@ pub struct ComputedStyle {
     pub border_bottom_style: BorderStyle,
     pub border_left_style: BorderStyle,
 
-    // Border radius (for rounded corners)
-    pub border_top_left_radius: Length,
-    pub border_top_right_radius: Length,
-    pub border_bottom_right_radius: Length,
-    pub border_bottom_left_radius: Length,
+    // Border radius (for rounded corners): a horizontal and a vertical
+    // radius per corner (CSS Backgrounds 3 §5.1)
+    pub border_top_left_radius: CornerRadius,
+    pub border_top_right_radius: CornerRadius,
+    pub border_bottom_right_radius: CornerRadius,
+    pub border_bottom_left_radius: CornerRadius,
 
     // Colors
     pub color: Color,
@@ -2616,6 +2658,17 @@ pub struct ComputedStyle {
     pub custom_properties: std::sync::Arc<CustomProperties>,
 }
 
+/// The initial value of `font-family`, which CSS leaves to the UA. Chrome's
+/// default font on macOS is Times (`getComputedStyle` of an unstyled element
+/// reports it). `sans-serif` stood here, so every page that sets no font was
+/// laid out in a sans face: a 28-character line at 16px was 220.78px wide
+/// where Chrome 148 has 199.52.
+#[cfg(target_os = "macos")]
+pub const INITIAL_FONT_FAMILY: &str = "Times";
+/// The initial value of `font-family`, which CSS leaves to the UA.
+#[cfg(not(target_os = "macos"))]
+pub const INITIAL_FONT_FAMILY: &str = "sans-serif";
+
 impl ComputedStyle {
     /// The transform actually applied: `translate`, then `rotate`, then
     /// `scale`, then `transform` (css-transforms-2 §6, "the transformation
@@ -2641,7 +2694,7 @@ impl ComputedStyle {
             opacity: 1.0,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
-            font_family: "sans-serif".to_string(),
+            font_family: INITIAL_FONT_FAMILY.to_string(),
             text_decoration_line: TextDecorationLine::NONE,
             text_decoration_color: None,
             text_decoration_thickness: Length::Auto,
@@ -3117,12 +3170,26 @@ pub fn parse_color(value: &str) -> Option<Color> {
 
     // Hex colors
     if let Some(hex) = value.strip_prefix('#') {
+        // Only hex digits: `from_str_radix` also takes a sign, and the slices
+        // below are by byte.
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
         let (r, g, b, a) = match hex.len() {
             3 => {
                 let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
                 let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
                 let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
                 (r, g, b, 1.0)
+            }
+            // #rgba: each digit doubled, like #rgb (minifiers write
+            // `transparent` as `#0000`)
+            4 => {
+                let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+                let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+                let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+                let a = (u8::from_str_radix(&hex[3..4], 16).ok()? * 17) as f32 / 255.0;
+                (r, g, b, a)
             }
             6 => {
                 let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
@@ -3678,6 +3745,22 @@ mod tests {
         assert_eq!(parse_color("#fff"), Some(Color::from_rgb(255, 255, 255)));
         assert_eq!(parse_color("#000000"), Some(Color::BLACK));
         assert_eq!(parse_color("#ff0000"), Some(Color::from_rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn a_four_digit_hex_colour_carries_its_alpha() {
+        // What minifiers write for `transparent`.
+        assert_eq!(parse_color("#0000"), Some(Color::new(0, 0, 0, 0.0)));
+        assert_eq!(parse_color("#f00f"), Some(Color::from_rgb(255, 0, 0)));
+        assert_eq!(parse_color("#0f08"), parse_color("#00ff0088"));
+        assert_eq!(parse_color("#FFFA"), parse_color("#ffffffaa"));
+    }
+
+    #[test]
+    fn a_hex_colour_is_hex_digits_only() {
+        for bad in ["#+f+f+f", "#-ff", "#ggg", "#12345", "#", "#\u{e9}1", "#\u{e9}\u{e9}\u{e9}"] {
+            assert_eq!(parse_color(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
@@ -4733,10 +4816,10 @@ mod computed_style_field_guards {
         // and blanked the page. Same shape as min_width: right by virtue of a
         // good default, asserted so it is visibly true rather than accidentally
         // true.
-        assert_eq!(border_top_left_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
-        assert_eq!(border_top_right_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
-        assert_eq!(border_bottom_right_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
-        assert_eq!(border_bottom_left_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_top_left_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_top_right_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_bottom_right_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_bottom_left_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
     }
 }
 
@@ -4845,6 +4928,63 @@ mod custom_properties_collapse_tests {
         assert_eq!(collapsed.get("--r3"), Some("3"));
         assert_eq!(collapsed.to_map(), expected);
         assert!(collapsed.own.len() < 10, "only the upper layers were copied");
+    }
+
+    /// A theme scope puts a large layer above the bottom. Collapses below it
+    /// copy the small layers only: the large one stays shared and still
+    /// answers, masked where a small layer says so.
+    #[test]
+    fn collapse_shares_a_large_layer_above_the_bottom() {
+        let bottom = Arc::new(CustomProperties::from_map(
+            [("--root".to_string(), "r".to_string())].into(),
+        ));
+        let theme: HashMap<String, Option<String>> =
+            (0..500).map(|i| (format!("--t{i}"), Some(format!("{i}")))).collect();
+        let theme = Arc::new(CustomProperties::over(&bottom, theme));
+        let mut cur = theme.clone();
+        let mut flat = cur.to_map();
+        for i in 0..40 {
+            let name = format!("--s{}", i % 7);
+            let value = format!("v{i}");
+            let mut own = layer(&[(name.as_str(), Some(value.as_str()))]);
+            flat.insert(name, value);
+            if i % 5 == 0 {
+                own.insert(format!("--t{i}"), None);
+                flat.remove(&format!("--t{i}"));
+            }
+            cur = Arc::new(CustomProperties::over(&cur, own));
+
+            assert_eq!(cur.to_map(), flat, "layer {i}");
+            assert!(cur.depth < CustomProperties::MAX_DEPTH, "layer {i}");
+            let mut l = &cur;
+            let mut copied = 0;
+            while !Arc::ptr_eq(l, &theme) {
+                copied += l.own.len();
+                l = l.parent.as_ref().expect("the theme layer is still in the chain");
+            }
+            assert!(copied < 64, "layer {i} holds {copied} entries above the theme");
+        }
+    }
+
+    /// Large layers are shared by a collapse, so nesting them deepens the
+    /// chain. Past `MAX_LAYERS` they are copied after all, and the chain
+    /// stays bounded.
+    #[test]
+    fn a_stack_of_large_layers_stays_bounded() {
+        let mut cur = Arc::new(CustomProperties::from_map(HashMap::new()));
+        let mut flat = cur.to_map();
+        for i in 0..100 {
+            let own: HashMap<String, Option<String>> = (0..CustomProperties::LARGE_LAYER)
+                .map(|j| (format!("--v{}", (i * 31 + j) % 400), Some(format!("{i}.{j}"))))
+                .collect();
+            for (k, v) in &own {
+                flat.insert(k.clone(), v.clone().expect("set"));
+            }
+            cur = Arc::new(CustomProperties::over(&cur, own));
+
+            assert!(cur.depth < CustomProperties::MAX_LAYERS, "layer {i}: depth {}", cur.depth);
+            assert_eq!(cur.to_map(), flat, "layer {i}");
+        }
     }
 }
 
