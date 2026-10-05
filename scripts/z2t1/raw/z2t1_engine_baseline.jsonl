@@ -1,0 +1,15 @@
+{"host":"chatgpt.com","verdict":"PASS","status":200,"version":"HTTP/2.0","bytes":309846,"title":"ChatGPT: Chat, Work, Create &amp; Code with AI"}
+{"host":"www.cars.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":6043,"title":"Just a moment..."}
+{"host":"www.topps.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":13478,"title":"You have been blocked"}
+{"host":"www.indeed.com","verdict":"PASS","status":200,"version":"HTTP/2.0","bytes":700002,"title":"Job Search | Indeed"}
+{"host":"www.glassdoor.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":24990,"title":"Security | Glassdoor"}
+{"host":"www.doordash.com","verdict":"PASS","status":200,"version":"HTTP/2.0","bytes":2027766,"title":"DoorDash: Food, Grocery and Retail - Fast Same Day Delivery"}
+{"host":"www.chrono24.com","verdict":"PASS","status":200,"version":"HTTP/2.0","bytes":210065,"title":"Chrono24: The World's Leading Watch Market"}
+{"host":"www.ebay.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":1831,"title":"Error Page | eBay"}
+{"host":"www.edmunds.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":16124,"title":"403 - Access Denied | Edmunds"}
+{"host":"www.oracle.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":1450,"title":"fw_error_www"}
+{"host":"www.sap.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":365,"title":"Access Denied"}
+{"host":"www.nytimes.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":774,"title":"nytimes.com"}
+{"host":"www.yelp.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":776,"title":"yelp.com"}
+{"host":"www.tripadvisor.com","verdict":"PASS","status":200,"version":"HTTP/2.0","bytes":348161,"title":"Tripadvisor: Over a billion reviews &amp; contributions for Hotels, Attractions,"}
+{"host":"www.amazon.com","verdict":"BLOCK","status":202,"version":"HTTP/2.0","bytes":2007,"title":""}
