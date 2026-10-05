@@ -1,4 +1,4 @@
-//! Z2-T1 harness probe: one GET / per host with the shipped client, one JSON line each.
+//! Z2-T1 harness probe: one GET / per host with the shipped client plus the loader's Accept-Language, one JSON line each.
 //! `cargo run -p rustkit-http --example site_probe -- www.ebay.com www.cars.com ...`
 use rustkit_http::Client;
 
@@ -46,7 +46,9 @@ async fn main() {
     };
     for host in hosts {
         let url = format!("https://{host}/");
-        match client.get(&url).await {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("accept-language", http::HeaderValue::from_static("en-US,en;q=0.9"));
+        match client.request(http::Method::GET, &url, headers, None).await {
             Ok(r) => {
                 let body = String::from_utf8_lossy(&r.body).into_owned();
                 let t = title(&body);

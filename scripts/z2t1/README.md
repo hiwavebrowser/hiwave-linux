@@ -24,3 +24,22 @@ sap or nytimes (4 extra exploratory loads, declared; not committed).
 
 Extra loads beyond one per site per run, declared: first dry run, 3 ebay profile loads, the engine baseline run,
 the two clienthello captures (local only), and the 4 patched-h2 loads above.
+
+## Correction (same day, after Atlas asked for one more look at the h2 frames)
+**Probe confound.** `site_probe` used a bare `Client::get`, which sends no `Accept-Language`; the shipped loader
+(`rustkit-net`, default `en-US,en;q=0.9`) and the curl_cffi reference both send it. Every engine row above
+(5 / 7 / 6) therefore lacked a header the real app sends. `site_probe` now sends it.
+
+**h2 frames, local listener, no site traffic** (`h2_dump.py`, `raw/h2frames_*.json`): SETTINGS
+(1=65536, 2=0, 4=6291456, 6=262144) and the connection WINDOW_UPDATE (+15663105) are byte-identical to curl_cffi
+Chrome. Remaining HEADERS-frame differences: curl_cffi sets the PRIORITY flag (exclusive, dep 0, weight 256) and
+pseudo order m,a,s,p (engine: m,s,a,p, h2 crate fixed); header names/order/values otherwise identical once
+Accept-Language is sent. So SETTINGS/WINDOW_UPDATE are not the residual gap.
+
+**Re-run with Accept-Language** (`raw/z2t1_engine_shipped_AL.jsonl`, `raw/z2t1_engine_chrome_AL.jsonl`): 2/15 shipped,
+3/15 Chrome handshake. NOT comparable with the earlier rows: Cloudflare sites (cars, topps, indeed, glassdoor,
+chrono24) now serve challenges to both clients, which says this egress IP's reputation had degraded after the
+volume of loads in this campaign, so run-to-run drift exceeds the +-1 noise estimate. The one signal that survives
+is **nytimes PASS on both clients once Accept-Language is sent**: the earlier "handshake opens nytimes" reading was
+the missing header, not the handshake. No further live loads from this IP; a clean re-measure through the real
+loader (rustkit-net) from a cooled egress is the right next step, not more probing here.

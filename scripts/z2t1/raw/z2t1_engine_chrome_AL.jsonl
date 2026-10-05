@@ -1,0 +1,15 @@
+{"host":"chatgpt.com","verdict":"PASS","status":200,"version":"HTTP/2.0","bytes":310011,"title":"ChatGPT: Chat, Work, Create &amp; Code with AI"}
+{"host":"www.cars.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":6064,"title":"Just a moment..."}
+{"host":"www.topps.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":5842,"title":"Attention Required! | Cloudflare"}
+{"host":"www.indeed.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":27646,"title":"Security Check - Indeed.com"}
+{"host":"www.glassdoor.com","verdict":"BLOCK","status":401,"version":"HTTP/2.0","bytes":1657,"title":"Authenticating..."}
+{"host":"www.doordash.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":280793,"title":"DoorDash"}
+{"host":"www.chrono24.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":4297,"title":"Chrono24"}
+{"host":"www.ebay.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":1991,"title":"Error Page | eBay"}
+{"host":"www.edmunds.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":16275,"title":"403 - Access Denied | Edmunds"}
+{"host":"www.oracle.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":1594,"title":"fw_error_www"}
+{"host":"www.sap.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":377,"title":"Access Denied"}
+{"host":"www.nytimes.com","verdict":"PASS","status":200,"version":"HTTP/2.0","bytes":1696404,"title":"The New York Times - Breaking News, US News, World News and Videos"}
+{"host":"www.yelp.com","verdict":"BLOCK","status":403,"version":"HTTP/2.0","bytes":779,"title":"yelp.com"}
+{"host":"www.tripadvisor.com","verdict":"PASS","status":200,"version":"HTTP/2.0","bytes":352387,"title":"Tripadvisor: Over a billion reviews &amp; contributions for Hotels, Attractions,"}
+{"host":"www.amazon.com","verdict":"BLOCK","status":202,"version":"HTTP/2.0","bytes":2007,"title":""}
