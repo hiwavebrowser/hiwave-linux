@@ -168,6 +168,9 @@ fn roots_cached(
     Ok(roots)
 }
 
+#[cfg(feature = "impersonate-test")]
+mod impersonate;
+
 /// ALPN outcome of a TLS handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NegotiatedProtocol {
@@ -206,6 +209,8 @@ pub struct Client {
     address_policy: AddressPolicy,
     resolver: Arc<dyn Resolve>,
     max_body: Option<usize>,
+    #[cfg(feature = "impersonate-test")]
+    chrome_profile: Option<impersonate::ChromeProfile>,
     #[cfg(not(feature = "native-tls"))]
     tls_connector: TlsConnector,
     #[cfg(feature = "native-tls")]
@@ -231,6 +236,8 @@ impl Client {
             address_policy: AddressPolicy::default(),
             resolver: Arc::new(SystemResolver),
             max_body: None,
+            #[cfg(feature = "impersonate-test")]
+            chrome_profile: None,
             tls_connector,
         })
     }
@@ -295,6 +302,8 @@ impl Client {
             address_policy: AddressPolicy::default(),
             resolver: Arc::new(SystemResolver),
             max_body: None,
+            #[cfg(feature = "impersonate-test")]
+            chrome_profile: None,
             tls_connector,
         })
     }
@@ -327,6 +336,15 @@ impl Client {
             _ => NegotiatedProtocol::Http1,
         };
         Ok((tls_stream, negotiated))
+    }
+
+    /// TEST-ONLY (Z2-T1): handshake with a Chrome-shaped TLS ClientHello and
+    /// h2 SETTINGS. Exists only under `--features impersonate-test`; the
+    /// honest User-Agent is unchanged and nothing answers a challenge.
+    #[cfg(feature = "impersonate-test")]
+    pub fn with_test_chrome_handshake(mut self) -> Result<Self, HttpError> {
+        self.chrome_profile = Some(impersonate::ChromeProfile::new()?);
+        Ok(self)
     }
 
     /// Create a client builder.
@@ -459,6 +477,19 @@ impl Client {
         let addr = format!("{}:{}", host, port);
         let stream = self.connect(host, port).await?;
 
+        #[cfg(feature = "impersonate-test")]
+        if let Some(profile) = &self.chrome_profile {
+            let (tls_stream, negotiated) = profile.connect(host, stream).await?;
+            return match negotiated {
+                NegotiatedProtocol::H2 => {
+                    self.send_request_h2(tls_stream, method, url, headers, body).await
+                }
+                NegotiatedProtocol::Http1 => {
+                    self.send_request(tls_stream, host, method, url, headers, body).await
+                }
+            };
+        }
+
         let (tls_stream, negotiated) = self.connect_tls(host, &addr, stream).await?;
 
         match negotiated {
@@ -495,7 +526,16 @@ impl Client {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let (mut send_request, connection) = h2::client::handshake(stream)
+        #[cfg(feature = "impersonate-test")]
+        let h2_builder = if self.chrome_profile.is_some() {
+            impersonate::chrome_h2_builder()
+        } else {
+            h2::client::Builder::new()
+        };
+        #[cfg(not(feature = "impersonate-test"))]
+        let h2_builder = h2::client::Builder::new();
+        let (mut send_request, connection) = h2_builder
+            .handshake(stream)
             .await
             .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
 
@@ -1090,6 +1130,24 @@ impl Client {
         // BufRead line/chunk parser. When h2 is negotiated we buffer via the
         // h2 path and stream from memory — correct, just not incremental;
         // incremental h2 streaming is the follow-up.
+        #[cfg(feature = "impersonate-test")]
+        if let Some(profile) = &self.chrome_profile {
+            let (tls_stream, negotiated) = profile.connect(host, stream).await?;
+            if negotiated == NegotiatedProtocol::H2 {
+                let raw = self
+                    .send_request_h2(tls_stream, &Method::GET, url, &HeaderMap::new(), &None)
+                    .await?;
+                let len = raw.body.len() as u64;
+                return Ok(StreamingResponse {
+                    status: raw.status,
+                    headers: raw.headers,
+                    content_length: Some(len),
+                    reader: Box::new(std::io::Cursor::new(raw.body)),
+                });
+            }
+            return self.send_streaming_request(tls_stream, host, url).await;
+        }
+
         let (tls_stream, negotiated) = self.connect_tls(host, &addr, stream).await?;
         if negotiated == NegotiatedProtocol::H2 {
             let raw = self

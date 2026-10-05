@@ -1,0 +1,141 @@
+{
+ "target": "chrome",
+ "utc": "2026-10-05T14:27:11Z",
+ "results": {
+  "chatgpt": {
+   "vendor": "cloudflare",
+   "verdict": "PASS",
+   "detail": "200",
+   "status": 200,
+   "http_version": 3,
+   "bytes": 313195,
+   "final": "https://chatgpt.com/"
+  },
+  "cars": {
+   "vendor": "cloudflare",
+   "verdict": "PASS",
+   "detail": "200",
+   "status": 200,
+   "http_version": 3,
+   "bytes": 496042,
+   "final": "https://www.cars.com/"
+  },
+  "topps": {
+   "vendor": "cloudflare",
+   "verdict": "BLOCK",
+   "detail": "403/cf-challenge",
+   "status": 403,
+   "http_version": 3,
+   "bytes": 13521,
+   "final": "https://www.topps.com/"
+  },
+  "indeed": {
+   "vendor": "cloudflare",
+   "verdict": "PASS",
+   "detail": "200",
+   "status": 200,
+   "http_version": 3,
+   "bytes": 700715,
+   "final": "https://www.indeed.com/"
+  },
+  "glassdoor": {
+   "vendor": "cloudflare",
+   "verdict": "PASS",
+   "detail": "200",
+   "status": 200,
+   "http_version": 3,
+   "bytes": 642026,
+   "final": "https://www.glassdoor.com/recruiter?redirected_from=index"
+  },
+  "doordash": {
+   "vendor": "cloudflare",
+   "verdict": "PASS",
+   "detail": "200",
+   "status": 200,
+   "http_version": 3,
+   "bytes": 2030950,
+   "final": "https://www.doordash.com/"
+  },
+  "chrono24": {
+   "vendor": "cloudflare",
+   "verdict": "PASS",
+   "detail": "200",
+   "status": 200,
+   "http_version": 3,
+   "bytes": 210063,
+   "final": "https://www.chrono24.com/"
+  },
+  "ebay": {
+   "vendor": "akamai",
+   "verdict": "BLOCK",
+   "detail": "403",
+   "status": 403,
+   "http_version": 3,
+   "bytes": 1991,
+   "final": "https://www.ebay.com/"
+  },
+  "edmunds": {
+   "vendor": "akamai",
+   "verdict": "BLOCK",
+   "detail": "200/akamai-denial",
+   "status": 200,
+   "http_version": 3,
+   "bytes": 2379,
+   "final": "https://www.edmunds.com/"
+  },
+  "oracle": {
+   "vendor": "akamai",
+   "verdict": "BLOCK",
+   "detail": "403",
+   "status": 403,
+   "http_version": 3,
+   "bytes": 1594,
+   "final": "https://www.oracle.com/"
+  },
+  "sap": {
+   "vendor": "akamai",
+   "verdict": "PASS",
+   "detail": "200",
+   "status": 200,
+   "http_version": 3,
+   "bytes": 59467,
+   "final": "https://www.sap.com/index.html"
+  },
+  "nytimes": {
+   "vendor": "datadome",
+   "verdict": "BLOCK",
+   "detail": "200/datadome",
+   "status": 200,
+   "http_version": 3,
+   "bytes": 1719572,
+   "final": "https://www.nytimes.com/"
+  },
+  "yelp": {
+   "vendor": "datadome",
+   "verdict": "BLOCK",
+   "detail": "403/datadome",
+   "status": 403,
+   "http_version": 3,
+   "bytes": 779,
+   "final": "https://www.yelp.com/"
+  },
+  "tripadvisor": {
+   "vendor": "datadome",
+   "verdict": "BLOCK",
+   "detail": "200/datadome",
+   "status": 200,
+   "http_version": 3,
+   "bytes": 352384,
+   "final": "https://www.tripadvisor.com/"
+  },
+  "amazon": {
+   "vendor": "awswaf",
+   "verdict": "BLOCK",
+   "detail": "202",
+   "status": 202,
+   "http_version": 3,
+   "bytes": 2007,
+   "final": "https://www.amazon.com/"
+  }
+ }
+}
