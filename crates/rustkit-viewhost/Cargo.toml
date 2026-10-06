@@ -43,3 +43,21 @@ x11 = { version = "2.21", features = ["xlib"] }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Makes an NSWindow, which AppKit only allows on the main thread, so it runs
+# without the test harness.
+[[test]]
+name = "macos_set_bounds"
+harness = false
+
+[[test]]
+name = "macos_click_point"
+harness = false
+
+[[test]]
+name = "macos_key_events"
+harness = false
+
+[[test]]
+name = "macos_pointer_moves"
+harness = false
