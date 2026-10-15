@@ -68,10 +68,10 @@ fn selector_matches_compat(
     // The carried tests describe ancestors ROOT-FIRST (the old engine's
     // convention); the adopted matcher walks them NEAREST-FIRST. Reverse at
     // the seam so each side keeps its own convention.
-    let anc: Vec<(String, Vec<String>, Option<String>)> = ancestors
+    let anc: Vec<AncestorKey> = ancestors
         .iter()
         .rev()
-        .map(|a| (a.tag.clone(), a.classes.clone(), a.id.clone()))
+        .map(|a| (a.tag.clone(), a.classes.clone(), a.id.clone(), None))
         .collect();
     let anc: Vec<Ancestor> = anc.into_iter().map(std::rc::Rc::new).collect();
     let _ = e;
@@ -85,12 +85,10 @@ fn shim_engine() -> Engine {
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     Engine {
         font_loader: Arc::new(FontLoader::new()),
-        config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-        compositor: test_compositor(), renderer: None,
+        config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
         loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
         image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
         style_trace: std::cell::RefCell::new(None),
-        render_failing: std::collections::HashSet::new(),
         building_view: std::cell::Cell::new(None),
         building_focus: std::cell::Cell::new(None),
         svg_cache: std::collections::HashMap::new(),
@@ -547,12 +545,10 @@ mod box_shadow_paint_tests {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -729,12 +725,10 @@ mod box_shorthand_and_auto_margins {
             #c{width:400px;height:50px;margin:0 auto}</style></head>
             <body><div id=c>x</div></body></html>"#;
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let e = Engine { font_loader: Arc::new(FontLoader::new()), config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+        let e = Engine { font_loader: Arc::new(FontLoader::new()), config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(), };
@@ -764,12 +758,10 @@ mod canvas_background_propagation {
 
     fn first_command(html: &str) -> String {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let e = Engine { font_loader: Arc::new(FontLoader::new()), config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+        let e = Engine { font_loader: Arc::new(FontLoader::new()), config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(), };
@@ -941,15 +933,12 @@ mod child_combinator_tests {
             font_loader: Arc::new(FontLoader::new()),
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: test_compositor(),
-            renderer: None,
+            presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -1104,15 +1093,12 @@ mod external_stylesheet_tests {
             font_loader: Arc::new(FontLoader::new()),
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: test_compositor(),
-            renderer: None,
+            presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -1157,15 +1143,12 @@ mod external_stylesheet_tests {
             font_loader: Arc::new(FontLoader::new()),
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: test_compositor(),
-            renderer: None,
+            presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -1219,12 +1202,10 @@ mod external_stylesheet_tests {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -1255,12 +1236,10 @@ mod flex_column_cross_stretch {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -1387,7 +1366,9 @@ mod flex_property_tests {
         let s = st("flex: 1");
         assert_eq!(s.flex_grow, 1.0);
         assert_eq!(s.flex_shrink, 1.0);
-        assert_eq!(s.flex_basis, FlexBasis::Length(0.0), "flex: 1 must set basis 0, not auto");
+        // 0% since the 2026-10-15 adoption (css-flexbox-1 §7.1.1): still a
+        // zero basis, not auto; `content` only in an auto-height column.
+        assert_eq!(s.flex_basis, FlexBasis::Percent(0.0), "flex: 1 must set basis 0, not auto");
     }
 
     #[test]
@@ -1498,12 +1479,10 @@ mod flexbox_45_automatic_minimum {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -1536,12 +1515,10 @@ mod flexbox_45_automatic_minimum {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -1675,12 +1652,10 @@ mod font_size_cascade_absolutise {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -1939,12 +1914,10 @@ mod grid_intrinsic_track_sizing {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -2042,12 +2015,10 @@ mod html_root_inheritance {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -2128,9 +2099,7 @@ mod inheritance_tests {
             font_loader: Arc::new(FontLoader::new()),
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: test_compositor(),
-            renderer: None,
+            presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("loader"),
             ),
@@ -2138,7 +2107,6 @@ mod inheritance_tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -2320,12 +2288,10 @@ mod l1_live_relative_units_reach_flex_and_grid {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -2736,12 +2702,10 @@ mod position_wire_tests {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -2945,12 +2909,10 @@ mod rounded_rect_tests {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -3176,12 +3138,10 @@ mod text_decoration_tests {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
             font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(), views: HashMap::new(), presenter: Presenter::layout_only(test_compositor()),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             building_view: std::cell::Cell::new(None),
             building_focus: std::cell::Cell::new(None),
             svg_cache: std::collections::HashMap::new(),
@@ -3432,7 +3392,7 @@ mod x11_content_path {
         let mut engine = EngineBuilder::new().build().expect("engine");
 
         let parent = engine
-            .viewhost
+            .viewhost()
             .create_main_window(rustkit_viewhost::MainWindowConfig {
                 title: "rustkit x11 content path".to_string(),
                 width: 800,

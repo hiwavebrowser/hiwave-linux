@@ -8,7 +8,9 @@
 //! Unlike hiwave-smoke, this does NOT require a display and can run in CI.
 
 use clap::Parser;
-use rustkit_engine::{EngineBuilder, EngineConfig, ScriptOutcome, ScriptRecord};
+use rustkit_engine::inspector::{CollectingSink, JsonLinesSink};
+use rustkit_engine::{EngineBuilder, EngineConfig, Inspector, InspectorSink, InspectorSummary, ScriptOutcome, ScriptRecord};
+use std::sync::Arc;
 use rustkit_viewhost::Bounds;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -17,7 +19,7 @@ use std::time::{Duration, Instant};
 use tracing::{error, warn};
 use url::Url;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "parity-capture")]
 #[command(about = "Headless frame capture for parity testing")]
 #[command(group(clap::ArgGroup::new("source").required(true).args(["html_file", "url"])))]
@@ -85,6 +87,80 @@ struct Args {
     #[arg(long)]
     timer_horizon_ms: Option<u64>,
 
+    /// Wall-clock budget for the page's scripts in milliseconds (default: 5000, the
+    /// engine's and the board's). The live app runs pages at 60000; a capture taken
+    /// with another budget is not comparable with the board and must be labelled.
+    #[arg(long)]
+    script_budget_ms: Option<u64>,
+
+    /// Stop a script that is still running when the script budget is spent, as the
+    /// live app does (off by default: the board lets a running script finish). A
+    /// capture taken with it is not comparable with the board and must be labelled.
+    #[arg(long)]
+    interrupt_scripts: bool,
+
+    /// After a URL load, turn the live loop as the app does for this many
+    /// milliseconds of real time (timers, script requests, relayouts) and
+    /// report what the turns did as `live_stats`. Off by default; a frame
+    /// taken with it is not comparable with the board.
+    #[arg(long)]
+    live_ms: Option<u64>,
+
+    /// Write the view's Inspector event log for the whole capture to this
+    /// file, as JSON Lines (one record per line; see
+    /// docs/INSPECTOR_EVENT_LOG.md). URLs lose their query and fragment.
+    #[arg(long)]
+    event_log: Option<String>,
+
+    /// Add `event_summary` to the result: counts over the Inspector events
+    /// (console calls by level, script errors, unsupported APIs by member,
+    /// requests by type and outcome, failures by stage).
+    #[arg(long)]
+    event_summary: bool,
+
+    /// Keep query strings and fragments in the event log's URLs. They can
+    /// carry session ids and tokens: never for a log that will be shared.
+    #[arg(long)]
+    event_log_keep_query: bool,
+
+    /// Keep the text of console messages in the event log (by default a
+    /// message is its arguments' types and string lengths). Pages log
+    /// cookies and form values: never for a log that will be shared.
+    #[arg(long)]
+    event_log_console_text: bool,
+
+    /// Keep the message text of the page's errors in the event log (by
+    /// default an error is its type, a standard name and its message's
+    /// length). Pages throw cookies and form values: never for a log that
+    /// will be shared.
+    #[arg(long)]
+    event_log_error_text: bool,
+
+    /// Print the element diagnostics record (JSON) of the first element
+    /// matching this CSS selector. Repeatable.
+    #[arg(long, value_name = "SELECTOR")]
+    diagnose: Vec<String>,
+
+    /// Print the diagnostics record of the element hit at viewport point
+    /// `X,Y` (CSS px). Repeatable.
+    #[arg(long, value_name = "X,Y", value_parser = parse_point_arg)]
+    diagnose_at: Vec<(f32, f32)>,
+
+    /// Write a diagnostics record for every element (with or without a
+    /// layout box) to this file.
+    #[arg(long)]
+    dump_diagnostics: Option<String>,
+
+    /// Cap on the number of records `--dump-diagnostics` writes; the dump
+    /// says `truncated: true` when the page had more elements.
+    #[arg(long, default_value_t = rustkit_engine::DEFAULT_MAX_ELEMENTS)]
+    diagnostics_max_elements: usize,
+
+    /// Keep the page URL's query and fragment in diagnostics records
+    /// (stripped by default).
+    #[arg(long)]
+    diagnostics_keep_query: bool,
+
     /// Enable verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -106,12 +182,24 @@ struct CaptureResult {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     script_stats: Option<ScriptStats>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    live_stats: Option<LiveStats>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     elapsed_ms: Option<u64>,
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     captures: Option<Vec<StepCapture>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     action_results: Option<Vec<ActionResult>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    event_log_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    event_summary: Option<InspectorSummary>,
+    /// `--diagnose` / `--diagnose-at` records, in argument order; `null`
+    /// where nothing matched.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    diagnostics: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    diagnostics_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -171,6 +259,8 @@ struct ActionResult {
     label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     selector_used: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<String>,
     elapsed_ms: u64,
 }
 
@@ -187,10 +277,15 @@ impl CaptureResult {
             display_list_path: None,
             layout_stats: None,
             script_stats: None,
+            live_stats: None,
             elapsed_ms: None,
             error: None,
             captures: None,
             action_results: None,
+            event_log_path: None,
+            event_summary: None,
+            diagnostics: None,
+            diagnostics_path: None,
         }
     }
 
@@ -211,6 +306,65 @@ struct ScriptStats {
     over_budget: u32,
     bytes: u64,
     elapsed_ms: u64,
+}
+
+/// What the live loop did after the load (`--live-ms`).
+#[derive(Serialize, Deserialize, Default)]
+struct LiveStats {
+    /// Real time the loop was given.
+    wall_ms: u64,
+    /// Of it, time spent inside turns: the window thread's time in the app.
+    busy_ms: u64,
+    turns: u32,
+    timer_callbacks: u64,
+    requests: u64,
+    relayouts: u32,
+    /// The page had no timer set and nothing in flight when the loop ended.
+    idle_at_end: bool,
+}
+
+/// The app's pacing (`hiwave-app` `process_events`): a turn when the next
+/// timer is due or a request is out, never sooner than the last turn took.
+fn run_live(
+    rt: &tokio::runtime::Runtime,
+    engine: &mut rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    live_ms: u64,
+) -> LiveStats {
+    const MIN_LIVE_TURN: Duration = Duration::from_millis(4);
+    const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
+    let limit = Duration::from_millis(live_ms);
+    let began = Instant::now();
+    let mut clock = began;
+    let mut stats = LiveStats::default();
+    tracing::info!(live_ms, "Live loop started");
+    loop {
+        let started = Instant::now();
+        let elapsed_ms = started.duration_since(clock).as_millis() as u64;
+        clock += Duration::from_millis(elapsed_ms);
+        let turn = rt.block_on(engine.pump_live(view_id, elapsed_ms));
+        stats.turns += 1;
+        stats.timer_callbacks += turn.timers_ran as u64;
+        stats.requests += turn.requests as u64;
+        stats.relayouts += turn.relaid_out as u32;
+        stats.busy_ms += started.elapsed().as_millis() as u64;
+        let timer = turn.next_timer_ms.map(Duration::from_millis);
+        let next = if turn.in_flight > 0 {
+            Some(timer.map_or(LIVE_REQUEST_POLL, |t| t.min(LIVE_REQUEST_POLL)))
+        } else {
+            timer
+        };
+        stats.idle_at_end = next.is_none();
+        let left = limit.saturating_sub(began.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        // An idle page still gets its time: in the app only input wakes it.
+        let wait = next.map_or(left, |wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN));
+        std::thread::sleep(wait.min(left));
+    }
+    stats.wall_ms = began.elapsed().as_millis() as u64;
+    stats
 }
 
 #[derive(Serialize, Deserialize)]
@@ -252,7 +406,16 @@ fn main() {
     }
 
     let started = Instant::now();
-    let mut result = run_capture(&args);
+    let args_clone = args.clone();
+    let handler = std::thread::Builder::new()
+        .name("capture-worker".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || run_capture(&args_clone))
+        .expect("failed to spawn capture worker thread");
+    let mut result = match handler.join() {
+        Ok(r) => r,
+        Err(_) => CaptureResult::new(&args).failed("error", "worker thread panicked".to_string()),
+    };
     result.elapsed_ms = Some(started.elapsed().as_millis() as u64);
 
     // Output JSON result
@@ -277,7 +440,40 @@ const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) HiWave/1.0 Rus
 #[cfg(not(target_os = "linux"))]
 const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0";
 
+/// The capture, then its Inspector event log and summary, whichever way
+/// the capture ended.
 fn run_capture(args: &Args) -> CaptureResult {
+    let wants_events = args.event_log.is_some() || args.event_summary;
+    let sink = wants_events.then(CollectingSink::default);
+    let mut inspector: Option<Arc<Inspector>> = None;
+    let mut result = capture(args, sink.as_ref(), &mut inspector);
+    if let Some(sink) = sink {
+        let records = sink.records();
+        if let Some(ref path) = args.event_log {
+            match write_event_log(path, &records) {
+                Ok(()) => result.event_log_path = Some(path.clone()),
+                Err(e) => error!("Failed to write event log: {:?}", e),
+            }
+        }
+        if args.event_summary {
+            let unsupported = inspector.map(|i| i.unsupported_apis()).unwrap_or_default();
+            result.event_summary = Some(InspectorSummary::from_records(&records, &unsupported));
+        }
+    }
+    result
+}
+
+fn write_event_log(path: &str, records: &[rustkit_engine::InspectorRecord]) -> std::io::Result<()> {
+    let file = std::io::BufWriter::new(fs::File::create(path)?);
+    let mut sink = JsonLinesSink::new(file);
+    for record in records {
+        sink.record(record);
+    }
+    sink.flush();
+    Ok(())
+}
+
+fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Arc<Inspector>>) -> CaptureResult {
     let mut result = CaptureResult::new(args);
 
     // Read HTML file (URL mode fetches inside the engine instead)
@@ -316,14 +512,8 @@ fn run_capture(args: &Args) -> CaptureResult {
         None => None,
     };
 
-    let mut config = EngineConfig::for_parity_testing();
-    if let Some(horizon) = args.timer_horizon_ms {
-        config.timer_horizon_ms = horizon;
-    }
-    config.replay_proxy = replay_proxy;
-
     let engine_result = EngineBuilder::new()
-        .with_config(config)
+        .with_config(capture_config(args, replay_proxy))
         .user_agent(user_agent)
         .javascript_enabled(url.is_some() || args.actions.is_some())
         .build();
@@ -347,6 +537,12 @@ fn run_capture(args: &Args) -> CaptureResult {
             return result.failed("error", format!("Failed to create headless view: {:?}", e));
         }
     };
+    // Before the load: the whole load goes to the sink, none of it is
+    // dropped by the view's ring buffer.
+    if let Some(sink) = sink {
+        let _ = engine.add_inspector_sink(view_id, Box::new(sink.clone()));
+        *inspector = engine.inspector(view_id);
+    }
 
     // Load: either the fixture HTML, or the live URL through the same
     // navigation path the browser uses (document fetch, then stylesheets,
@@ -362,6 +558,20 @@ fn run_capture(args: &Args) -> CaptureResult {
         if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
             return result.failed("error", format!("Failed to load URL: {:?}", e));
         }
+        // The engine shows a server's error page as the page, which is what
+        // the app's user should see. A capture is of the site, not of its
+        // error page: it fails as it did when the engine refused the
+        // response, with the same message first, so no board counts a 403
+        // as a load.
+        if let Some(status) = engine
+            .http_status(view_id)
+            .filter(|s| !(200..300).contains(s))
+        {
+            return result.failed(
+                "error",
+                format!("Failed to load URL: NavigationError(\"HTTP error\") (HTTP {status}; the engine rendered its body)"),
+            );
+        }
         if let Some(log) = engine.script_log(view_id) {
             result.script_stats = Some(script_stats(log));
             if let Some(ref path) = args.dump_scripts {
@@ -369,6 +579,9 @@ fn run_capture(args: &Args) -> CaptureResult {
                     error!("Failed to write script log: {:?}", e);
                 }
             }
+        }
+        if let Some(live_ms) = args.live_ms {
+            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
         }
     } else if let Some(html) = html_content {
         if let Err(e) = engine.load_html(view_id, &html) {
@@ -444,10 +657,72 @@ fn run_capture(args: &Args) -> CaptureResult {
         }
     }
 
+    write_diagnostics(&engine, view_id, args, &mut result);
+
     // Clean up
     let _ = engine.destroy_view(view_id);
 
     result
+}
+
+/// `--diagnose`, `--diagnose-at` and `--dump-diagnostics`: records read from
+/// the final layout, after any actions and the final render.
+fn write_diagnostics(
+    engine: &rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    args: &Args,
+    result: &mut CaptureResult,
+) {
+    use rustkit_engine::{DiagnosticTarget, DiagnosticsOptions};
+    let opts = DiagnosticsOptions {
+        include_url_query: args.diagnostics_keep_query,
+        max_elements: args.diagnostics_max_elements,
+    };
+    let targets: Vec<DiagnosticTarget> = args
+        .diagnose
+        .iter()
+        .map(|s| DiagnosticTarget::Selector(s.clone()))
+        .chain(args.diagnose_at.iter().map(|&(x, y)| DiagnosticTarget::Point { x, y }))
+        .collect();
+    if !targets.is_empty() {
+        let records = targets
+            .iter()
+            .map(|t| match engine.element_diagnostics(view_id, t, &opts) {
+                Ok(r) => serde_json::to_value(r).unwrap_or(serde_json::Value::Null),
+                Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+            })
+            .collect();
+        result.diagnostics = Some(records);
+    }
+    if let Some(ref path) = args.dump_diagnostics {
+        match engine.all_element_diagnostics(view_id, &opts) {
+            Ok(dump) => {
+                if dump.truncated {
+                    warn!(
+                        total = dump.total_elements,
+                        written = dump.elements.len(),
+                        "diagnostics dump truncated at --diagnostics-max-elements"
+                    );
+                }
+                match serde_json::to_string(&dump).map(|json| fs::write(path, json)) {
+                    Ok(Ok(())) => result.diagnostics_path = Some(path.clone()),
+                    Ok(Err(e)) => error!("Failed to write diagnostics: {:?}", e),
+                    Err(e) => error!("Failed to serialise diagnostics: {:?}", e),
+                }
+            }
+            Err(e) => error!("Failed to build diagnostics: {:?}", e),
+        }
+    }
+}
+
+/// `X,Y` in CSS px.
+fn parse_point_arg(s: &str) -> Result<(f32, f32), String> {
+    let (x, y) = s
+        .split_once(',')
+        .ok_or_else(|| format!("expected X,Y, got {s:?}"))?;
+    let x = x.trim().parse().map_err(|e| format!("x {x:?}: {e}"))?;
+    let y = y.trim().parse().map_err(|e| format!("y {y:?}: {e}"))?;
+    Ok((x, y))
 }
 
 fn parse_actions(raw: &str) -> Result<Vec<ActionItem>, String> {
@@ -466,6 +741,20 @@ fn parse_actions(raw: &str) -> Result<Vec<ActionItem>, String> {
             .map(|p| p.actions)
             .map_err(|e| format!("failed to parse actions JSON object: {e}"))
     }
+}
+
+fn parse_point(eval_res: &str) -> Option<(f32, f32)> {
+    let idx = eval_res.find("point:")?;
+    let rest = &eval_res[idx + 6..];
+    let parts: Vec<&str> = rest.split(':').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let x_part = parts[0].trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-');
+    let y_part = parts[1].trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-');
+    let x = x_part.parse::<f32>().ok()?;
+    let y = y_part.parse::<f32>().ok()?;
+    Some((x, y))
 }
 
 fn execute_actions(
@@ -487,8 +776,9 @@ fn execute_actions(
             status: "ok".to_string(),
             error: None,
             frame: None,
-            label: None,
+            label: a.label.clone(),
             selector_used: None,
+            method: None,
             elapsed_ms: 0,
         };
 
@@ -498,7 +788,10 @@ fn execute_actions(
                     let timeout = Duration::from_millis(a.timeout_ms.or(a.ms).unwrap_or(2000));
                     let wait_start = Instant::now();
                     let sel_json = serde_json::to_string(sel).unwrap_or_default();
-                    let check_js = format!("Boolean(document.querySelector({})) ? 'found' : 'missing'", sel_json);
+                    let check_js = format!(
+                        "Boolean(document.querySelector({})) ? 'found' : 'missing'",
+                        sel_json
+                    );
                     let mut found = false;
                     while wait_start.elapsed() < timeout {
                         if let Ok(eval_res) = engine.execute_script(view_id, &check_js) {
@@ -524,43 +817,68 @@ fn execute_actions(
                     let mut clicked = false;
                     for s in selectors {
                         let s_json = serde_json::to_string(s).unwrap_or_default();
-                        let click_js = format!(
+                        let query_js = format!(
                             r#"(function() {{
-                                var el = document.querySelector({0});
-                                if (!el) return 'missing';
-                                if (typeof el.focus === 'function') el.focus();
-                                if (typeof el.click === 'function') {{
-                                    el.click();
-                                }} else {{
-                                    el.dispatchEvent(new Event('click', {{ bubbles: true, cancelable: true }}));
+                                try {{
+                                    var el = document.querySelector({0});
+                                    if (!el) return 'missing';
+                                    if (typeof el.getBoundingClientRect === 'function') {{
+                                        var r = el.getBoundingClientRect();
+                                        if (r && r.width > 0 && r.height > 0) {{
+                                            var cx = r.left + r.width / 2.0;
+                                            var cy = r.top + r.height / 2.0;
+                                            return 'point:' + cx + ':' + cy;
+                                        }}
+                                    }}
+                                    if (typeof el.focus === 'function') {{
+                                        try {{ el.focus(); }} catch (e) {{}}
+                                    }}
+                                    if (typeof el.click === 'function') {{
+                                        try {{ el.click(); }} catch (e) {{}}
+                                    }} else {{
+                                        try {{ el.dispatchEvent(new Event('click', {{ bubbles: true, cancelable: true }})); }} catch (e) {{}}
+                                    }}
+                                    return 'fallback_clicked';
+                                }} catch (e) {{
+                                    return 'error:' + e;
                                 }}
-                                return 'clicked';
                             }})()"#,
                             s_json
                         );
-                        if let Ok(eval_res) = engine.execute_script(view_id, &click_js) {
-                            if eval_res.contains("clicked") {
+                        if let Ok(eval_res) = engine.execute_script(view_id, &query_js) {
+                            if let Some((cx, cy)) = parse_point(&eval_res) {
+                                engine.mouse_move_at_point(view_id, cx, cy);
+                                let _ = engine.mouse_down_at_point(view_id, cx, cy);
+                                let _ = engine.click_at_point(view_id, cx, cy);
+                                let _ = engine.relayout(view_id);
                                 clicked = true;
                                 a_res.selector_used = Some(s.to_string());
+                                a_res.method = Some(format!("engine_point({:.1}, {:.1})", cx, cy));
+                                break;
+                            }
+                            if eval_res.contains("fallback_clicked") {
+                                let _ = engine.relayout(view_id);
+                                clicked = true;
+                                a_res.selector_used = Some(s.to_string());
+                                a_res.method = Some("synthetic_fallback".to_string());
+                                if a_res.label.is_none() {
+                                    a_res.label = Some("fallback".to_string());
+                                }
                                 break;
                             }
                         }
                     }
                     if !clicked {
                         a_res.status = "selector_not_found".to_string();
-                        a_res.error = Some(format!("no matching element found for selector {}", sel));
-                    } else {
-                        let _ = engine.relayout(view_id);
+                        a_res.error =
+                            Some(format!("no matching element found for selector {}", sel));
                     }
                 } else if let (Some(x), Some(y)) = (a.x, a.y) {
-                    let _ = engine.focus_at_point(view_id, x, y);
-                    let click_js = r#"(function() {
-                        if (document.activeElement && typeof document.activeElement.click === 'function') {
-                            document.activeElement.click();
-                        }
-                    })()"#;
-                    let _ = engine.execute_script(view_id, click_js);
+                    engine.mouse_move_at_point(view_id, x, y);
+                    let _ = engine.mouse_down_at_point(view_id, x, y);
+                    let _ = engine.click_at_point(view_id, x, y);
                     let _ = engine.relayout(view_id);
+                    a_res.method = Some(format!("engine_point({:.1}, {:.1})", x, y));
                 } else {
                     a_res.status = "error".to_string();
                     a_res.error = Some("click action requires selector or (x, y)".to_string());
@@ -638,7 +956,9 @@ fn execute_actions(
             "capture" => {
                 if let Some(ref frame) = a.frame {
                     let frame_path = match actions_out_dir {
-                        Some(out_dir) => Path::new(out_dir).join(frame).to_string_lossy().to_string(),
+                        Some(out_dir) => {
+                            Path::new(out_dir).join(frame).to_string_lossy().to_string()
+                        }
                         None => frame.clone(),
                     };
                     if let Some(parent) = Path::new(&frame_path).parent() {
@@ -701,9 +1021,10 @@ fn script_stats(log: &[ScriptRecord]) -> ScriptStats {
         match record.outcome {
             ScriptOutcome::Ran => stats.ran += 1,
             ScriptOutcome::Threw(_) => stats.threw += 1,
-            ScriptOutcome::Skipped(_) => stats.skipped += 1,
+            ScriptOutcome::Skipped(_) | ScriptOutcome::Nomodule => stats.skipped += 1,
             ScriptOutcome::FetchFailed(_) => stats.fetch_failed += 1,
             ScriptOutcome::OverBudget => stats.over_budget += 1,
+            ScriptOutcome::EngineFailed(_) => stats.threw += 1,
         }
         stats.bytes += record.bytes as u64;
         stats.elapsed_ms += record.elapsed_ms;
@@ -719,8 +1040,14 @@ fn script_log_json(log: &[ScriptRecord]) -> serde_json::Value {
                 ScriptOutcome::Ran => ("ran", None),
                 ScriptOutcome::Threw(m) => ("threw", Some(m.clone())),
                 ScriptOutcome::Skipped(why) => ("skipped", Some(why.to_string())),
-                ScriptOutcome::FetchFailed(m) => ("fetch_failed", Some(m.clone())),
+                ScriptOutcome::Nomodule => (
+                    "skipped",
+                    Some("nomodule (skipped, as in module-capable browsers)".to_string()),
+                ),
+                ScriptOutcome::FetchFailed(m) => ("fetch_failed", Some(m.to_string())),
                 ScriptOutcome::OverBudget => ("over_budget", None),
+                // Reported as before the engine marked its own failures.
+                ScriptOutcome::EngineFailed(failure) => ("threw", Some(failure.to_string())),
             };
             serde_json::json!({
                 "source": r.source,
@@ -919,9 +1246,9 @@ fn inject_style_first_in_head(html: &str, attrs: &str, css: &str) -> String {
     let lower = html.to_ascii_lowercase();
 
     let insert_at = ["<head", "<html"].iter().find_map(|open| {
-        lower.find(open).and_then(|start| {
-            lower[start..].find('>').map(|end| start + end + 1)
-        })
+        lower
+            .find(open)
+            .and_then(|start| lower[start..].find('>').map(|end| start + end + 1))
     });
 
     match insert_at {
@@ -932,7 +1259,7 @@ fn inject_style_first_in_head(html: &str, attrs: &str, css: &str) -> String {
 
 fn analyze_layout_json(json_str: &str) -> Option<LayoutStats> {
     let data: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    
+
     let mut stats = LayoutStats {
         total_boxes: 0,
         sized: 0,
@@ -983,10 +1310,124 @@ fn analyze_layout_json(json_str: &str) -> Option<LayoutStats> {
     Some(stats)
 }
 
+/// The engine configuration a capture runs with: the parity defaults, plus
+/// whatever the command line overrides.
+fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
+    let mut config = EngineConfig::for_parity_testing();
+    if let Some(horizon) = args.timer_horizon_ms {
+        config.timer_horizon_ms = horizon;
+    }
+    if let Some(budget) = args.script_budget_ms {
+        config.script_budget_ms = budget;
+    }
+    config.interrupt_scripts_at_budget = args.interrupt_scripts;
+    config.replay_proxy = replay_proxy;
+    config.inspector.keep_url_query = args.event_log_keep_query;
+    config.inspector.keep_console_text = args.event_log_console_text;
+    config.inspector.keep_error_text = args.event_log_error_text;
+    config
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn parsed(extra: &[&str]) -> Args {
+        let mut argv = vec!["parity-capture", "--url", "https://example.test/"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("the command line parses")
+    }
+
+    // The live loop is the app's, not the board's: a capture turns it only
+    // when asked.
+    #[test]
+    fn the_live_loop_is_turned_only_when_asked() {
+        assert_eq!(parsed(&[]).live_ms, None);
+        assert_eq!(parsed(&["--live-ms", "20000"]).live_ms, Some(20_000));
+    }
+
+    // The board is measured at the engine's 5 s script budget, and the live
+    // app runs pages at 60 s (#573). `--script-budget-ms` lets one labelled
+    // run be taken at the app's budget; without the flag nothing changes.
+    #[test]
+    fn the_script_budget_is_the_engines_default_without_the_flag() {
+        let config = capture_config(&parsed(&[]), None);
+        assert_eq!(config.script_budget_ms, 5_000);
+        assert_eq!(
+            config.script_budget_ms,
+            EngineConfig::for_parity_testing().script_budget_ms
+        );
+        assert_eq!(
+            config.timer_horizon_ms,
+            EngineConfig::for_parity_testing().timer_horizon_ms
+        );
+    }
+
+    #[test]
+    fn a_running_script_is_stopped_at_the_budget_only_with_the_flag() {
+        assert!(!capture_config(&parsed(&[]), None).interrupt_scripts_at_budget);
+        assert!(!capture_config(&parsed(&["--script-budget-ms", "60000"]), None).interrupt_scripts_at_budget);
+        let config = capture_config(&parsed(&["--interrupt-scripts"]), None);
+        assert!(config.interrupt_scripts_at_budget);
+        assert_eq!(config.script_budget_ms, 5_000);
+    }
+
+    #[test]
+    fn event_log_urls_lose_their_query_unless_asked() {
+        assert!(!capture_config(&parsed(&["--event-log", "x.jsonl"]), None).inspector.keep_url_query);
+        assert!(capture_config(&parsed(&["--event-log-keep-query"]), None).inspector.keep_url_query);
+        assert!(!capture_config(&parsed(&["--event-log", "x.jsonl"]), None).inspector.keep_console_text);
+        assert!(capture_config(&parsed(&["--event-log-console-text"]), None).inspector.keep_console_text);
+        assert!(!capture_config(&parsed(&["--event-log", "x.jsonl"]), None).inspector.keep_error_text);
+        assert!(capture_config(&parsed(&["--event-log-error-text"]), None).inspector.keep_error_text);
+        // Nothing records unless asked: no buffer either way.
+        assert!(!capture_config(&parsed(&["--event-summary"]), None).inspector.buffer);
+    }
+
+    /// A fixture capture with both flags: the log is JSON Lines of the
+    /// whole load, and the summary counts it.
+    #[test]
+    fn an_event_log_and_summary_cover_the_whole_load() {
+        let dir = std::env::temp_dir().join(format!("parity-capture-events-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let html = dir.join("page.html");
+        fs::write(&html, "<html><body>x</body></html>").unwrap();
+        let log = dir.join("events.jsonl");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--html-file",
+            html.to_str().unwrap(),
+            "--event-log",
+            log.to_str().unwrap(),
+            "--event-summary",
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let text = fs::read_to_string(&log).unwrap();
+        let kinds: Vec<String> = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["type"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds.first().map(String::as_str), Some("navigation_start"));
+        assert!(kinds.contains(&"load_finished".to_string()), "{kinds:?}");
+        let summary = result.event_summary.expect("a summary");
+        assert_eq!(summary.events as usize, kinds.len());
+        assert_eq!(summary.schema, rustkit_engine::inspector::SUMMARY_SCHEMA);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_script_budget_flag_sets_the_engines_script_budget_and_nothing_else() {
+        let config = capture_config(&parsed(&["--script-budget-ms", "60000"]), None);
+        assert_eq!(config.script_budget_ms, 60_000);
+        assert_eq!(
+            config.timer_horizon_ms,
+            EngineConfig::for_parity_testing().timer_horizon_ms
+        );
+    }
 
     fn write_file(dir: &Path, rel: &str, content: &str) {
         let path = dir.join(rel);
@@ -1076,10 +1517,14 @@ mod tests {
         // Canonicalization needs a real file, so use one from the tree.
         let real = Path::new("websuite/micro/gradients/index.html");
         if real.exists() {
-            assert!(is_micro_suite_path(real),
-                "relative micro path must be detected");
+            assert!(
+                is_micro_suite_path(real),
+                "relative micro path must be detected"
+            );
         }
-        assert!(!is_micro_suite_path(Path::new("websuite/cases/x/index.html")));
+        assert!(!is_micro_suite_path(Path::new(
+            "websuite/cases/x/index.html"
+        )));
     }
 
     #[test]
@@ -1091,5 +1536,26 @@ mod tests {
             "/repo/websuite/pages/blog/index.html"
         )));
     }
-}
 
+    #[test]
+    fn diagnostics_flags_parse() {
+        let args = parsed(&["--diagnose", "#a", "--diagnose", "div > p", "--diagnose-at", "10,20.5"]);
+        assert_eq!(args.diagnose, vec!["#a".to_string(), "div > p".to_string()]);
+        assert_eq!(args.diagnose_at, vec![(10.0, 20.5)]);
+        assert_eq!(args.diagnostics_max_elements, 5000);
+        assert!(args.dump_diagnostics.is_none());
+        assert!(Args::try_parse_from(["parity-capture", "--url", "https://e.test/", "--diagnose-at", "10"]).is_err());
+    }
+
+    #[test]
+    fn parse_point_extracts_coordinates_from_js_string() {
+        assert_eq!(
+            parse_point("String(\"point:100:200\")"),
+            Some((100.0, 200.0))
+        );
+        assert_eq!(parse_point("point:12.5:30.25"), Some((12.5, 30.25)));
+        assert_eq!(parse_point("point:-10.0:40.5"), Some((-10.0, 40.5)));
+        assert_eq!(parse_point("String(\"fallback_clicked\")"), None);
+        assert_eq!(parse_point("missing"), None);
+    }
+}

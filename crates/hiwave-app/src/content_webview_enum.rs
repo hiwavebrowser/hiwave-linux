@@ -4,6 +4,8 @@
 use super::webview_rustkit::RustKitView;
 #[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
 use super::content_webview_trait::ContentWebViewOps;
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+use super::webview_rustkit::RustKitView;
 use std::sync::Arc;
 #[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
 use wry::Rect;
@@ -101,4 +103,3 @@ impl ContentWebViewOps for ContentWebView {
         self.set_bounds(rect).map_err(|e| format!("{}", e))
     }
 }
-

@@ -164,9 +164,7 @@
     if (Window === undefined) {
         Window = function Window() { illegal(); };
         if (EventTarget) Object.setPrototypeOf(Window.prototype, EventTarget.prototype);
-        // `window` is the global object, not an instance of a constructor we
-        // could build, so `instanceof Window` is answered by identity.
-        Object.defineProperty(Window, Symbol.hasInstance, { value: function (v) { return v === g; } });
+        Object.setPrototypeOf(g, Window.prototype);
         def('Window', Window);
     }
     function tag(obj, Iface) {
@@ -201,6 +199,11 @@
     // and `typeof ShadowRoot` guards must have a right-hand side.
     iface('ShadowRoot', g.DocumentFragment || Node);
     iface('Attr', Node);
+    iface('CDATASection', g.Text || g.CharacterData || Node);
+    var PI = iface('ProcessingInstruction', g.CharacterData || Node);
+    if (PI && PI.prototype) {
+        Object.defineProperty(PI.prototype, 'target', { get: function () { return ''; }, configurable: true, enumerable: true });
+    }
     iface('NamedNodeMap');
     iface('DOMStringMap');
     var StyleSheet = iface('StyleSheet');

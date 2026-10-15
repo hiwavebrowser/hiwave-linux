@@ -22,10 +22,12 @@ use url::Url;
 
 pub mod cache;
 pub mod decode;
+pub mod decode_pool;
 pub mod loader;
 
 pub use cache::*;
 pub use decode::*;
+pub use decode_pool::{DecodeNav, DecodePool, DecodeStats};
 pub use loader::*;
 
 /// Errors that can occur during image operations
@@ -57,6 +59,11 @@ pub enum ImageError {
     /// it to the SVG lane without fetching it again.
     #[error("Image is SVG (vector), not raster")]
     Svg(String),
+
+    /// The navigation that asked for the image was superseded (a newer
+    /// load, or Stop) before its decode came back: the result was dropped.
+    #[error("Image decode dropped: its navigation was superseded")]
+    Superseded,
 }
 
 #[cfg(test)]
@@ -326,6 +333,9 @@ pub struct ImageManager {
     /// Maximum memory cache size in bytes
     #[allow(dead_code)]
     max_cache_bytes: usize,
+
+    /// Where fetched images are decoded, off the page thread.
+    decode_pool: DecodePool,
 }
 
 impl ImageManager {
@@ -339,6 +349,7 @@ impl ImageManager {
             request_tx,
             max_dimensions: (16384, 16384),
             max_cache_bytes: 256 * 1024 * 1024, // 256MB
+            decode_pool: DecodePool::new(),
         }
     }
 
@@ -415,7 +426,7 @@ impl ImageManager {
     }
 
     /// Decode a response body the caller fetched for `url` and cache it
-    /// under that URL.
+    /// under that URL, on the calling thread.
     pub fn insert_fetched(
         &self,
         url: &Url,
@@ -428,12 +439,73 @@ impl ImageManager {
         if content_type.is_some_and(is_svg_content_type) {
             return Err(ImageError::Svg(String::from_utf8_lossy(body).into_owned()));
         }
+        let pixels = decode_pixels(body, self.max_dimensions)?;
+        Ok(self.keep_decoded(url, content_type, pixels))
+    }
 
-        let mut loaded = self.decode_bytes(url, body)?;
+    /// [`ImageManager::insert_fetched`] through the decode pool: the bytes
+    /// go to a decode thread and this future waits for the pixels without
+    /// holding the thread that polls it. With the pool's queue full the
+    /// decode happens here, inline, as before the pool. A result that comes
+    /// back after `nav` was superseded is dropped, not cached
+    /// ([`ImageError::Superseded`]). Decode errors are the inline ones.
+    pub async fn decode_fetched(
+        &self,
+        url: &Url,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+        nav: DecodeNav,
+    ) -> ImageResult<Arc<LoadedImage>> {
+        if content_type.is_some_and(is_svg_content_type) {
+            return Err(ImageError::Svg(String::from_utf8_lossy(&body).into_owned()));
+        }
+        let decoded = match self.decode_pool.try_submit(nav, body, self.max_dimensions) {
+            Ok(reply) => match reply.await {
+                Ok(decode_pool::DecodeReply::Decoded(decoded)) => decoded,
+                // Counted by the thread that skipped it.
+                Ok(decode_pool::DecodeReply::Superseded) => return Err(ImageError::Superseded),
+                Err(_) => Err(ImageError::DecodeError("decode thread exited".into())),
+            },
+            Err(body) => {
+                self.decode_pool.note_inline();
+                decode_pool::decode_pixels_caught(&body, self.max_dimensions)
+            }
+        };
+        if !self.decode_pool.is_current(nav) {
+            debug!(%url, ?nav, "Decoded image for a superseded navigation; dropped");
+            self.decode_pool.note_superseded();
+            return Err(ImageError::Superseded);
+        }
+        Ok(self.keep_decoded(url, content_type, decoded?))
+    }
+
+    fn keep_decoded(
+        &self,
+        url: &Url,
+        content_type: Option<&str>,
+        pixels: DecodedPixels,
+    ) -> Arc<LoadedImage> {
+        let mut loaded = pixels.into_loaded(url.clone());
         loaded.content_type = content_type.map(str::to_string);
         let loaded = Arc::new(loaded);
         self.cache.write().unwrap().insert(url.clone(), loaded.clone());
-        Ok(loaded)
+        loaded
+    }
+
+    /// `view` started navigation `nav_id`: decodes still out for its earlier
+    /// navigations are dropped.
+    pub fn begin_navigation(&self, view: u64, nav_id: u64) {
+        self.decode_pool.begin_navigation(view, nav_id);
+    }
+
+    /// `view` was destroyed: forget its navigation.
+    pub fn forget_view(&self, view: u64) {
+        self.decode_pool.forget_view(view);
+    }
+
+    /// The decode pool's counters.
+    pub fn decode_stats(&self) -> DecodeStats {
+        self.decode_pool.stats()
     }
 
     /// Decode bytes through the real engine path. Test-only surface so a
@@ -447,82 +519,7 @@ impl ImageManager {
 
     /// Decode image from bytes
     fn decode_bytes(&self, url: &Url, bytes: &[u8]) -> ImageResult<LoadedImage> {
-        // Guess format from bytes
-        let format = rustkit_codecs::detect_format(bytes)
-            .unwrap_or(ImageFormat::Unknown);
-
-        if format == ImageFormat::Unknown {
-            return Err(ImageError::DecodeError("Unknown image format".into()));
-        }
-
-        // Handle animated GIFs specially
-        if format == ImageFormat::Gif {
-            return self.decode_gif(url, bytes);
-        }
-
-        // Decode static image
-        let decoded = rustkit_codecs::decode_any(bytes)
-            .map_err(|e| ImageError::DecodeError(e.to_string()))?;
-        let img = match decoded {
-            Decoded::Static(img) => img,
-            Decoded::Animated(frames) => {
-                // Some formats may be treated as animated later; for now, take first frame.
-                frames
-                    .into_iter()
-                    .next()
-                    .map(|f| f.image)
-                    .ok_or_else(|| ImageError::DecodeError("Animated image had no frames".into()))?
-            }
-        };
-
-        // Check dimensions
-        let (width, height) = (img.width(), img.height());
-        if width > self.max_dimensions.0 || height > self.max_dimensions.1 {
-            return Err(ImageError::TooLarge { width, height });
-        }
-
-        Ok(LoadedImage::new(url.clone(), img))
-    }
-
-    /// Decode an animated GIF
-    fn decode_gif(&self, url: &Url, bytes: &[u8]) -> ImageResult<LoadedImage> {
-        let decoded_frames = rustkit_codecs::decode_gif(bytes)
-            .map_err(|e| ImageError::DecodeError(e.to_string()))?;
-
-        let mut frames = Vec::with_capacity(decoded_frames.len());
-        for f in decoded_frames {
-            // Check dimensions
-            if f.image.width() > self.max_dimensions.0 || f.image.height() > self.max_dimensions.1 {
-                return Err(ImageError::TooLarge {
-                    width: f.image.width(),
-                    height: f.image.height(),
-                });
-            }
-            frames.push(AnimationFrame {
-                image: f.image,
-                delay_ms: f.delay_ms.max(10),
-            });
-        }
-
-        if frames.is_empty() {
-            return Err(ImageError::DecodeError("GIF has no frames".into()));
-        }
-
-        // Single frame = static image
-        if frames.len() == 1 {
-            let frame = frames.remove(0);
-            return Ok(LoadedImage {
-                url: url.clone(),
-                natural_width: frame.image.width(),
-                natural_height: frame.image.height(),
-                data: ImageData::Static(frame.image),
-                decoded_at: Instant::now(),
-                content_type: Some("image/gif".into()),
-                complete: true,
-            });
-        }
-
-        Ok(LoadedImage::animated(url.clone(), frames))
+        decode_pixels(bytes, self.max_dimensions).map(|pixels| pixels.into_loaded(url.clone()))
     }
 
     /// Decode a data URL
@@ -680,6 +677,116 @@ impl ImageManager {
     pub fn get_all_cached(&self) -> Vec<(Url, Arc<LoadedImage>)> {
         self.cache.read().unwrap().entries()
     }
+}
+
+/// A decoded image without its URL: pixels and size, the plain data a
+/// decode thread sends back.
+pub struct DecodedPixels {
+    pub width: u32,
+    pub height: u32,
+    pub data: ImageData,
+    /// Set by a decoder that knows better than the response (a one-frame GIF).
+    pub content_type: Option<&'static str>,
+}
+
+impl DecodedPixels {
+    fn into_loaded(self, url: Url) -> LoadedImage {
+        LoadedImage {
+            url,
+            natural_width: self.width,
+            natural_height: self.height,
+            data: self.data,
+            decoded_at: Instant::now(),
+            content_type: self.content_type.map(str::to_string),
+            complete: true,
+        }
+    }
+}
+
+/// Decode `bytes` (PNG, JPEG, GIF, WebP, BMP, ICO), refusing anything over
+/// `max_dimensions`. Runs on any thread.
+pub fn decode_pixels(bytes: &[u8], max_dimensions: (u32, u32)) -> ImageResult<DecodedPixels> {
+    // Guess format from bytes
+    let format = rustkit_codecs::detect_format(bytes).unwrap_or(ImageFormat::Unknown);
+
+    if format == ImageFormat::Unknown {
+        return Err(ImageError::DecodeError("Unknown image format".into()));
+    }
+
+    // Handle animated GIFs specially
+    if format == ImageFormat::Gif {
+        return decode_gif(bytes, max_dimensions);
+    }
+
+    // Decode static image
+    let decoded =
+        rustkit_codecs::decode_any(bytes).map_err(|e| ImageError::DecodeError(e.to_string()))?;
+    let img = match decoded {
+        Decoded::Static(img) => img,
+        Decoded::Animated(frames) => {
+            // Some formats may be treated as animated later; for now, take first frame.
+            frames
+                .into_iter()
+                .next()
+                .map(|f| f.image)
+                .ok_or_else(|| ImageError::DecodeError("Animated image had no frames".into()))?
+        }
+    };
+
+    // Check dimensions
+    let (width, height) = (img.width(), img.height());
+    if width > max_dimensions.0 || height > max_dimensions.1 {
+        return Err(ImageError::TooLarge { width, height });
+    }
+
+    Ok(DecodedPixels { width, height, data: ImageData::Static(img), content_type: None })
+}
+
+/// Decode an animated GIF
+fn decode_gif(bytes: &[u8], max_dimensions: (u32, u32)) -> ImageResult<DecodedPixels> {
+    let decoded_frames =
+        rustkit_codecs::decode_gif(bytes).map_err(|e| ImageError::DecodeError(e.to_string()))?;
+
+    let mut frames = Vec::with_capacity(decoded_frames.len());
+    for f in decoded_frames {
+        // Check dimensions
+        if f.image.width() > max_dimensions.0 || f.image.height() > max_dimensions.1 {
+            return Err(ImageError::TooLarge {
+                width: f.image.width(),
+                height: f.image.height(),
+            });
+        }
+        frames.push(AnimationFrame {
+            image: f.image,
+            delay_ms: f.delay_ms.max(10),
+        });
+    }
+
+    let Some(first) = frames.first() else {
+        return Err(ImageError::DecodeError("GIF has no frames".into()));
+    };
+    let (width, height) = (first.image.width(), first.image.height());
+
+    // Single frame = static image
+    if frames.len() == 1 {
+        let frame = frames.remove(0);
+        return Ok(DecodedPixels {
+            width,
+            height,
+            data: ImageData::Static(frame.image),
+            content_type: Some("image/gif"),
+        });
+    }
+
+    Ok(DecodedPixels {
+        width,
+        height,
+        data: ImageData::Animated(AnimatedImage {
+            frames,
+            loop_count: 0, // Infinite
+        }),
+        content_type: None,
+    })
 }
 
 impl Default for ImageManager {
@@ -960,8 +1067,7 @@ fn parse_svg_color(s: &str) -> (u8, u8, u8, u8) {
     let s = s.trim();
 
     // Hex colors
-    if s.starts_with('#') {
-        let hex = &s[1..];
+    if let Some(hex) = s.strip_prefix('#') {
         match hex.len() {
             3 => {
                 let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).unwrap_or(0);
@@ -980,16 +1086,12 @@ fn parse_svg_color(s: &str) -> (u8, u8, u8, u8) {
     }
 
     // URL-encoded hex (e.g., %23ff0000 for #ff0000)
-    if s.starts_with("%23") {
-        let hex = &s[3..];
-        match hex.len() {
-            6 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-                let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-                let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-                return (r, g, b, 255);
-            }
-            _ => {}
+    if let Some(hex) = s.strip_prefix("%23") {
+        if hex.len() == 6 {
+            let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+            let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+            let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+            return (r, g, b, 255);
         }
     }
 
@@ -1105,6 +1207,59 @@ mod tests {
         let rect = fit.compute_rect(100.0, 100.0, 400.0, 200.0, (0.5, 0.5));
         assert!((rect.width - 100.0).abs() < 0.001);
         assert!((rect.height - 50.0).abs() < 0.001);
+    }
+
+    // 4x4 opaque red PNG (same bytes the engine routing tests use).
+    const RED_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0xa9, 0xf1, 0x9e, 0x7e, 0x00, 0x00, 0x00,
+        0x15, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0xf0,
+        0x9f, 0x01, 0x09, 0x30, 0x31, 0xa0, 0x01, 0xc2, 0x02, 0x00, 0x83, 0xd1,
+        0x02, 0x06, 0xb3, 0x4b, 0xd2, 0x9b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+        0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    /// After #438 the image manager has no HTTP client: a network URL is an
+    /// error until the engine's loader hands a body to `insert_fetched`.
+    /// The engine's end-to-end pin is macOS+headless only; this is the
+    /// crate-level contract that runs everywhere.
+    #[test]
+    fn insert_fetched_caches_a_raster_body_and_load_does_not_fetch() {
+        let manager = ImageManager::new();
+        let url = Url::parse("https://cdn.example/a.png").unwrap();
+
+        assert!(manager.load_blocking(url.clone()).is_err());
+        assert!(!manager.is_cached(&url));
+
+        let loaded = manager
+            .insert_fetched(&url, Some("image/png"), RED_PNG)
+            .expect("decode png");
+        assert_eq!((loaded.natural_width, loaded.natural_height), (4, 4));
+        assert_eq!(loaded.content_type.as_deref(), Some("image/png"));
+        assert!(manager.is_cached(&url));
+
+        let again = manager.load_blocking(url.clone()).expect("cache hit");
+        assert_eq!((again.natural_width, again.natural_height), (4, 4));
+        assert!(Arc::ptr_eq(&loaded, &again));
+    }
+
+    /// linkedin's hero is an extensionless URL served as `image/svg+xml`.
+    /// `insert_fetched` must hand it back as `ImageError::Svg` so the engine
+    /// can route it to the SVG lane instead of failing as "Unknown image format".
+    #[test]
+    fn insert_fetched_routes_svg_content_type_without_caching() {
+        let manager = ImageManager::new();
+        let url = Url::parse("https://static.licdn.com/aero-v1/sc/h/abcdef").unwrap();
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"></svg>"#;
+
+        match manager.insert_fetched(&url, Some("image/svg+xml; charset=utf-8"), svg.as_bytes()) {
+            Err(ImageError::Svg(xml)) => assert!(xml.contains("<svg"), "{xml}"),
+            Ok(_) => panic!("expected Svg error, got Ok"),
+            Err(other) => panic!("expected Svg, got {other}"),
+        }
+        assert!(!manager.is_cached(&url));
+        assert!(manager.load_blocking(url).is_err());
     }
 }
 

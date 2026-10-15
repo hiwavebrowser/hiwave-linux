@@ -13,7 +13,11 @@
 //! in that same order, so a run does not depend on which response was
 //! fastest.
 
+use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::Poll;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -24,6 +28,8 @@ use rustkit_net::policy::{FetchPolicy, RequestMode, ResponseKind, ScriptRequest,
 use rustkit_net::{CredentialsMode, RedirectMode, RequestDestination, RequestId, ResourceLoader};
 use tracing::debug;
 use url::Url;
+
+use crate::inspector::{self, FailureStage, Inspector, ResourceType};
 
 /// What the page sees for every refusal and every failure.
 const NETWORK_ERROR: &str = "network error";
@@ -57,6 +63,7 @@ pub(crate) async fn pump(
     deadline: tokio::time::Instant,
     rounds: u32,
     timers: Option<(u64, u32)>,
+    inspector: &Arc<Inspector>,
 ) -> Pump {
     let mut out = Pump::default();
 
@@ -77,7 +84,7 @@ pub(crate) async fn pump(
         let outcomes = futures::future::join_all(
             requests
                 .iter()
-                .map(|request| execute(policy, loader, deadline, request)),
+                .map(|request| execute(policy, loader, deadline, request, inspector, FailureStage::OverBudget)),
         )
         .await;
 
@@ -112,11 +119,72 @@ pub(crate) async fn pump(
     out
 }
 
+/// Work the live loop has started and not yet taken the result of. It runs
+/// only while [`settle_live`] polls it; dropping it abandons it.
+pub(crate) type LiveFuture<T> = Pin<Box<dyn Future<Output = T>>>;
+
+/// A script request that is out: its id and, in the end, its outcome.
+pub(crate) type LiveRequest = LiveFuture<(u64, NetDelivery)>;
+
+/// Start `request` for the live loop. Nothing runs until
+/// [`settle_live`] polls it; it fails as a network error at `deadline`.
+pub(crate) fn start_live(
+    policy: Arc<FetchPolicy>,
+    loader: Arc<ResourceLoader>,
+    request: NetRequest,
+    deadline: tokio::time::Instant,
+    inspector: Arc<Inspector>,
+) -> LiveRequest {
+    Box::pin(async move {
+        let outcome = execute(&policy, &loader, deadline, &request, &inspector, FailureStage::Timeout).await;
+        (request.id, outcome)
+    })
+}
+
+/// Let what is out make progress for at most `slice`, and take the results
+/// that are ready, in the order the work was started. Returns as soon as one
+/// is; the rest stays in `in_flight` for a later turn.
+///
+/// The work lives on the runtime that polls it: every turn of one view must
+/// come from the same runtime.
+pub(crate) async fn settle_live<T>(in_flight: &mut Vec<LiveFuture<T>>, slice: std::time::Duration) -> Vec<T> {
+    let mut done = Vec::new();
+    if in_flight.is_empty() {
+        return done;
+    }
+    let pause = tokio::time::sleep(slice);
+    tokio::pin!(pause);
+    std::future::poll_fn(|cx| {
+        let mut i = 0;
+        while i < in_flight.len() {
+            match in_flight[i].as_mut().poll(cx) {
+                Poll::Ready(outcome) => {
+                    drop(in_flight.remove(i));
+                    done.push(outcome);
+                }
+                Poll::Pending => i += 1,
+            }
+        }
+        if !done.is_empty() {
+            return Poll::Ready(());
+        }
+        pause.as_mut().poll(cx)
+    })
+    .await;
+    done
+}
+
+/// One script request through the policy. The Inspector sees it from here
+/// (a request refused before the policy, as malformed, was never made);
+/// `on_deadline` is the stage recorded when `deadline` passes first. Dropped
+/// before it ends (the page navigated away), it is recorded cancelled.
 async fn execute(
     policy: &FetchPolicy,
     loader: &ResourceLoader,
     deadline: tokio::time::Instant,
     request: &NetRequest,
+    inspector: &Arc<Inspector>,
+    on_deadline: FailureStage,
 ) -> NetDelivery {
     let script_request = match script_request(request) {
         Ok(r) => r,
@@ -125,14 +193,39 @@ async fn execute(
             return NetDelivery::Error(NETWORK_ERROR.into());
         }
     };
+    let resource_type = match script_request.destination {
+        RequestDestination::Xhr => ResourceType::Xhr,
+        RequestDestination::Fetch => ResourceType::Fetch,
+        _ => ResourceType::Other,
+    };
+    let guard = inspector
+        .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some("script"))
+        .map(|g| g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)"));
     match tokio::time::timeout_at(deadline, policy.execute(loader, script_request)).await {
-        Ok(Ok(response)) => delivery(response),
+        Ok(Ok(response)) => {
+            if let Some(guard) = guard {
+                let mime = response.headers.get("content-type").and_then(|v| v.to_str().ok());
+                guard.response(response.status, mime, None, Some(response.body.len() as u64), false);
+            }
+            delivery(response)
+        }
         Ok(Err(denial)) => {
             debug!(id = request.id, ?denial, "Script request denied");
+            if let Some(guard) = guard {
+                let (stage, reason) = inspector::denial_stage(&denial);
+                guard.fail(stage, reason);
+            }
             NetDelivery::Error(NETWORK_ERROR.into())
         }
         Err(_) => {
             debug!(id = request.id, "Script request ran out of the script budget");
+            if let Some(guard) = guard {
+                let reason = match on_deadline {
+                    FailureStage::OverBudget => "script budget spent",
+                    _ => "timed out",
+                };
+                guard.fail(on_deadline, reason);
+            }
             NetDelivery::Error(NETWORK_ERROR.into())
         }
     }
@@ -238,6 +331,7 @@ pub(crate) async fn pump_modules(
     deadline: tokio::time::Instant,
     document: &Url,
     fetched: &mut usize,
+    inspector: &Arc<Inspector>,
 ) -> Pump {
     let mut out = Pump::default();
     for _ in 0..MAX_MODULE_ROUNDS {
@@ -259,7 +353,10 @@ pub(crate) async fn pump_modules(
                 return Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})"));
             }
             let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
-            match tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await {
+            let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
+            let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
+            inspector::answer_module(guard, &fetched);
+            match fetched {
                 Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
                     final_url: module.final_url.to_string(),
                     source: module.source,
@@ -289,6 +386,7 @@ pub(crate) async fn pump_modules(
 /// so the two alternate until neither found work, at most `ALTERNATIONS`
 /// times. Whatever is still waiting then is left for the next step's pump
 /// (the network side fails its stragglers itself).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump_all(
     bindings: &DomBindings,
     policy: &FetchPolicy,
@@ -298,13 +396,16 @@ pub(crate) async fn pump_all(
     timers: Option<(u64, u32)>,
     document: Option<&Url>,
     modules_fetched: &mut usize,
+    inspector: &Arc<Inspector>,
 ) -> Pump {
     const ALTERNATIONS: u32 = 4;
     let mut total = Pump::default();
     for _ in 0..ALTERNATIONS {
-        let net = pump(bindings, policy, loader, deadline, rounds, timers).await;
+        let net = pump(bindings, policy, loader, deadline, rounds, timers, inspector).await;
         let modules = match document {
-            Some(document) => pump_modules(bindings, policy, loader, deadline, document, modules_fetched).await,
+            Some(document) => {
+                pump_modules(bindings, policy, loader, deadline, document, modules_fetched, inspector).await
+            }
             None => Pump::default(),
         };
         let worked = net.requests + modules.requests;

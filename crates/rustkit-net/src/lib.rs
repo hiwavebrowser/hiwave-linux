@@ -366,6 +366,14 @@ pub struct Response {
     pub headers: HeaderMap,
     pub content_type: Option<Mime>,
     pub content_length: Option<u64>,
+    /// Answered from the loader's memory cache, without a request.
+    pub from_cache: bool,
+    /// Body bytes as transferred, before `Content-Encoding` was undone;
+    /// `None` when nothing was transferred (cache, `data:`).
+    pub encoded_body_size: Option<u64>,
+    /// Redirects followed to get here: each URL that redirected, and its
+    /// status.
+    pub redirect_chain: Vec<(Url, StatusCode)>,
     body: ResponseBody,
 }
 
@@ -671,6 +679,9 @@ impl ResourceLoader {
                 headers,
                 content_type: content_type.parse::<Mime>().ok(),
                 content_length: Some(body.len() as u64),
+                from_cache: false,
+                encoded_body_size: None,
+                redirect_chain: Vec::new(),
                 body: ResponseBody::Full(Bytes::from(body)),
             });
         }
@@ -694,6 +705,9 @@ impl ResourceLoader {
                     headers: cached.headers,
                     content_type,
                     content_length: Some(cached.body.len() as u64),
+                    from_cache: true,
+                    encoded_body_size: None,
+                    redirect_chain: Vec::new(),
                     body: ResponseBody::Full(cached.body),
                 });
             }
@@ -826,6 +840,9 @@ impl ResourceLoader {
             headers: http_response.headers,
             content_type,
             content_length,
+            from_cache: false,
+            encoded_body_size: Some(http_response.encoded_body_size),
+            redirect_chain: http_response.redirect_chain,
             body: ResponseBody::Full(http_response.body),
         })
     }
@@ -925,6 +942,24 @@ mod tests {
         assert_eq!(request.method, Method::GET);
         assert!(request.headers.contains_key("accept"));
         assert_eq!(request.timeout, Some(Duration::from_secs(10)));
+        assert_eq!(
+            request.destination,
+            RequestDestination::Other,
+            "untagged fetches still hit the shield without a type-specific option"
+        );
+    }
+
+    #[test]
+    fn request_destination_tags_carry_through_the_builder() {
+        // Privacy pin #364: every engine call site tags destination so
+        // EasyList `$script`/`$image`/… options classify correctly.
+        let url = Url::parse("https://cdn.example/a.js").unwrap();
+        let referrer = Url::parse("https://news.example/").unwrap();
+        let request = Request::get(url)
+            .destination(RequestDestination::Script)
+            .referrer(referrer.clone());
+        assert_eq!(request.destination, RequestDestination::Script);
+        assert_eq!(request.referrer, Some(referrer));
     }
 
     #[test]

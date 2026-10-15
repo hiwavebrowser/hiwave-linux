@@ -21,6 +21,8 @@
 // Platform-specific modules
 pub mod linux;
 
+pub mod input_queue;
+
 // Platform-agnostic trait seam (ported from the reference tree in the wave-4
 // engine adoption; this is the one-engine Phase-2 shape). On this platform
 // WindowHandle is `()` — the native path drives the CONCRETE X11 API
@@ -28,6 +30,11 @@ pub mod linux;
 // compiles and the non-view operations delegate.
 mod traits;
 pub use traits::{ViewHostTrait, WindowHandle};
+
+pub use input_queue::{
+    drain_input, retire_view_input, InputEvent, InputKind, PendingClick, PendingKey,
+    PendingScroll, PointerInput,
+};
 
 // Screenshot capture
 pub mod screenshot;
@@ -86,6 +93,13 @@ impl ViewId {
     /// Get the raw ID value.
     pub fn raw(&self) -> u64 {
         self.0
+    }
+
+    /// The id a view carries in its native object (the macOS content view's
+    /// ivar), read back when the view records an input.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self(raw)
     }
 }
 
@@ -891,6 +905,10 @@ impl ViewHost {
                 }
             }
 
+            // An input recorded for this view must not reach whatever
+            // view comes next (threads plan M2).
+            input_queue::retire_view_input(view_id);
+
             info!(?view_id, "View destroyed");
             Ok(())
         } else {
@@ -1439,6 +1457,28 @@ mod tests {
 
         host.destroy_view(view_id).unwrap();
         assert_eq!(host.view_count(), 0);
+    }
+
+    #[test]
+    fn test_bounds_clone() {
+        let b1 = Bounds::new(10, 20, 800, 600);
+        let b2 = b1;
+
+        assert_eq!(b1, b2);
+        assert_eq!(b1.x, b2.x);
+        assert_eq!(b1.y, b2.y);
+        assert_eq!(b1.width, b2.width);
+        assert_eq!(b1.height, b2.height);
+    }
+
+    #[test]
+    fn test_view_id_clone() {
+        let id1 = ViewId::new();
+        let id2 = id1;
+
+        // Cloned IDs should be equal
+        assert_eq!(id1, id2);
+        assert_eq!(id1.raw(), id2.raw());
     }
 }
 

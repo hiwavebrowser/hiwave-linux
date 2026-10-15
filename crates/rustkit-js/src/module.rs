@@ -20,18 +20,16 @@ use std::path::Path;
 use std::rc::Rc;
 
 use boa_engine::builtins::promise::PromiseState;
-use boa_engine::module::{ModuleLoader, Referrer};
+use boa_engine::module::{ModuleLoader, ModuleRequest, Referrer};
 use boa_engine::object::builtins::JsPromise;
-use boa_engine::{js_string, Context, JsNativeError, JsObject, JsResult, JsString, JsValue, Module, Source};
+use boa_engine::{js_string, Context, JsNativeError, JsObject, JsResult, JsValue, Module, Source};
 use url::Url;
 
 use crate::JsRuntime;
 
-type Finish = Box<dyn FnOnce(JsResult<Module>, &mut Context)>;
-
 struct Waiter {
     url: String,
-    finish: Finish,
+    sender: tokio::sync::oneshot::Sender<JsResult<Module>>,
 }
 
 /// Boa's `ModuleLoader` for a document. Interior-mutable and `Rc`-shared:
@@ -66,6 +64,14 @@ impl HostModuleLoader {
         // import map (if any) decides everything else.
         self.import_map.borrow().resolve(specifier, &referrer_url, &referrer_url)
     }
+
+    pub fn register_module(&self, specifier: &str, module: Module) {
+        self.modules.borrow_mut().insert(specifier.to_string(), module);
+    }
+
+    pub fn get_module(&self, specifier: &str) -> Option<Module> {
+        self.modules.borrow().get(specifier).cloned()
+    }
 }
 
 fn path_string(path: Option<&Path>) -> Option<String> {
@@ -73,46 +79,42 @@ fn path_string(path: Option<&Path>) -> Option<String> {
 }
 
 impl ModuleLoader for HostModuleLoader {
-    fn load_imported_module(
-        &self,
+    async fn load_imported_module(
+        self: Rc<Self>,
         referrer: Referrer,
-        specifier: JsString,
-        finish_load: Box<dyn FnOnce(JsResult<Module>, &mut Context)>,
-        context: &mut Context,
-    ) {
-        let specifier = specifier.to_std_string_escaped();
+        request: ModuleRequest,
+        _context: &RefCell<&mut Context>,
+    ) -> JsResult<Module> {
+        let specifier = request.specifier().to_std_string_escaped();
         let referrer_url = path_string(referrer.path());
         let url = match self.resolve(&specifier, referrer_url.as_deref()) {
             Ok(url) => url.to_string(),
             Err(message) => {
-                finish_load(Err(JsNativeError::typ().with_message(message).into()), context);
-                return;
+                return Err(JsNativeError::typ().with_message(message).into());
             }
         };
         // Already parsed: the same module, every time.
         let known = self.modules.borrow().get(&url).cloned();
         if let Some(module) = known {
-            finish_load(Ok(module), context);
-            return;
+            return Ok(module);
         }
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiting.borrow_mut().push(Waiter {
             url: url.clone(),
-            finish: finish_load,
+            sender: tx,
         });
         if self.asked.borrow_mut().insert(url.clone()) {
             self.requested.borrow_mut().push(url);
         }
+        match rx.await {
+            Ok(res) => res,
+            Err(_) => Err(JsNativeError::typ()
+                .with_message("Module fetch cancelled")
+                .into()),
+        }
     }
 
-    fn register_module(&self, specifier: JsString, module: Module) {
-        self.modules.borrow_mut().insert(specifier.to_std_string_escaped(), module);
-    }
-
-    fn get_module(&self, specifier: JsString) -> Option<Module> {
-        self.modules.borrow().get(&specifier.to_std_string_escaped()).cloned()
-    }
-
-    fn init_import_meta(&self, import_meta: &JsObject, module: &Module, context: &mut Context) {
+    fn init_import_meta(self: Rc<Self>, import_meta: &JsObject, module: &Module, context: &mut Context) {
         if let Some(url) = path_string(module.path()) {
             let _ = import_meta.set(js_string!("url"), js_string!(url.as_str()), false, context);
         }
@@ -152,6 +154,11 @@ pub(crate) struct ModuleEntry {
     load: JsPromise,
     evaluation: Option<JsPromise>,
     failed: Option<String>,
+    /// A poll answered `Evaluating` (a top-level `await`) and the outcome
+    /// has not been taken since (see [`JsRuntime::take_error_reports`]).
+    awaiting: bool,
+    /// Its evaluation's outcome has been reported.
+    settled: bool,
 }
 
 #[derive(Default)]
@@ -169,7 +176,7 @@ impl ModuleHost {
 fn describe(error: &boa_engine::JsError, context: &mut Context) -> String {
     match error.try_native(context) {
         Ok(native) => native.to_string(),
-        Err(_) => error.to_string(),
+        Err(_) => crate::describe::error_text(error, context),
     }
 }
 
@@ -213,11 +220,15 @@ impl JsRuntime {
         let module = match existing {
             Some(module) => module,
             None => {
+                self.diag.know_path(url);
                 let path = Path::new(url);
                 let parsed = Module::parse(Source::from_bytes(source).with_path(path), None, &mut self.context);
                 match parsed {
                     Ok(module) => module,
-                    Err(e) => return Err(describe(&e, &mut self.context)),
+                    Err(e) => {
+                        self.report_error(&e);
+                        return Err(describe(&e, &mut self.context));
+                    }
                 }
             }
         };
@@ -227,7 +238,11 @@ impl JsRuntime {
             .borrow_mut()
             .insert(url.to_string(), module.clone());
         let load = module.load(&mut self.context);
-        self.context.run_jobs();
+        // The engine's promise, not the page's: a failure is the module's
+        // error, never an unhandled rejection.
+        self.rejections.forget(&JsObject::from(load.clone()));
+        let _ = self.context.run_jobs();
+        self.consume_interrupt();
         self.modules.entries.insert(
             url.to_string(),
             ModuleEntry {
@@ -235,6 +250,8 @@ impl JsRuntime {
                 load,
                 evaluation: None,
                 failed: None,
+                awaiting: false,
+                settled: false,
             },
         );
         Ok(ModuleHandle(url.to_string()))
@@ -257,6 +274,7 @@ impl JsRuntime {
                 match known {
                     Some(module) => Ok(module),
                     None => {
+                        self.diag.know_path(&fetched.final_url);
                         let path = Path::new(fetched.final_url.as_str());
                         match Module::parse(
                             Source::from_bytes(fetched.source.as_str()).with_path(path),
@@ -292,22 +310,24 @@ impl JsRuntime {
         };
         for waiter in waiters {
             match &module {
-                Ok(module) => (waiter.finish)(Ok(module.clone()), &mut self.context),
-                Err(message) => (waiter.finish)(
-                    Err(JsNativeError::typ()
+                Ok(module) => {
+                    let _ = waiter.sender.send(Ok(module.clone()));
+                }
+                Err(message) => {
+                    let _ = waiter.sender.send(Err(JsNativeError::typ()
                         .with_message(format!("Failed to fetch dynamically imported module: {message}"))
-                        .into()),
-                    &mut self.context,
-                ),
+                        .into()));
+                }
             }
         }
-        self.context.run_jobs();
+        let _ = self.context.run_jobs();
     }
 
     /// Advance a started module as far as it can go and say where it is:
     /// once its graph is loaded it is linked and evaluated.
     pub fn poll_module(&mut self, handle: &ModuleHandle) -> ModuleState {
-        self.context.run_jobs();
+        let _ = self.context.run_jobs();
+        self.consume_interrupt();
         let Some(entry) = self.modules.entries.get_mut(&handle.0) else {
             return ModuleState::Failed("unknown module".into());
         };
@@ -318,6 +338,7 @@ impl JsRuntime {
             match entry.load.state() {
                 PromiseState::Pending => return ModuleState::Loading,
                 PromiseState::Rejected(reason) => {
+                    self.report_value(&reason);
                     let message = describe_value(&reason, &mut self.context);
                     if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                         entry.failed = Some(message.clone());
@@ -328,14 +349,29 @@ impl JsRuntime {
             }
             let module = entry.module.clone();
             if let Err(e) = module.link(&mut self.context) {
+                self.report_error(&e);
                 let message = describe(&e, &mut self.context);
                 if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                     entry.failed = Some(message.clone());
                 }
                 return ModuleState::Failed(message);
             }
-            let evaluation = module.evaluate(&mut self.context);
-            self.context.run_jobs();
+            let evaluation = match module.evaluate(&mut self.context) {
+                Ok(p) => {
+                    self.rejections.forget(&JsObject::from(p.clone()));
+                    p
+                }
+                Err(e) => {
+                    self.report_error(&e);
+                    let message = describe(&e, &mut self.context);
+                    if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
+                        entry.failed = Some(message.clone());
+                    }
+                    return ModuleState::Failed(message);
+                }
+            };
+            let _ = self.context.run_jobs();
+            self.consume_interrupt();
             if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                 entry.evaluation = Some(evaluation);
             }
@@ -344,10 +380,80 @@ impl JsRuntime {
             Some(p) => p,
             None => return ModuleState::Loading,
         };
-        match evaluation.state() {
+        let state = evaluation.state();
+        // The outcome is reported once, here or as a late module error.
+        let pending = matches!(state, PromiseState::Pending);
+        let mut first_outcome = false;
+        if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
+            entry.awaiting = pending;
+            first_outcome = !pending && !entry.settled;
+            entry.settled |= !pending;
+        }
+        match state {
             PromiseState::Pending => ModuleState::Evaluating,
             PromiseState::Fulfilled(_) => ModuleState::Done,
-            PromiseState::Rejected(reason) => ModuleState::Threw(describe_value(&reason, &mut self.context)),
+            PromiseState::Rejected(reason) => {
+                if first_outcome {
+                    self.report_value(&reason);
+                }
+                ModuleState::Threw(self.thrown_text(&reason))
+            }
         }
+    }
+
+    /// A module's error, reported once (with reports on).
+    fn report_error(&mut self, error: &boa_engine::JsError) {
+        if self.diag.on.get() {
+            let report = self.diag.describe_error(error, &mut self.context);
+            self.diag.push(report);
+        }
+    }
+
+    fn report_value(&mut self, value: &JsValue) {
+        if self.diag.on.get() {
+            let report = self.diag.describe(value, None, false, &mut self.context);
+            self.diag.push(report);
+        }
+    }
+
+    /// A module evaluation's rejection as the module's error text, the
+    /// engine's own record of the stack after the message, as Boa's text
+    /// for a classic script's error has it (read through the realm's
+    /// getter: no page code runs).
+    fn thrown_text(&mut self, reason: &JsValue) -> String {
+        let mut message = describe_value(reason, &mut self.context);
+        let getter = self.diag.stack_getter.borrow().clone();
+        if let (_, Some(stack)) = crate::describe::error_report(reason, getter.as_ref(), &mut self.context) {
+            message.push('\n');
+            message.push_str(stack.trim_end());
+        }
+        message
+    }
+
+    /// The modules a poll left `Evaluating` (a top-level `await` still
+    /// waiting) whose evaluation has since thrown: `(module URL, reason)`,
+    /// each once, by URL. A browser reports such an error as the module's
+    /// uncaught error. Modules that finished cleanly stop being watched.
+    pub(crate) fn take_late_module_rejections(&mut self) -> Vec<(String, JsValue)> {
+        let mut settled = Vec::new();
+        for (url, entry) in self.modules.entries.iter_mut() {
+            if !entry.awaiting {
+                continue;
+            }
+            match entry.evaluation.as_ref().map(JsPromise::state) {
+                Some(PromiseState::Pending) => {}
+                Some(PromiseState::Rejected(reason)) => {
+                    entry.awaiting = false;
+                    entry.settled = true;
+                    settled.push((url.clone(), reason));
+                }
+                _ => {
+                    entry.awaiting = false;
+                    entry.settled = true;
+                }
+            }
+        }
+        settled.sort_by(|a, b| a.0.cmp(&b.0));
+        settled
     }
 }

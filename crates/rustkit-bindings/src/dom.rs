@@ -21,7 +21,7 @@
 //! (attributes, text) go through `Document::replace_node_data`, which keeps
 //! the NodeId, so wrappers and the identity cache are untouched by them.
 
-use crate::{inner_text, DomDirty};
+use crate::{inner_text, DomDirty, MutationKind, ScriptMutations};
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::{Cell, RefCell};
@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 mod node_apis;
+mod shadow;
 
 /// Does this element match this selector list? `None` means the list is
 /// invalid, and script throws `SyntaxError`.
@@ -88,6 +89,10 @@ pub(crate) struct DomHost {
     /// Forms whose `submit` event was not cancelled, with the button that
     /// submitted each, by NodeId (`DomBindings::take_submit_requests`).
     submit_requests: Vec<(usize, Option<usize>)>,
+    /// URLs script asked this document to navigate to (`location.href =`,
+    /// `link.click()`, `form.submit()`), oldest first
+    /// (`DomBindings::take_navigation_requests`).
+    navigation_requests: Vec<String>,
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
@@ -108,6 +113,7 @@ impl DomHost {
         self.checked_writes.clear();
         self.checked.clear();
         self.submit_requests.clear();
+        self.navigation_requests.clear();
         self.generation
     }
 
@@ -126,6 +132,14 @@ impl DomHost {
 
     pub(crate) fn take_submit_requests(&mut self) -> Vec<(usize, Option<usize>)> {
         std::mem::take(&mut self.submit_requests)
+    }
+
+    pub(crate) fn navigation_requested(&self) -> bool {
+        !self.navigation_requests.is_empty()
+    }
+
+    pub(crate) fn take_navigation_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.navigation_requests)
     }
 
     fn document_for(&self, generation: &JsValue) -> Option<&Rc<Document>> {
@@ -188,9 +202,18 @@ fn first_with_id(document: &Document, id: &str) -> Option<Rc<Node>> {
     found
 }
 
-/// Is `ancestor` `node` or one of its ancestors?
-fn is_inclusive_ancestor(ancestor: &Rc<Node>, node: &Rc<Node>) -> bool {
-    ancestor.id == node.id || is_descendant(node, ancestor)
+/// DOM §4.2.2.1 "host-including inclusive ancestor": is `ancestor` `node`
+/// or one of its ancestors, climbing from a shadow root to its host, so a
+/// host cannot be inserted into its own shadow tree?
+fn is_host_including_inclusive_ancestor(ancestor: &Rc<Node>, node: &Rc<Node>) -> bool {
+    let mut current = Some(node.clone());
+    while let Some(n) = current {
+        if n.id == ancestor.id {
+            return true;
+        }
+        current = n.parent().or_else(|| n.shadow_host());
+    }
+    false
 }
 
 fn is_child_of(node: &Rc<Node>, parent: &Rc<Node>) -> bool {
@@ -210,7 +233,7 @@ fn pre_insert(
     if !parent.is_element() && !is_fragment(parent) {
         return Err("HierarchyRequestError");
     }
-    if is_inclusive_ancestor(node, parent) {
+    if is_host_including_inclusive_ancestor(node, parent) || node.is_shadow_root() {
         return Err("HierarchyRequestError");
     }
     if child.as_ref().is_some_and(|c| !is_child_of(c, parent)) {
@@ -275,6 +298,7 @@ fn adopt_template_contents(
             }
             pending.push(content);
         }
+        pending.extend(node.shadow_root());
         pending.extend(node.children());
     }
 }
@@ -475,6 +499,89 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             Ok((JsValue::Null, DomDirty::Style))
         }
         _ => Err("NotSupportedError"),
+    }
+}
+
+/// Diagnostic (`RUST_LOG=rustkit_bindings::dom=trace`): the write that
+/// dirtied the page, and whether its node (the parent, for a tree write) is
+/// in the document at all.
+fn trace_dirty(host: &DomHost, args: &[JsValue], bucket: DomDirty) {
+    if bucket == DomDirty::Clean || !tracing::enabled!(tracing::Level::TRACE) {
+        return;
+    }
+    let node = host.node_at(args, 2);
+    let connected = match (&node, args.first().and_then(|g| host.document_for(g))) {
+        (Some(node), Some(document)) => is_connected(node, document),
+        _ => false,
+    };
+    let tag = node.as_ref().and_then(|n| n.tag_name()).unwrap_or("").to_string();
+    let detail: String = string_arg(args, 3).unwrap_or("").chars().take(48).collect();
+    tracing::trace!(op = string_arg(args, 1).unwrap_or(""), %tag, connected, %detail, ?bucket, "DOM write dirtied the page");
+}
+
+/// The kind of a dirtying `write` op, for the relayout cause log.
+fn write_kind(args: &[JsValue]) -> MutationKind {
+    match string_arg(args, 1) {
+        Some("setAttr" | "removeAttr")
+            if string_arg(args, 3).is_some_and(|name| name.eq_ignore_ascii_case("style")) =>
+        {
+            MutationKind::Style
+        }
+        Some("setAttr" | "removeAttr") => MutationKind::Attribute,
+        Some("setText" | "setInnerText") => MutationKind::Text,
+        _ => MutationKind::ChildList,
+    }
+}
+
+/// The most characters of a tag name or an id the node label keeps.
+const LABEL_PART_MAX: usize = 48;
+
+/// `part` as the relayout log may print it: at most `LABEL_PART_MAX`
+/// characters (an ellipsis marks the cut) and no control characters (each
+/// becomes `?`). The page chooses its ids, so the log line it lands in must
+/// not grow with them or take a newline from them.
+fn label_part(part: &str) -> String {
+    let mut out: String = part
+        .chars()
+        .take(LABEL_PART_MAX)
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    if part.chars().nth(LABEL_PART_MAX).is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// `tag#id` of the node at `args[index]` (the tag alone without an id,
+/// empty for a non-element or a stale id): the relayout log's node label,
+/// each part clipped by `label_part`.
+fn node_label(host: &DomHost, args: &[JsValue], index: usize) -> String {
+    let Some(node) = host.node_at(args, index) else {
+        return String::new();
+    };
+    let NodeType::Element {
+        tag_name,
+        attributes,
+        ..
+    } = &node.node_type
+    else {
+        return String::new();
+    };
+    match attributes.get("id") {
+        Some(id) if !id.is_empty() => format!("{}#{}", label_part(tag_name), label_part(id)),
+        _ => label_part(tag_name),
+    }
+}
+
+/// Record a write that dirtied the page (`bucket` not `Clean`).
+fn note_mutation(
+    mutations: &RefCell<ScriptMutations>,
+    bucket: DomDirty,
+    kind: MutationKind,
+    label: impl FnOnce() -> String,
+) {
+    if bucket != DomDirty::Clean {
+        mutations.borrow_mut().record(kind, label);
     }
 }
 
@@ -784,6 +891,7 @@ pub(crate) fn install(
     runtime: &mut JsRuntime,
     host: &SharedDomHost,
     dirty: &Rc<Cell<DomDirty>>,
+    mutations: &Rc<RefCell<ScriptMutations>>,
 ) -> Result<(), JsError> {
     // `__rustkit_dom_resolve(base, relative)`: the absolute URL `relative`
     // names against `base`, or null when either does not parse. Backs the
@@ -975,11 +1083,16 @@ pub(crate) fn install(
 
     let h = host.clone();
     let d = dirty.clone();
+    let m = mutations.clone();
     runtime.register_host_function(
         "__rustkit_dom_mutate",
         5,
         Box::new(move |args| match mutate(&h.borrow(), args) {
             Ok(()) => {
+                trace_dirty(&h.borrow(), args, DomDirty::Style);
+                note_mutation(&m, DomDirty::Style, MutationKind::ChildList, || {
+                    node_label(&h.borrow(), args, 2)
+                });
                 // Pin §3.3: a structure insert/remove/move restyles.
                 d.set(d.get().max(DomDirty::Style));
                 JsValue::Null
@@ -992,11 +1105,16 @@ pub(crate) fn install(
     // to throw; anything else is the result (a new node's id, or null).
     let h = host.clone();
     let d = dirty.clone();
+    let m = mutations.clone();
     runtime.register_host_function(
         "__rustkit_dom_write",
         5,
         Box::new(move |args| match write(&h.borrow(), args) {
             Ok((result, bucket)) => {
+                trace_dirty(&h.borrow(), args, bucket);
+                note_mutation(&m, bucket, write_kind(args), || {
+                    node_label(&h.borrow(), args, 2)
+                });
                 d.set(d.get().max(bucket));
                 result
             }
@@ -1004,13 +1122,26 @@ pub(crate) fn install(
         }),
     )?;
 
+    // Whether script has written to the DOM since the engine last took the
+    // mark, i.e. whether the published geometry is stale and a layout is owed.
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_dirty",
+        0,
+        Box::new(move |_| JsValue::Boolean(d.get() != DomDirty::Clean)),
+    )?;
+
     let h = host.clone();
     let d = dirty.clone();
+    let m = mutations.clone();
     runtime.register_host_function(
         "__rustkit_dom_value",
         3,
         Box::new(move |args| {
             let (result, bucket) = control_value(&mut h.borrow_mut(), args);
+            note_mutation(&m, bucket, MutationKind::FormValue, || {
+                node_label(&h.borrow(), args, 1)
+            });
             d.set(d.get().max(bucket));
             result
         }),
@@ -1018,11 +1149,15 @@ pub(crate) fn install(
 
     let h = host.clone();
     let d = dirty.clone();
+    let m = mutations.clone();
     runtime.register_host_function(
         "__rustkit_dom_checked",
         3,
         Box::new(move |args| {
             let bucket = control_checked(&mut h.borrow_mut(), args);
+            note_mutation(&m, bucket, MutationKind::FormValue, || {
+                node_label(&h.borrow(), args, 1)
+            });
             d.set(d.get().max(bucket));
             JsValue::Null
         }),
@@ -1038,12 +1173,31 @@ pub(crate) fn install(
         }),
     )?;
 
-    runtime.evaluate_script(WRAPPERS_JS)?;
+    // `navigate(url)`: script asked for another document at this absolute
+    // URL. Nothing navigates here; the embedder takes the request.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_navigate",
+        1,
+        Box::new(move |args| {
+            if let Some(JsValue::String(url)) = args.first() {
+                h.borrow_mut().navigation_requests.push(url.clone());
+            }
+            JsValue::Null
+        }),
+    )?;
+
+    // Its listener and handler errors go to the host natives (`__rk`).
+    runtime.evaluate_with_host(WRAPPERS_JS)?;
+    shadow::install(runtime, host, dirty)?;
     node_apis::install(runtime, host)
 }
 
 /// Wrapper prototypes, the identity cache, and the `document` read
 /// surface. `window.__rustkit_dom_reset(gen)` rebinds it to a new document.
+#[cfg(test)]
+pub(crate) const WRAPPERS_JS_FOR_TESTS: &str = WRAPPERS_JS;
+
 const WRAPPERS_JS: &str = r#"
 (function (g) {
     var N = {
@@ -1052,9 +1206,10 @@ const WRAPPERS_JS: &str = r#"
         attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate,
         write: __rustkit_dom_write, matches: __rustkit_dom_matches,
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
-        checked: __rustkit_dom_checked, submit: __rustkit_dom_submit
+        checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
+        navigate: __rustkit_dom_navigate
     };
-    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit'].forEach(function (n) {
+    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -1075,7 +1230,10 @@ const WRAPPERS_JS: &str = r#"
     // a shadow boundary: `shadowParent(root, event)` is the host a composed
     // event goes on to from a shadow root, `retarget(target, against)` the
     // target as seen from another node's tree, `hostOf(root)` a shadow
-    // root's host (or null for any other node).
+    // root's host (or null for any other node). `mutation` is the
+    // MutationObserver's (web_mutation_observer.js): set from the first
+    // observe(), it sees every write below before it happens and gets back
+    // what to record once it has.
     var HOOKS = {};
     Object.defineProperty(g, '__rkDomHooks', { value: HOOKS, configurable: true, enumerable: false });
     var gen = 0;
@@ -1090,7 +1248,19 @@ const WRAPPERS_JS: &str = r#"
         g[name] = ctor;
         return ctor;
     }
-    var EventTarget = iface('EventTarget');
+    // EventTarget is the one interface of this family script may construct
+    // (DOM §2.7), on its own or as the base of a class. PLAIN holds the
+    // objects made that way: they have no on<type> handler attributes.
+    var PLAIN = new WeakSet();
+    var EventTarget = function EventTarget() {
+        if (!new.target) {
+            throw new TypeError("Failed to construct 'EventTarget': Please use the 'new' operator, " +
+                "this DOM object constructor cannot be called as a function.");
+        }
+        PLAIN.add(this);
+    };
+    Object.defineProperty(EventTarget.prototype, Symbol.toStringTag, { value: 'EventTarget' });
+    g.EventTarget = EventTarget;
     var Node = iface('Node', EventTarget);
     var Document = iface('Document', Node);
     var CharacterData = iface('CharacterData', Node);
@@ -1137,6 +1307,25 @@ const WRAPPERS_JS: &str = r#"
             }
             elementProtos[tag] = made[name].prototype;
         });
+        // There is no canvas drawing and no media playback here, and a page
+        // must be able to find that out the way it asks: a canvas has no
+        // context of any kind, and a media element is one with nothing to
+        // play. Without the methods the question itself threw (github.com's
+        // `getContext("webgl")` and `video.load()`, each in an effect).
+        made.HTMLCanvasElement.prototype.getContext = function getContext() { return null; };
+        var media = HTMLMediaElement.prototype;
+        ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'].forEach(function (k, i) {
+            HTMLMediaElement[k] = media[k] = i;
+        });
+        media.load = function load() {};
+        media.pause = function pause() {};
+        media.canPlayType = function canPlayType() { return ''; };
+        media.play = function play() {
+            return Promise.reject(new g.DOMException('The element has no supported sources.', 'NotSupportedError'));
+        };
+        [['paused', true], ['ended', false], ['readyState', 0], ['currentTime', 0], ['duration', NaN]].forEach(function (p) {
+            Object.defineProperty(media, p[0], { value: p[1], writable: true, enumerable: true, configurable: true });
+        });
         // Interface objects with no element of their own here: the checks
         // `x instanceof HTMLUnknownElement` / `SVGElement` still need a RHS.
         iface('HTMLUnknownElement', HTMLElement);
@@ -1162,6 +1351,9 @@ const WRAPPERS_JS: &str = r#"
     var elementProto = function (id) {
         return elementProtos[N.info(gen, id, 'local')] || HTMLElement.prototype;
     };
+    // A shadow root is a fragment the DOM links to a host (dom/shadow.rs);
+    // ShadowRoot is defined later, by web_interfaces.js.
+    var fragmentProto = function () { return DocumentFragment.prototype; };
     function wrap(id) {
         if (typeof id !== 'number') return null;
         var w = cache.get(id);
@@ -1169,7 +1361,7 @@ const WRAPPERS_JS: &str = r#"
         var t = N.info(gen, id, 'type');
         var proto = t === 1 ? elementProto(id)
                   : t === 3 ? Text.prototype : t === 9 ? Document.prototype
-                  : t === 8 ? Comment.prototype : t === 11 ? DocumentFragment.prototype
+                  : t === 8 ? Comment.prototype : t === 11 ? fragmentProto(id)
                   : Node.prototype;
         w = Object.create(proto);
         Object.defineProperty(w, SLOT, { value: { id: id, gen: gen } });
@@ -1217,10 +1409,12 @@ const WRAPPERS_JS: &str = r#"
     // throw; an old-document wrapper names no node (-1) and throws NotFoundError.
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
+        var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
         var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
         if (typeof r === 'string') {
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
+        if (m) m();
         return r;
     }
     function create(kind, data, method) {
@@ -1271,8 +1465,10 @@ const WRAPPERS_JS: &str = r#"
         function here(s) { return s.gen === gen ? s.id : -1; }
         var p = slotOf(parent), n = nodeArg(node, method);
         var c = child == null ? null : here(nodeArg(child, method));
+        var m = HOOKS.mutation && HOOKS.mutation.tree(op, parent, node, child);
         var err = N.mutate(gen, op, here(p), here(n), c);
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
+        if (m) m();
         return node;
     }
     Node.prototype.appendChild = function (node) {
@@ -1308,8 +1504,11 @@ const WRAPPERS_JS: &str = r#"
             }
             return child;
         }
-        write('insert', this, node, child, 'replaceChild');
-        return write('remove', this, child, null, 'replaceChild');
+        var self = this;
+        return batch(function () {
+            write('insert', self, node, child, 'replaceChild');
+            return write('remove', self, child, null, 'replaceChild');
+        });
     };
 
     // ParentNode.append/prepend and ChildNode.before/after/replaceWith
@@ -1328,6 +1527,14 @@ const WRAPPERS_JS: &str = r#"
     function insertAll(parent, nodes, ref, method) {
         nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
     }
+    // DOM queues one record per call of these; they make several writes,
+    // which an observer merges into one while `fn` runs.
+    function batch(fn) {
+        var m = HOOKS.mutation;
+        if (!m) return fn();
+        m.batch(1);
+        try { return fn(); } finally { m.batch(-1); }
+    }
     function viableSibling(node, field, nodes) {
         var s = node[field];
         while (s && nodes.indexOf(s) >= 0) s = s[field];
@@ -1335,16 +1542,19 @@ const WRAPPERS_JS: &str = r#"
     }
     [Element, DocumentFragment].forEach(function (C) {
         C.prototype.append = function () {
-            insertAll(this, toNodes(arguments), null, 'append');
+            var self = this, nodes = toNodes(arguments);
+            batch(function () { insertAll(self, nodes, null, 'append'); });
         };
         C.prototype.prepend = function () {
-            var nodes = toNodes(arguments);
-            insertAll(this, nodes, this.firstChild, 'prepend');
+            var self = this, nodes = toNodes(arguments);
+            batch(function () { insertAll(self, nodes, self.firstChild, 'prepend'); });
         };
         C.prototype.replaceChildren = function () {
-            var nodes = toNodes(arguments);
-            while (this.firstChild) this.removeChild(this.firstChild);
-            insertAll(this, nodes, null, 'replaceChildren');
+            var self = this, nodes = toNodes(arguments);
+            batch(function () {
+                while (self.firstChild) self.removeChild(self.firstChild);
+                insertAll(self, nodes, null, 'replaceChildren');
+            });
         };
     });
     [Element, CharacterData].forEach(function (C) {
@@ -1354,27 +1564,30 @@ const WRAPPERS_JS: &str = r#"
             var args = Array.prototype.slice.call(arguments);
             var prev = viableSibling(this, 'previousSibling', args);
             var nodes = toNodes(args);
-            insertAll(p, nodes, prev ? prev.nextSibling : p.firstChild, 'before');
+            batch(function () { insertAll(p, nodes, prev ? prev.nextSibling : p.firstChild, 'before'); });
         };
         C.prototype.after = function () {
             var p = this.parentNode;
             if (!p) return;
             var args = Array.prototype.slice.call(arguments);
             var next = viableSibling(this, 'nextSibling', args);
-            insertAll(p, toNodes(args), next, 'after');
+            var nodes = toNodes(args);
+            batch(function () { insertAll(p, nodes, next, 'after'); });
         };
         C.prototype.replaceWith = function () {
             var p = this.parentNode;
             if (!p) return;
             var args = Array.prototype.slice.call(arguments);
             var next = viableSibling(this, 'nextSibling', args);
-            var nodes = toNodes(args);
-            if (this.parentNode === p) {
-                insertAll(p, nodes, this, 'replaceWith');
-                p.removeChild(this);
-            } else {
-                insertAll(p, nodes, next, 'replaceWith');
-            }
+            var self = this, nodes = toNodes(args);
+            batch(function () {
+                if (self.parentNode === p) {
+                    insertAll(p, nodes, self, 'replaceWith');
+                    p.removeChild(self);
+                } else {
+                    insertAll(p, nodes, next, 'replaceWith');
+                }
+            });
         };
     });
     Node.prototype.contains = function (other) {
@@ -2410,10 +2623,17 @@ const WRAPPERS_JS: &str = r#"
         if (!all) { all = {}; LISTENERS.set(t, all); }
         type = String(type);
         var list = all[type] || (all[type] = []), capture = flag(opts, 'capture');
+        // The `signal` option: an aborted signal adds nothing, and a later
+        // abort removes the listener.
+        var signal = opts && typeof opts === 'object' ? opts.signal : undefined;
+        if (signal != null && signal.aborted) return;
         for (var i = 0; i < list.length; i++) {
             if (list[i].cb === cb && list[i].capture === capture) return;
         }
         list.push({ cb: cb, capture: capture, once: flag(opts, 'once'), removed: false });
+        if (signal != null && typeof signal.addEventListener === 'function') {
+            signal.addEventListener('abort', function () { t.removeEventListener(type, cb, capture); }, { once: true });
+        }
     };
     EventTarget.prototype.removeEventListener = function (type, cb, opts) {
         var all = LISTENERS.get(thisTarget(this)), list = all && all[String(type)];
@@ -2433,9 +2653,7 @@ const WRAPPERS_JS: &str = r#"
         try {
             return typeof cb === 'function' ? cb.call(t, event) : cb.handleEvent(event);
         } catch (e) {
-            var msg;
-            try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
-            if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
+            try { __rk.reportError(e); } catch (_) {}
         }
     }
     // An element's on<type> handler: the property when one was assigned
@@ -2446,6 +2664,7 @@ const WRAPPERS_JS: &str = r#"
     // does not compile is logged once and is no handler.
     var INLINE = new WeakMap();
     function handlerOf(t, type) {
+        if (PLAIN.has(t)) return undefined;
         var h = t['on' + type];
         if (h !== undefined || !t[SLOT] || t.nodeType !== 1) return h;
         var src = t.getAttribute('on' + type);
@@ -2459,9 +2678,7 @@ const WRAPPERS_JS: &str = r#"
                 c.fn = new Function('event',
                     'with (this.ownerDocument || {}) { with (this) {\n' + src + '\n} }');
             } catch (e) {
-                var msg;
-                try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
-                if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
+                try { __rk.reportError(e); } catch (_) {}
             }
         }
         return c.fn;
@@ -2605,6 +2822,7 @@ const WRAPPERS_JS: &str = r#"
         type = String(type);
         if (type === 'text/xml' || type === 'application/xml' ||
             type === 'application/xhtml+xml' || type === 'image/svg+xml') {
+            __rk.unsupported('DOMParser', 'parseFromString(XML)');
             throw new DOMException("Failed to execute 'parseFromString' on 'DOMParser': " +
                 "XML documents are not supported yet.", 'NotSupportedError');
         }
@@ -2619,7 +2837,9 @@ const WRAPPERS_JS: &str = r#"
     HTMLElement.prototype.click = function () {
         var e = new Event('click', { bubbles: true, cancelable: true });
         e[SYNTHETIC_CLICK] = true;
-        this.dispatchEvent(e);
+        // A link's activation behaviour (HTML §4.6.4): the user's click is
+        // followed by the engine, script's own click() here.
+        if (this.dispatchEvent(e) && g.__rustkit_follow_link) g.__rustkit_follow_link(this);
     };
 
     // The global `document` becomes the Document wrapper.
@@ -2650,10 +2870,13 @@ const WRAPPERS_JS: &str = r#"
         setActivation: function (f) { activation = f; },
         setImplicitSubmit: function (f) { implicitSubmit = f; }
     };
+    // For web_history.js, which deletes it: script asks for a navigation.
+    g.__rkNavInternals = { navigate: function (url) { N.navigate(String(url)); } };
 
     // For node_apis.js, which runs next and deletes it.
     g.__rkNodeInternals = {
         wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
+        setFragmentProto: function (f) { fragmentProto = f; },
         extendElementProto: function (f) {
             var base = elementProto;
             elementProto = function (id) { return f(id, base); };
@@ -2673,7 +2896,7 @@ const WRAPPERS_JS: &str = r#"
 
 #[cfg(test)]
 mod tests {
-    use crate::{DomBindings, DomDirty};
+    use crate::{DomBindings, DomDirty, MutationKind};
     use rustkit_dom::Document;
     use rustkit_js::{JsRuntime, JsValue};
     use std::rc::Rc;
@@ -2963,5 +3186,89 @@ mod tests {
             .unwrap();
         assert_eq!(eval_string(&b, "document.getElementById('i').value"), "ab");
         assert!(b.take_value_writes().is_empty());
+    }
+
+    // The relayout cause log: each dirtying write is counted by kind and
+    // the first one names its node; a write that changes nothing is not.
+    #[test]
+    fn dirtying_writes_are_tallied_by_kind_with_the_first_node() {
+        let (b, _doc) = bound(PAGE);
+        assert!(b.take_script_mutations().is_empty());
+        b.evaluate(
+            "var m = document.getElementById('main'); \
+             m.className = 'box';",
+        )
+        .unwrap();
+        assert!(
+            b.take_script_mutations().is_empty(),
+            "an attribute set to its value is not a write"
+        );
+        b.evaluate(
+            "var m = document.getElementById('main'); \
+             m.setAttribute('data-x', '1'); \
+             m.style.color = 'red'; \
+             m.appendChild(document.createElement('span')); \
+             document.getElementById('outside').textContent = 'changed'; \
+             m.setAttribute('data-y', '2');",
+        )
+        .unwrap();
+        let tally = b.take_script_mutations();
+        assert_eq!(
+            tally.first,
+            Some((MutationKind::Attribute, "div#main".to_string()))
+        );
+        assert_eq!(tally.count(MutationKind::Attribute), 2);
+        assert_eq!(tally.count(MutationKind::Style), 1);
+        assert_eq!(tally.count(MutationKind::ChildList), 1);
+        assert_eq!(tally.count(MutationKind::Text), 1);
+        assert_eq!(tally.count(MutationKind::FormValue), 0);
+        assert_eq!(tally.total(), 5);
+        assert!(b.take_script_mutations().is_empty(), "taking resets it");
+        // The dirty bucket is unchanged by the tally.
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
+    #[test]
+    fn first_write_names_a_node_without_an_id_by_tag() {
+        let (b, _doc) = bound(PAGE);
+        b.evaluate("document.getElementById('outside').firstChild.data = 'Bye';")
+            .unwrap();
+        let tally = b.take_script_mutations();
+        // A text node's own write has no element to name.
+        assert_eq!(tally.first, Some((MutationKind::Text, String::new())));
+        b.evaluate("document.body.innerHTML = '<i>x</i>';").unwrap();
+        assert_eq!(
+            b.take_script_mutations().first,
+            Some((MutationKind::ChildList, "body".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_new_document_drops_the_previous_tally() {
+        let (b, _doc) = bound(PAGE);
+        b.evaluate("document.getElementById('main').setAttribute('data-x', '1');")
+            .unwrap();
+        b.set_document(Rc::new(Document::parse_html("<p>x</p>").unwrap()))
+            .unwrap();
+        assert!(b.take_script_mutations().is_empty());
+    }
+
+    // The page picks its ids: the label the relayout log prints is clipped
+    // and carries no control characters, so a page cannot flood or forge it.
+    #[test]
+    fn a_long_or_multiline_id_is_clipped_in_the_label() {
+        let (b, _doc) = bound(PAGE);
+        b.evaluate(
+            "var m = document.getElementById('main'); \
+             m.id = 'x\\nINFO forged ' + 'a'.repeat(100000);",
+        )
+        .unwrap();
+        b.take_script_mutations();
+        b.evaluate("m.setAttribute('data-n', '1');").unwrap();
+        let (_, label) = b.take_script_mutations().first.expect("a write");
+        assert!(!label.chars().any(char::is_control), "{label:?}");
+        assert!(label.starts_with("div#x?INFO forged aaa"), "{label:?}");
+        assert!(label.ends_with('…'), "{label:?}");
+        assert_eq!(label.chars().count(), "div#".len() + 48 + 1);
     }
 }

@@ -1480,6 +1480,24 @@ impl TextShaper {
     ) -> Result<ShapedRun, TextError> {
         use std::cell::RefCell;
 
+        // `font-size: 0`: no glyph, no advance, no extent. Core Text is not
+        // asked: it answers a size of 0 with its default size, so text that
+        // a page had hidden this way was measured about 12px tall.
+        if size <= 0.0 {
+            return Ok(ShapedRun {
+                text: text.to_string(),
+                glyphs: Vec::new(),
+                font_family: font_chain.primary.clone(),
+                font_weight: weight,
+                font_style: style,
+                font_stretch: stretch,
+                font_size: 0.0,
+                metrics: TextMetrics::with_font_size(0.0),
+                direction: TextDirection::Ltr,
+                face: None,
+            });
+        }
+
         type Key = (String, String, Vec<String>, u16, u8, u8, u32);
         struct Memo {
             generation: u64,
@@ -3539,7 +3557,7 @@ mod tests {
             .collect();
         assert_eq!(texts.first().map(String::as_str), Some("XXXX"), "{texts:?}");
         assert!(
-            texts.get(1).map_or(false, |t| t.starts_with('\u{a0}')),
+            texts.get(1).is_some_and(|t| t.starts_with('\u{a0}')),
             "the nbsp must start line 2, not vanish at the break: {texts:?}"
         );
     }

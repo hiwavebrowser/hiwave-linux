@@ -36,6 +36,12 @@ pub enum HttpError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
 
+    /// The host name did not resolve (or resolved to no address). The same
+    /// text as [`ConnectionFailed`](Self::ConnectionFailed); its own variant
+    /// so a caller tells the two apart without reading the text.
+    #[error("Connection failed: {0}")]
+    LookupFailed(String),
+
     #[error("TLS error: {0}")]
     TlsError(String),
 
@@ -74,6 +80,12 @@ pub struct Response {
     pub body: Bytes,
     /// Final URL (after redirects).
     pub url: Url,
+    /// Body bytes as they came over the wire, before any
+    /// `Content-Encoding` was undone (`body.len()` after).
+    pub encoded_body_size: u64,
+    /// The redirects followed to get here, in order: each URL that answered
+    /// with a redirect, and its status.
+    pub redirect_chain: Vec<(Url, StatusCode)>,
 }
 
 impl Response {
@@ -452,8 +464,11 @@ impl Client {
                     .join(location)
                     .map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
                 debug!(from = %url, to = %redirect_url, "Following redirect");
-                return Box::pin(self.request_url(Method::GET, redirect_url, HeaderMap::new(), None, redirect_count + 1))
-                    .await;
+                let mut followed =
+                    Box::pin(self.request_url(Method::GET, redirect_url, HeaderMap::new(), None, redirect_count + 1))
+                        .await?;
+                followed.redirect_chain.insert(0, (url, response.status));
+                return Ok(followed);
             }
         }
 
@@ -463,6 +478,8 @@ impl Client {
             headers: response.headers,
             body: response.body,
             url,
+            encoded_body_size: response.encoded_len,
+            redirect_chain: Vec::new(),
         })
     }
 
@@ -532,45 +549,7 @@ impl Client {
             .version(http::Version::HTTP_2);
 
         // Browser-shaped known set, minus h2-illegal connection headers.
-        const ORDERED_H2: &[(&str, Option<&str>)] = &[
-            (
-                "accept",
-                Some(
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,\
-image/avif,image/webp,*/*;q=0.8",
-                ),
-            ),
-            ("accept-language", None),
-            ("accept-encoding", Some(ACCEPT_ENCODING)),
-            ("upgrade-insecure-requests", Some("1")),
-            ("sec-fetch-dest", Some("document")),
-            ("sec-fetch-mode", Some("navigate")),
-            ("sec-fetch-site", Some("none")),
-            ("sec-fetch-user", Some("?1")),
-            ("referer", None),
-            ("cookie", None),
-        ];
-        const H2_ILLEGAL: &[&str] =
-            &["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host"];
-
-        request = request.header("user-agent", &self.config.user_agent);
-        let mut written: Vec<&str> = vec![];
-        for (name, default) in ORDERED_H2 {
-            let value = headers
-                .get(*name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
-                .or_else(|| default.map(str::to_string));
-            if let Some(v) = value {
-                request = request.header(*name, v);
-                written.push(name);
-            }
-        }
-        for (name, value) in headers.iter() {
-            let n = name.as_str();
-            if written.contains(&n) || H2_ILLEGAL.contains(&n) || n == "user-agent" {
-                continue;
-            }
+        for (name, value) in h2_request_headers(&self.config.user_agent, headers) {
             request = request.header(name, value);
         }
 
@@ -609,6 +588,7 @@ image/avif,image/webp,*/*;q=0.8",
             let _ = recv.flow_control().release_capacity(chunk.len());
         }
 
+        let encoded_len = collected.len() as u64;
         let body = decode_content_encoding_capped(Bytes::from(collected), &mut response_headers, self.max_body)?;
 
         Ok(RawResponse {
@@ -616,6 +596,7 @@ image/avif,image/webp,*/*;q=0.8",
             version: Version::HTTP_2,
             headers: response_headers,
             body,
+            encoded_len,
         })
     }
 
@@ -780,6 +761,7 @@ image/avif,image/webp,*/*;q=0.8",
 
         // Read body
         let body = read_body(&mut reader, &response_headers, self.max_body).await?;
+        let encoded_len = body.len() as u64;
         let body = decode_content_encoding_capped(body, &mut response_headers, self.max_body)?;
 
         trace!(status = %status, body_len = body.len(), "Response received");
@@ -789,6 +771,7 @@ image/avif,image/webp,*/*;q=0.8",
             version,
             headers: response_headers,
             body,
+            encoded_len,
         })
     }
 }
@@ -805,6 +788,8 @@ struct RawResponse {
     version: Version,
     headers: HeaderMap,
     body: Bytes,
+    /// Body length before `Content-Encoding` was undone.
+    encoded_len: u64,
 }
 
 impl RawResponse {
@@ -888,16 +873,86 @@ fn parse_status_line(line: &str) -> Result<(Version, StatusCode), HttpError> {
     Ok((version, status))
 }
 
-/// The `Accept-Encoding` sent on requests: what `decode_content_encoding`
-/// can undo.
+/// The `Accept-Encoding` sent on requests. `decode_content_encoding` can undo
+/// all of it, and `br` as well: brotli is decoded when a server sends it
+/// unasked, but asking for it would change what every server sends us.
 const ACCEPT_ENCODING: &str = "gzip, deflate";
+
+/// Connection-specific header fields (RFC 9113 §8.1.2) plus `host`
+/// (carried by `:authority`). Must not appear on an HTTP/2 request.
+fn is_h2_illegal_request_header(name: &str) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "keep-alive"
+            | "proxy-connection"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+    )
+}
+
+/// Header pairs `send_request_h2` writes onto the request, in emission order.
+/// Caller headers that are connection-specific, already emitted, or the
+/// user-agent (set from config) are dropped.
+fn h2_request_headers(user_agent: &str, headers: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
+    const ORDERED_H2: &[(&str, Option<&str>)] = &[
+        (
+            "accept",
+            Some(
+                "text/html,application/xhtml+xml,application/xml;q=0.9,\
+image/avif,image/webp,*/*;q=0.8",
+            ),
+        ),
+        ("accept-language", None),
+        ("accept-encoding", Some(ACCEPT_ENCODING)),
+        ("upgrade-insecure-requests", Some("1")),
+        ("sec-fetch-dest", Some("document")),
+        ("sec-fetch-mode", Some("navigate")),
+        ("sec-fetch-site", Some("none")),
+        ("sec-fetch-user", Some("?1")),
+        ("referer", None),
+        ("cookie", None),
+    ];
+
+    let mut out = Vec::new();
+    out.push((
+        HeaderName::from_static("user-agent"),
+        HeaderValue::from_str(user_agent).unwrap_or_else(|_| HeaderValue::from_static("")),
+    ));
+    let mut written: Vec<&str> = vec![];
+    for (name, default) in ORDERED_H2 {
+        // Same as before the extract: a non-UTF-8 caller value falls through
+        // to the default (or is omitted when there is none).
+        let value = headers
+            .get(*name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .or_else(|| default.map(str::to_string));
+        if let Some(v) = value {
+            out.push((
+                HeaderName::from_static(*name),
+                HeaderValue::from_str(&v).unwrap_or_else(|_| HeaderValue::from_static("")),
+            ));
+            written.push(name);
+        }
+    }
+    for (name, value) in headers.iter() {
+        let n = name.as_str();
+        if written.contains(&n) || is_h2_illegal_request_header(n) || n == "user-agent" {
+            continue;
+        }
+        out.push((name.clone(), value.clone()));
+    }
+    out
+}
 
 /// Undo the response's `Content-Encoding`, so callers always see the
 /// resource's bytes. A decoded body drops `Content-Encoding` and
 /// `Content-Length` (which described the encoded bytes).
 ///
 /// A body cut off mid-stream keeps what decoded, as a truncated chunked
-/// body does. An encoding we never advertised is passed through untouched.
+/// body does. An encoding we cannot undo is passed through untouched.
 #[cfg(test)]
 fn decode_content_encoding(body: Bytes, headers: &mut HeaderMap) -> Result<Bytes, HttpError> {
     decode_content_encoding_capped(body, headers, None)
@@ -936,6 +991,8 @@ fn decode_content_encoding_capped(
             }
             Err(e) => Err(e),
         },
+        // Not in `ACCEPT_ENCODING`, and sent all the same by some servers.
+        "br" => brotli_decompressor::Decompressor::new(&body[..], 4096).take(limit).read_to_end(&mut out),
         other => {
             warn!(encoding = other, "Unsupported Content-Encoding; body left encoded");
             return Ok(body);
@@ -1250,7 +1307,7 @@ pub mod blocking {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|e| HttpError::IoError(io::Error::new(io::ErrorKind::Other, e)))?;
+                .map_err(|e| HttpError::IoError(io::Error::other(e)))?;
 
             let inner = super::Client::with_config(self.config)?;
 
@@ -1262,6 +1319,48 @@ pub mod blocking {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn h2_request_headers_strip_connection_specific_fields() {
+        // RFC 9113 §8.1.2: these are illegal on h2. Before the extract they
+        // lived only inside `send_request_h2`, so a regression could only be
+        // caught by a live h2 negotiation.
+        let mut headers = HeaderMap::new();
+        headers.insert("connection", HeaderValue::from_static("keep-alive"));
+        headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+        headers.insert("proxy-connection", HeaderValue::from_static("close"));
+        headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+        headers.insert("upgrade", HeaderValue::from_static("h2c"));
+        headers.insert("host", HeaderValue::from_static("evil.example"));
+        headers.insert("x-custom", HeaderValue::from_static("ok"));
+        headers.insert("referer", HeaderValue::from_static("https://doc.example/p"));
+
+        let pairs = h2_request_headers("HiWave/test", &headers);
+        let names: Vec<&str> = pairs.iter().map(|(n, _)| n.as_str()).collect();
+
+        for illegal in [
+            "connection",
+            "keep-alive",
+            "proxy-connection",
+            "transfer-encoding",
+            "upgrade",
+            "host",
+        ] {
+            assert!(
+                !names.contains(&illegal),
+                "{illegal} must not appear on an h2 request: {names:?}"
+            );
+            assert!(is_h2_illegal_request_header(illegal));
+        }
+
+        assert_eq!(names[0], "user-agent");
+        assert_eq!(pairs[0].1.to_str().unwrap(), "HiWave/test");
+        assert!(names.contains(&"referer"));
+        assert!(names.contains(&"x-custom"));
+        assert!(names.contains(&"accept-encoding"));
+        assert!(!is_h2_illegal_request_header("referer"));
+        assert!(!is_h2_illegal_request_header("x-custom"));
+    }
 
     #[test]
     fn test_parse_status_line() {
@@ -1350,6 +1449,8 @@ mod tests {
             headers,
             body: Bytes::from("Hello"),
             url: Url::parse("https://example.com").unwrap(),
+            encoded_body_size: 5,
+            redirect_chain: Vec::new(),
         };
 
         assert!(response.is_success());
@@ -1391,7 +1492,7 @@ mod tests {
         ));
     }
 
-    fn gzip(data: &[u8]) -> Vec<u8> {
+    pub(super) fn gzip(data: &[u8]) -> Vec<u8> {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::Write::write_all(&mut enc, data).unwrap();
         enc.finish().unwrap()
@@ -1523,9 +1624,97 @@ mod tests {
         let partial = decode("gzip", cut).unwrap();
         assert!(!partial.is_empty() && big.starts_with(&partial));
 
-        // Never advertised: left alone.
-        assert_eq!(&decode("br", b"xyz".to_vec()).unwrap()[..], b"xyz");
+        // Cannot be undone here: left alone.
+        assert_eq!(&decode("zstd", b"xyz".to_vec()).unwrap()[..], b"xyz");
         assert!(decode("gzip", b"not gzip".to_vec()).is_err());
+    }
+
+    /// `"hello hello hello hello world"` fifty times (1450 bytes), as Node's
+    /// `zlib.brotliCompressSync` encodes it.
+    const BROTLI_HELLO: [u8; 26] = [
+        0x1b, 0xa9, 0x05, 0xe0, 0x8c, 0x94, 0x6e, 0xde, 0x44, 0x55, 0x86, 0x96, 0x6c, 0x20, 0x6f,
+        0x39, 0xc8, 0x3c, 0x86, 0xd5, 0x81, 0x13, 0xe2, 0x88, 0x8f, 0x1a,
+    ];
+
+    /// Some servers send `Content-Encoding: br` to a client that did not ask
+    /// for it (seen on web fonts in a hand test); the body must still reach
+    /// the caller as the resource's bytes.
+    #[test]
+    fn content_encoding_decodes_brotli_sent_unasked() {
+        let text = b"hello hello hello hello world".repeat(50);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", HeaderValue::from_static("br"));
+        headers.insert("content-length", HeaderValue::from_static("26"));
+        let decoded = decode_content_encoding(Bytes::from(BROTLI_HELLO.to_vec()), &mut headers).unwrap();
+        assert_eq!(&decoded[..], &text[..]);
+        assert!(headers.get("content-encoding").is_none());
+        assert!(headers.get("content-length").is_none());
+
+        // The size cap holds for brotli as for gzip: 26 bytes must not become
+        // more than the caller allows.
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", HeaderValue::from_static("br"));
+        let capped = decode_content_encoding_capped(Bytes::from(BROTLI_HELLO.to_vec()), &mut headers, Some(1000));
+        assert!(matches!(capped, Err(HttpError::BodyTooLarge(1000))));
+
+        // A body that is not brotli is an error, as for gzip, and so is one
+        // cut off before anything decoded.
+        let decode = |body: Vec<u8>| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-encoding", HeaderValue::from_static("br"));
+            decode_content_encoding(Bytes::from(body), &mut headers)
+        };
+        assert!(decode(vec![0xff; 16]).is_err());
+        assert!(decode(BROTLI_HELLO[..20].to_vec()).is_err());
+
+        // We still do not ask for it.
+        assert!(!ACCEPT_ENCODING.contains("br"));
+    }
+
+    /// The same over a socket: the request asks for gzip and deflate only,
+    /// the server answers in brotli, the caller gets the text.
+    #[test]
+    fn a_brotli_response_to_a_request_that_did_not_ask_is_decoded() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&buf[..n]),
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 26\r\n\r\n")
+                .unwrap();
+            stream.write_all(&BROTLI_HELLO).unwrap();
+            String::from_utf8_lossy(&request).to_ascii_lowercase()
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = Client::builder().build().unwrap();
+        let response = rt
+            .block_on(client.request(
+                Method::GET,
+                &format!("http://127.0.0.1:{port}/"),
+                HeaderMap::new(),
+                None,
+            ))
+            .unwrap();
+
+        let request = server.join().unwrap();
+        assert!(request.contains("\r\naccept-encoding: gzip, deflate\r\n"), "{request}");
+        assert_eq!(response.text().unwrap(), "hello hello hello hello world".repeat(50));
+        assert!(response.headers.get("content-encoding").is_none());
     }
 
     #[test]
@@ -1616,6 +1805,42 @@ mod governed_tests {
         assert_eq!(r.status.as_u16(), 302);
         assert_eq!(r.header("location"), Some(&format!("http://127.0.0.1:{target_port}/x")[..]));
         assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_followed_redirect_chain_and_the_encoded_size_are_kept() {
+        let body = super::tests::gzip(b"<p>the real page</p>");
+        let mut reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        reply.extend_from_slice(&body);
+        let (target_port, _) = serve(reply).await;
+        let hop = format!(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1:{target_port}/end\r\nContent-Length: 0\r\n\r\n"
+        );
+        let (hop_port, _) = serve(hop.into_bytes()).await;
+        let first = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{hop_port}/hop\r\nContent-Length: 0\r\n\r\n"
+        );
+        let (port, _) = serve(first.into_bytes()).await;
+        let r = client().get(&format!("http://127.0.0.1:{port}/start")).await.unwrap();
+        assert_eq!(r.text().unwrap(), "<p>the real page</p>");
+        assert_eq!(r.encoded_body_size, body.len() as u64);
+        let chain: Vec<(String, u16)> = r
+            .redirect_chain
+            .iter()
+            .map(|(url, status)| (url.to_string(), status.as_u16()))
+            .collect();
+        assert_eq!(
+            chain,
+            vec![
+                (format!("http://127.0.0.1:{port}/start"), 302),
+                (format!("http://127.0.0.1:{hop_port}/hop"), 301),
+            ]
+        );
+        assert_eq!(r.url.as_str(), format!("http://127.0.0.1:{target_port}/end"));
     }
 
     #[tokio::test]

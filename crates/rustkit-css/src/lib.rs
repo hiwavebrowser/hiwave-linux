@@ -922,9 +922,10 @@ pub enum Gradient {
 // ==================== Background Layer Types ====================
 
 /// The image source for a background layer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum BackgroundImage {
     /// No image (transparent).
+    #[default]
     None,
     /// A gradient.
     Gradient(Gradient),
@@ -932,14 +933,8 @@ pub enum BackgroundImage {
     Url(String),
 }
 
-impl Default for BackgroundImage {
-    fn default() -> Self {
-        BackgroundImage::None
-    }
-}
-
 /// Background size specification.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum BackgroundSize {
     /// Stretch to cover the entire area.
     Cover,
@@ -951,19 +946,15 @@ pub enum BackgroundSize {
         height: Option<f32>,
     },
     /// Auto sizing (use intrinsic dimensions).
+    #[default]
     Auto,
 }
 
-impl Default for BackgroundSize {
-    fn default() -> Self {
-        BackgroundSize::Auto
-    }
-}
-
 /// Background repeat specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackgroundRepeat {
     /// Repeat in both directions.
+    #[default]
     Repeat,
     /// Repeat horizontally only.
     RepeatX,
@@ -975,12 +966,6 @@ pub enum BackgroundRepeat {
     Space,
     /// Round to fill without clipping.
     Round,
-}
-
-impl Default for BackgroundRepeat {
-    fn default() -> Self {
-        BackgroundRepeat::Repeat
-    }
 }
 
 /// Background position specification.
@@ -1113,6 +1098,24 @@ pub enum Display {
     Grid,
     InlineGrid,
     None,
+    /// `table`: a block-level table wrapper (CSS 2.1 §17.2).
+    Table,
+    /// `inline-table`: an atomic inline-level table.
+    InlineTable,
+    TableRowGroup,
+    TableHeaderGroup,
+    TableFooterGroup,
+    TableRow,
+    TableCell,
+    TableCaption,
+    /// Columns and column groups are never rendered; they only carry widths.
+    TableColumn,
+    TableColumnGroup,
+    /// `contents`: the element generates no box; its children take its
+    /// place. Only the UA style of `<slot>` sets it (author `display:
+    /// contents` is still unsupported, see `parse_display`), and the
+    /// engine's box-tree build removes such boxes, so layout never sees one.
+    Contents,
 }
 
 impl Display {
@@ -1130,7 +1133,11 @@ impl Display {
     pub fn is_inline_level(self) -> bool {
         matches!(
             self,
-            Display::Inline | Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+            Display::Inline
+                | Display::InlineBlock
+                | Display::InlineFlex
+                | Display::InlineGrid
+                | Display::InlineTable
         )
     }
 
@@ -1146,8 +1153,35 @@ impl Display {
     pub fn is_atomic_inline(self) -> bool {
         matches!(
             self,
-            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid | Display::InlineTable
         )
+    }
+
+    /// `table` or `inline-table`: the box that runs table layout.
+    pub fn is_table(self) -> bool {
+        matches!(self, Display::Table | Display::InlineTable)
+    }
+
+    /// `table-row-group`, `table-header-group` or `table-footer-group`.
+    pub fn is_table_row_group(self) -> bool {
+        matches!(
+            self,
+            Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup
+        )
+    }
+
+    /// Any table-internal display (row group, row, cell, caption, column,
+    /// column group): a box that only makes sense inside a table.
+    pub fn is_table_internal(self) -> bool {
+        self.is_table_row_group()
+            || matches!(
+                self,
+                Display::TableRow
+                    | Display::TableCell
+                    | Display::TableCaption
+                    | Display::TableColumn
+                    | Display::TableColumnGroup
+            )
     }
 }
 
@@ -1257,7 +1291,7 @@ pub enum FlexBasis {
 // ==================== Grid Types ====================
 
 /// A grid track size.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum TrackSize {
     /// Fixed length in pixels.
     Px(f32),
@@ -1270,17 +1304,12 @@ pub enum TrackSize {
     /// Size based on content maximum.
     MaxContent,
     /// Auto sizing.
+    #[default]
     Auto,
     /// Minimum/maximum constraint.
     MinMax(Box<TrackSize>, Box<TrackSize>),
     /// Fit content with maximum.
     FitContent(f32),
-}
-
-impl Default for TrackSize {
-    fn default() -> Self {
-        TrackSize::Auto
-    }
 }
 
 impl TrackSize {
@@ -1619,9 +1648,10 @@ impl GridAutoFlow {
 }
 
 /// Grid line reference (for grid-column-start, etc.).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum GridLine {
     /// Auto placement.
+    #[default]
     Auto,
     /// Specific line number (1-based, can be negative).
     Number(i32),
@@ -1631,12 +1661,6 @@ pub enum GridLine {
     Span(u32),
     /// Span to a named line.
     SpanName(String),
-}
-
-impl Default for GridLine {
-    fn default() -> Self {
-        GridLine::Auto
-    }
 }
 
 /// Grid placement for an item.
@@ -1756,20 +1780,15 @@ pub enum FontStyle {
 /// - a number (unitless multiplier of font-size)
 /// - a length (absolute value like `24px`)
 /// - a percentage (of font-size)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LineHeight {
     /// Normal line height (use font metrics, typically ~1.2).
+    #[default]
     Normal,
     /// Unitless number (multiplier of font-size).
     Number(f32),
     /// Absolute length in pixels.
     Px(f32),
-}
-
-impl Default for LineHeight {
-    fn default() -> Self {
-        LineHeight::Normal
-    }
 }
 
 /// Fallback ratio for `line-height: normal` when no font metrics are available.
@@ -1841,6 +1860,16 @@ pub enum Visibility {
     Visible,
     Hidden,
     Collapse,
+}
+
+/// `pointer-events` (CSS UI 4 §8.1; the SVG-only values count as `auto`).
+/// Inherited. A `none` box is no target of a hit test: the point goes to
+/// what is under it, and a descendant can set `auto` again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointerEvents {
+    #[default]
+    Auto,
+    None,
 }
 
 /// Overflow behavior.
@@ -2045,6 +2074,14 @@ pub enum LineBreak {
     Normal,
     Strict,
     Anywhere,
+}
+
+/// `border-collapse` (CSS 2.1 §17.6). Inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderCollapse {
+    #[default]
+    Separate,
+    Collapse,
 }
 
 /// Vertical alignment.
@@ -2453,8 +2490,71 @@ impl std::fmt::Debug for CustomProperties {
     }
 }
 
+impl ComputedStyle {
+    /// Take from `from` the properties that change what is painted and
+    /// nothing else: no box is sized, placed, created or dropped by them,
+    /// and no stacking context comes or goes. The list is deliberately
+    /// short (`opacity`, `transform`, `visibility` and background images
+    /// are not on it); a property left off costs a layout, never a wrong
+    /// frame.
+    pub fn copy_paint_only(&mut self, from: &ComputedStyle) {
+        self.color = from.color;
+        self.background_color = from.background_color;
+        self.border_top_color = from.border_top_color;
+        self.border_right_color = from.border_right_color;
+        self.border_bottom_color = from.border_bottom_color;
+        self.border_left_color = from.border_left_color;
+        self.text_decoration_line = from.text_decoration_line;
+        self.text_decoration_color = from.text_decoration_color;
+        self.text_decoration_style = from.text_decoration_style;
+        self.text_decoration_thickness = from.text_decoration_thickness.clone();
+        self.webkit_text_fill_color = from.webkit_text_fill_color;
+        self.box_shadows = from.box_shadows.clone();
+        self.transition_property = from.transition_property.clone();
+        self.transition_duration = from.transition_duration;
+        self.transition_timing_function = from.transition_timing_function.clone();
+        self.transition_delay = from.transition_delay;
+        // Custom properties are substituted into the values above and
+        // below at the cascade; nothing later reads them but script.
+        self.custom_properties = from.custom_properties.clone();
+    }
+
+    /// Whether the properties [`Self::copy_paint_only`] lists are the same
+    /// in both, custom properties aside (comparing those flattens both
+    /// sets, hundreds of entries on a themed page).
+    pub fn same_paint(&self, other: &ComputedStyle) -> bool {
+        self.color == other.color
+            && self.background_color == other.background_color
+            && self.border_top_color == other.border_top_color
+            && self.border_right_color == other.border_right_color
+            && self.border_bottom_color == other.border_bottom_color
+            && self.border_left_color == other.border_left_color
+            && self.text_decoration_line == other.text_decoration_line
+            && self.text_decoration_color == other.text_decoration_color
+            && self.text_decoration_style == other.text_decoration_style
+            && self.text_decoration_thickness == other.text_decoration_thickness
+            && self.webkit_text_fill_color == other.webkit_text_fill_color
+            && self.box_shadows == other.box_shadows
+            && self.transition_property == other.transition_property
+            && self.transition_duration == other.transition_duration
+            && self.transition_timing_function == other.transition_timing_function
+            && self.transition_delay == other.transition_delay
+    }
+
+    /// Whether `self` and `other` differ, if at all, only in the
+    /// properties [`Self::copy_paint_only`] lists.
+    pub fn differs_only_in_paint(&self, other: &ComputedStyle) -> bool {
+        // With `self`'s paint properties and its custom property set (the
+        // same `Arc`, so that comparison is a pointer check) the rest
+        // must be equal.
+        let mut masked = other.clone();
+        masked.copy_paint_only(self);
+        masked == *self
+    }
+}
+
 /// Computed style for an element.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ComputedStyle {
     // Box model
     pub display: Display,
@@ -2511,6 +2611,8 @@ pub struct ComputedStyle {
     /// Legacy single gradient field - prefer using background_layers.
     /// This is kept for backwards compatibility during migration.
     pub background_gradient: Option<Gradient>,
+    /// `mask-*` layers (CSS Masking 1 §6). Not inherited.
+    pub mask: Mask,
 
     // Typography - Basic
     pub font_size: Length,
@@ -2536,6 +2638,12 @@ pub struct ComputedStyle {
     pub line_break: LineBreak,
     pub vertical_align: VerticalAlign,
     pub writing_mode: WritingMode,
+
+    // Tables (CSS 2.1 §17). Both inherit.
+    /// `border-spacing` as (horizontal, vertical) px. Lengths are absolute
+    /// at computed-value time, so they are stored resolved.
+    pub border_spacing: (f32, f32),
+    pub border_collapse: BorderCollapse,
     pub direction: Direction,
 
     // Positioning offsets
@@ -2577,6 +2685,7 @@ pub struct ComputedStyle {
     // Visual
     pub opacity: f32,
     pub visibility: Visibility,
+    pub pointer_events: PointerEvents,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
@@ -2591,7 +2700,10 @@ pub struct ComputedStyle {
     // Image/replaced element
     pub image_url: Option<String>,
     pub object_fit: String, // "fill", "contain", "cover", "none", "scale-down"
+    /// `object-position` as a fraction of the free space per axis…
     pub object_position: (f32, f32),
+    /// …plus a pixel offset per axis (`right 10px` is 100% and -10px).
+    pub object_position_offset: (f32, f32),
 
     // Flexbox Container
     pub flex_direction: FlexDirection,
@@ -2725,6 +2837,7 @@ impl ComputedStyle {
             // gaps (Wikipedia globe, live session 2026-08-07).
             object_fit: "fill".to_string(),
             object_position: (0.5, 0.5), // center center
+            object_position_offset: (0.0, 0.0),
             ..Default::default()
         }
     }
@@ -2755,6 +2868,9 @@ impl ComputedStyle {
             // Restored on Linux; the macOS copy drops it (declared divergence).
             webkit_text_fill_color: parent.webkit_text_fill_color,
             visibility: parent.visibility,
+            pointer_events: parent.pointer_events,
+            border_spacing: parent.border_spacing,
+            border_collapse: parent.border_collapse,
 
             // Text decoration is NOT inherited (each element sets its own)
             text_decoration_line: TextDecorationLine::NONE,
@@ -3011,12 +3127,17 @@ impl Stylesheet {
     }
 }
 
+pub mod background;
+pub mod mask;
+pub use mask::Mask;
+
 pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
 pub mod media;
 pub use media::media_query_list_matches;
 
+pub mod content;
 pub mod selector_escape;
 pub use selector_escape::{css_ident, encode_selector_escapes};
 
@@ -3624,6 +3745,29 @@ fn split_css_function_args(args: &str) -> Vec<&str> {
     result
 }
 
+/// Parse `border-spacing`: one length for both axes, or horizontal then
+/// vertical (CSS 2.1 §17.6.1). Negative lengths and percentages are invalid.
+pub fn parse_border_spacing(value: &str) -> Option<(Length, Length)> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    let one = |v: &str| -> Option<Length> {
+        match parse_length(v)? {
+            Length::Zero => Some(Length::Zero),
+            Length::Px(n) | Length::Em(n) | Length::Rem(n) if n < 0.0 => None,
+            l @ (Length::Px(_) | Length::Em(_) | Length::Rem(_)) => Some(l),
+            l @ (Length::Vw(_) | Length::Vh(_) | Length::Vmin(_) | Length::Vmax(_)) => Some(l),
+            _ => None,
+        }
+    };
+    match parts.as_slice() {
+        [h] => {
+            let h = one(h)?;
+            Some((h.clone(), h))
+        }
+        [h, v] => Some((one(h)?, one(v)?)),
+        _ => None,
+    }
+}
+
 /// Parse display value.
 ///
 /// Besides the legacy single keywords, this takes css-display-3's
@@ -3631,8 +3775,9 @@ fn split_css_function_args(args: &str) -> Vec<&str> {
 /// `inline flex`, `block flow list-item`, ...), which were dropped before, so
 /// the element kept its previous display. `flow-root` lays out as a block
 /// (its new formatting context only matters for floats and margin collapse);
-/// `list-item` lays out as its outer display, with no marker. `contents`,
-/// `table*` and `ruby` stay unsupported (`None`).
+/// `list-item` lays out as its outer display, with no marker. The CSS 2.1
+/// table keywords (and `block table` / `inline table`) map to the table
+/// variants. `contents` and `ruby` stay unsupported (`None`).
 pub fn parse_display(value: &str) -> Option<Display> {
     let value = value.trim().to_lowercase();
     match value.as_str() {
@@ -3644,13 +3789,23 @@ pub fn parse_display(value: &str) -> Option<Display> {
         "grid" => return Some(Display::Grid),
         "inline-grid" => return Some(Display::InlineGrid),
         "none" => return Some(Display::None),
+        "table" => return Some(Display::Table),
+        "inline-table" => return Some(Display::InlineTable),
+        "table-row-group" => return Some(Display::TableRowGroup),
+        "table-header-group" => return Some(Display::TableHeaderGroup),
+        "table-footer-group" => return Some(Display::TableFooterGroup),
+        "table-row" => return Some(Display::TableRow),
+        "table-cell" => return Some(Display::TableCell),
+        "table-caption" => return Some(Display::TableCaption),
+        "table-column" => return Some(Display::TableColumn),
+        "table-column-group" => return Some(Display::TableColumnGroup),
         _ => {}
     }
     let (mut outer, mut inner, mut list_item) = (None, None, false);
     for token in value.split_whitespace() {
         match token {
             "block" | "inline" if outer.is_none() => outer = Some(token),
-            "flow" | "flow-root" | "flex" | "grid" if inner.is_none() => inner = Some(token),
+            "flow" | "flow-root" | "flex" | "grid" | "table" if inner.is_none() => inner = Some(token),
             "list-item" if !list_item => list_item = true,
             _ => return None,
         }
@@ -3668,6 +3823,8 @@ pub fn parse_display(value: &str) -> Option<Display> {
         (true, "flex") => Display::InlineFlex,
         (false, "grid") => Display::Grid,
         (true, "grid") => Display::InlineGrid,
+        (false, "table") => Display::Table,
+        (true, "table") => Display::InlineTable,
         (true, "flow-root") => Display::InlineBlock,
         (true, _) => Display::Inline,
         (false, _) => Display::Block,
@@ -3729,7 +3886,6 @@ mod tests {
             ("none", Some(Display::None)),
             // Unsupported or invalid: still ignored.
             ("contents", None),
-            ("table", None),
             ("block block", None),
             ("flex list-item", None),
             ("block wobble", None),
@@ -3738,6 +3894,95 @@ mod tests {
         for (value, want) in cases {
             assert_eq!(parse_display(value), *want, "display: {value:?}");
         }
+    }
+
+    #[test]
+    fn display_takes_the_table_keywords() {
+        let cases: &[(&str, Display)] = &[
+            ("table", Display::Table),
+            ("inline-table", Display::InlineTable),
+            ("table-row-group", Display::TableRowGroup),
+            ("table-header-group", Display::TableHeaderGroup),
+            ("table-footer-group", Display::TableFooterGroup),
+            ("table-row", Display::TableRow),
+            ("table-cell", Display::TableCell),
+            ("table-caption", Display::TableCaption),
+            ("table-column", Display::TableColumn),
+            ("table-column-group", Display::TableColumnGroup),
+            ("TABLE-CELL", Display::TableCell),
+            // css-display-3 two-value forms.
+            ("block table", Display::Table),
+            ("inline table", Display::InlineTable),
+            ("table inline", Display::InlineTable),
+        ];
+        for (value, want) in cases {
+            assert_eq!(parse_display(value), Some(*want), "display: {value:?}");
+        }
+        for bad in ["table-cell inline", "table table", "table list-item", "table-rows"] {
+            assert_eq!(parse_display(bad), None, "display: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn table_display_predicates() {
+        assert!(Display::Table.is_table() && Display::InlineTable.is_table());
+        assert!(!Display::TableCell.is_table());
+        assert!(Display::InlineTable.is_inline_level());
+        assert!(Display::InlineTable.is_atomic_inline());
+        assert!(!Display::Table.is_inline_level());
+        for d in [
+            Display::TableRowGroup,
+            Display::TableHeaderGroup,
+            Display::TableFooterGroup,
+        ] {
+            assert!(d.is_table_row_group(), "{d:?}");
+        }
+        assert!(!Display::TableRow.is_table_row_group());
+        for d in [
+            Display::TableRowGroup,
+            Display::TableRow,
+            Display::TableCell,
+            Display::TableCaption,
+            Display::TableColumn,
+            Display::TableColumnGroup,
+        ] {
+            assert!(d.is_table_internal(), "{d:?}");
+            assert!(!d.is_inline_level(), "{d:?}");
+        }
+        assert!(!Display::Table.is_table_internal());
+        assert!(!Display::Block.is_table_internal());
+    }
+
+    #[test]
+    fn border_spacing_takes_one_or_two_lengths() {
+        assert_eq!(
+            parse_border_spacing("2px"),
+            Some((Length::Px(2.0), Length::Px(2.0)))
+        );
+        assert_eq!(
+            parse_border_spacing("10px 4px"),
+            Some((Length::Px(10.0), Length::Px(4.0)))
+        );
+        assert_eq!(parse_border_spacing("0"), Some((Length::Zero, Length::Zero)));
+        assert_eq!(
+            parse_border_spacing(" 0.2em 0 "),
+            Some((Length::Em(0.2), Length::Zero))
+        );
+        // Negative lengths, percentages, keywords and three values are invalid.
+        for bad in ["-1px", "10%", "auto", "1px 2px 3px", "", "red"] {
+            assert_eq!(parse_border_spacing(bad), None, "border-spacing: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn border_spacing_and_collapse_inherit() {
+        let mut parent = ComputedStyle::new();
+        parent.border_spacing = (3.0, 4.0);
+        parent.border_collapse = BorderCollapse::Collapse;
+        let child = ComputedStyle::inherit_from(&parent);
+        assert_eq!(child.border_spacing, (3.0, 4.0));
+        assert_eq!(child.border_collapse, BorderCollapse::Collapse);
+        assert_eq!(ComputedStyle::new().border_spacing, (0.0, 0.0));
     }
 
     #[test]
@@ -4081,7 +4326,7 @@ mod tests {
             final_line_names: vec![],
         };
 
-        let (expanded, auto_repeat) = template.expand_tracks();
+        let (expanded, _auto_repeat) = template.expand_tracks();
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].size, TrackSize::Px(100.0));
         assert_eq!(expanded[1].size, TrackSize::Fr(1.0));
@@ -4104,7 +4349,7 @@ mod tests {
             final_line_names: vec![],
         };
 
-        let (expanded, auto_repeat) = template.expand_tracks();
+        let (expanded, _auto_repeat) = template.expand_tracks();
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].size, TrackSize::Px(100.0));
         assert_eq!(expanded[1].size, TrackSize::Fr(1.0));
@@ -4555,6 +4800,10 @@ mod computed_style_field_guards {
             // it — a child of a fill-colored element fell back to plain color.
             // Declared divergence from the reference, flagged upstream.
             webkit_text_fill_color,
+            // 2026-10-15 macOS adoption (develop 73ae13cb): pointer-events,
+            // border-spacing and border-collapse inherit (css-ui-4 / css-tables-3)
+            // and the adopted inherit_from copies them.
+            pointer_events, border_spacing, border_collapse,
             // ---- NOT INHERITED: reset to an initial by inherit_from, or
             //      deliberately left to Default because Default IS the CSS
             //      initial. NOTE min_width/min_height are NOT in that group any
@@ -4588,6 +4837,9 @@ mod computed_style_field_guards {
             aspect_ratio, background_layers, background_gradient, box_sizing,
             backdrop_filter, image_url, object_fit, object_position, content,
             background_clip,
+            // 2026-10-15 adoption: mask (css-masking-1) and the resolved
+            // object-position offset are NOT inherited.
+            mask, object_position_offset,
             // Offsets and z-index: NOT inherited. A child does not adopt its
             // parent's `top: 20px` - that would cascade a positioned parent's
             // displacement onto every descendant.
@@ -4647,6 +4899,9 @@ mod computed_style_field_guards {
         parent.overflow_wrap = OverflowWrap::Anywhere;
         parent.line_break = LineBreak::Strict;
         parent.visibility = Visibility::Hidden;
+        parent.pointer_events = PointerEvents::None;
+        parent.border_spacing = (3.0, 4.0);
+        parent.border_collapse = BorderCollapse::Collapse;
         // Non-inherited fields, given non-default values so that "was reset"
         // is distinguishable from "happened to already be the initial".
         parent.width = Length::Px(500.0);
@@ -4656,7 +4911,7 @@ mod computed_style_field_guards {
 
         let child = ComputedStyle::inherit_from(&parent);
 
-        // ---- all 19 inherited fields ----
+        // ---- all 22 inherited fields ----
         assert_eq!(child.overflow_wrap, OverflowWrap::Anywhere, "overflow-wrap must inherit");
         assert_eq!(child.line_break, LineBreak::Strict, "line-break must inherit");
         assert_eq!(child.visibility, Visibility::Hidden, "visibility must inherit");
@@ -4676,6 +4931,9 @@ mod computed_style_field_guards {
         assert_eq!(child.word_break, WordBreak::BreakAll, "word-break must inherit");
         assert_eq!(child.word_spacing, Length::Px(6.25), "word-spacing must inherit");
         assert_eq!(child.writing_mode, WritingMode::VerticalRl, "writing-mode must inherit");
+        assert_eq!(child.pointer_events, PointerEvents::None, "pointer-events must inherit");
+        assert_eq!(child.border_spacing, (3.0, 4.0), "border-spacing must inherit");
+        assert_eq!(child.border_collapse, BorderCollapse::Collapse, "border-collapse must inherit");
 
         // ---- the four non-inherited fields whose DERIVED default is wrong,
         //      i.e. the exact ones that produced the blank-page near-miss ----
@@ -4703,6 +4961,7 @@ mod computed_style_field_guards {
     #[test]
     fn every_field_has_a_deliberate_initial_value() {
         let ComputedStyle {
+            mask, border_spacing, border_collapse, pointer_events, object_position_offset,
             align_content, align_items, align_self, animation_delay,
             animation_direction, animation_duration, animation_fill_mode, animation_iteration_count,
             animation_name, animation_play_state, animation_timing_function, background_color,
@@ -4820,6 +5079,14 @@ mod computed_style_field_guards {
         assert_eq!(border_top_right_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
         assert_eq!(border_bottom_right_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
         assert_eq!(border_bottom_left_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
+
+        // 2026-10-15 adoption (develop 73ae13cb). Each derived Default IS the
+        // CSS initial here, asserted so that stays a decision.
+        assert_eq!(mask, crate::mask::Mask::default(), "mask initial is none");
+        assert_eq!(border_spacing, (0.0, 0.0), "border-spacing initial is 0 0");
+        assert_eq!(border_collapse, BorderCollapse::Separate, "border-collapse initial is separate");
+        assert_eq!(pointer_events, PointerEvents::Auto, "pointer-events initial is auto");
+        assert_eq!(object_position_offset, (0.0, 0.0), "object-position offset starts at 0 0");
     }
 }
 
