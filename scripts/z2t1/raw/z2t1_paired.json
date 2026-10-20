@@ -1,0 +1,291 @@
+{
+ "target": "chrome",
+ "utc": "2026-10-05T14:29:35Z",
+ "results": {
+  "chatgpt": {
+   "vendor": "cloudflare",
+   "C": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 65265,
+    "title": "",
+    "challenge": false
+   },
+   "H": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 309911,
+    "title": "ChatGPT: Chat, Work, Create &amp; Code with AI",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://chatgpt.com/"
+   }
+  },
+  "cars": {
+   "vendor": "cloudflare",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 3677,
+    "title": "",
+    "challenge": true
+   },
+   "H": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 496134,
+    "title": "Cars.com: Find New Cars, Used Cars, Dealerships, Prices &amp; Reviews",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.cars.com/"
+   }
+  },
+  "topps": {
+   "vendor": "cloudflare",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 2370,
+    "title": "",
+    "challenge": false
+   },
+   "H": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 13499,
+    "title": "You have been blocked",
+    "challenge": true,
+    "http_version_code": 3,
+    "final": "https://www.topps.com/"
+   }
+  },
+  "indeed": {
+   "vendor": "cloudflare",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 11441,
+    "title": "",
+    "challenge": true
+   },
+   "H": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 700011,
+    "title": "Job Search | Indeed",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.indeed.com/"
+   }
+  },
+  "glassdoor": {
+   "vendor": "cloudflare",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 9403,
+    "title": "",
+    "challenge": true
+   },
+   "H": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 749562,
+    "title": "Glassdoor | Job Search &amp; Career Community",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.glassdoor.com/index.htm"
+   }
+  },
+  "doordash": {
+   "vendor": "cloudflare",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 3415,
+    "title": "",
+    "challenge": true
+   },
+   "H": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 1997643,
+    "title": "DoorDash: Food, Grocery and Retail - Fast Same Day Delivery",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.doordash.com/"
+   }
+  },
+  "chrono24": {
+   "vendor": "cloudflare",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 2771,
+    "title": "",
+    "challenge": true
+   },
+   "H": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 210063,
+    "title": "Chrono24: The World's Leading Watch Market",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.chrono24.com/"
+   }
+  },
+  "ebay": {
+   "vendor": "akamai",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 2028,
+    "title": "Error Page | eBay",
+    "challenge": false
+   },
+   "H": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 1991,
+    "title": "Error Page | eBay",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.ebay.com/"
+   }
+  },
+  "edmunds": {
+   "vendor": "akamai",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 200,
+    "bytes": 955,
+    "title": "",
+    "challenge": false
+   },
+   "H": {
+    "verdict": "BLOCK",
+    "status": 200,
+    "bytes": 2379,
+    "title": "",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.edmunds.com/"
+   }
+  },
+  "oracle": {
+   "vendor": "akamai",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 1594,
+    "title": "fw_error_www",
+    "challenge": false
+   },
+   "H": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 1594,
+    "title": "fw_error_www",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.oracle.com/"
+   }
+  },
+  "sap": {
+   "vendor": "akamai",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 301,
+    "bytes": 0,
+    "title": "",
+    "challenge": false
+   },
+   "H": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 59467,
+    "title": "SAP Software Solutions | Business Applications and Technology",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.sap.com/index.html"
+   }
+  },
+  "nytimes": {
+   "vendor": "datadome",
+   "C": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 65536,
+    "title": "",
+    "challenge": false
+   },
+   "H": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 1719572,
+    "title": "The New York Times - Breaking News, US News, World News and Videos",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.nytimes.com/"
+   }
+  },
+  "yelp": {
+   "vendor": "datadome",
+   "C": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 62562,
+    "title": "",
+    "challenge": false
+   },
+   "H": {
+    "verdict": "BLOCK",
+    "status": 403,
+    "bytes": 779,
+    "title": "yelp.com",
+    "challenge": true,
+    "http_version_code": 3,
+    "final": "https://www.yelp.com/"
+   }
+  },
+  "tripadvisor": {
+   "vendor": "datadome",
+   "C": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 36762,
+    "title": "",
+    "challenge": false
+   },
+   "H": {
+    "verdict": "PASS",
+    "status": 200,
+    "bytes": 348160,
+    "title": "Tripadvisor: Over a billion reviews &amp; contributions for Hotels, Attractions,",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.tripadvisor.com/"
+   }
+  },
+  "amazon": {
+   "vendor": "awswaf",
+   "C": {
+    "verdict": "BLOCK",
+    "status": 202,
+    "bytes": 2007,
+    "title": "",
+    "challenge": false
+   },
+   "H": {
+    "verdict": "BLOCK",
+    "status": 202,
+    "bytes": 2007,
+    "title": "",
+    "challenge": false,
+    "http_version_code": 3,
+    "final": "https://www.amazon.com/"
+   }
+  }
+ }
+}

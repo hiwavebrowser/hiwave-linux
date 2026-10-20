@@ -1,0 +1,107 @@
+{
+ "chatgpt": {
+  "vendor": "cloudflare",
+  "A_rustkit": "BLOCK:403/cf-challenge",
+  "B_rustkit_alpn": "BLOCK:403/cf-challenge",
+  "C_hiwave": "BLOCK:403/cf-challenge",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "cars": {
+  "vendor": "cloudflare",
+  "A_rustkit": "BLOCK:403/cf-challenge",
+  "B_rustkit_alpn": "BLOCK:403/cf-challenge",
+  "C_hiwave": "BLOCK:403/cf-challenge",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "topps": {
+  "vendor": "cloudflare",
+  "A_rustkit": "BLOCK:403",
+  "B_rustkit_alpn": "BLOCK:403",
+  "C_hiwave": "BLOCK:403",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "indeed": {
+  "vendor": "cloudflare",
+  "A_rustkit": "BLOCK:403/cf-challenge",
+  "B_rustkit_alpn": "BLOCK:403/cf-challenge",
+  "C_hiwave": "BLOCK:403/cf-challenge",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "glassdoor": {
+  "vendor": "cloudflare",
+  "A_rustkit": "BLOCK:403/cf-challenge",
+  "B_rustkit_alpn": "BLOCK:403/cf-challenge",
+  "C_hiwave": "BLOCK:403/cf-challenge",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "doordash": {
+  "vendor": "cloudflare",
+  "A_rustkit": "PASS:200",
+  "B_rustkit_alpn": "BLOCK:403/cf-challenge",
+  "C_hiwave": "BLOCK:403/cf-challenge",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "chrono24": {
+  "vendor": "cloudflare",
+  "A_rustkit": "BLOCK:403/cf-challenge",
+  "B_rustkit_alpn": "BLOCK:403/cf-challenge",
+  "C_hiwave": "BLOCK:403/cf-challenge",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "ebay": {
+  "vendor": "akamai",
+  "A_rustkit": "BLOCK:403",
+  "B_rustkit_alpn": "BLOCK:403",
+  "C_hiwave": "BLOCK:403",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "edmunds": {
+  "vendor": "akamai",
+  "A_rustkit": "PASS:200",
+  "B_rustkit_alpn": "PASS:200",
+  "C_hiwave": "PASS:200",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "oracle": {
+  "vendor": "akamai",
+  "A_rustkit": "BLOCK:403",
+  "B_rustkit_alpn": "BLOCK:403",
+  "C_hiwave": "BLOCK:403",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "sap": {
+  "vendor": "akamai",
+  "A_rustkit": "BLOCK:301/akamai-denial",
+  "B_rustkit_alpn": "BLOCK:301/akamai-denial",
+  "C_hiwave": "BLOCK:301/akamai-denial",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "nytimes": {
+  "vendor": "datadome",
+  "A_rustkit": "BLOCK:403/datadome",
+  "B_rustkit_alpn": "BLOCK:403/datadome",
+  "C_hiwave": "BLOCK:200/datadome",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "yelp": {
+  "vendor": "datadome",
+  "A_rustkit": "BLOCK:200/datadome",
+  "B_rustkit_alpn": "BLOCK:200/datadome",
+  "C_hiwave": "BLOCK:200/datadome",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "tripadvisor": {
+  "vendor": "datadome",
+  "A_rustkit": "BLOCK:200/datadome",
+  "B_rustkit_alpn": "BLOCK:200/datadome",
+  "C_hiwave": "BLOCK:200/datadome",
+  "D_hiwave_h2": "h2-selected"
+ },
+ "amazon": {
+  "vendor": "awswaf",
+  "A_rustkit": "PASS:200",
+  "B_rustkit_alpn": "PASS:200",
+  "C_hiwave": "BLOCK:202",
+  "D_hiwave_h2": "h2-selected"
+ }
+}

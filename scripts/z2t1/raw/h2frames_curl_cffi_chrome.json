@@ -1,0 +1,48 @@
+{
+ "preface_ok": true,
+ "frames": [
+  {
+   "type": "SETTINGS",
+   "flags": "0x0",
+   "stream": 0,
+   "len": 24,
+   "settings": [
+    [
+     1,
+     65536
+    ],
+    [
+     2,
+     0
+    ],
+    [
+     4,
+     6291456
+    ],
+    [
+     6,
+     262144
+    ]
+   ]
+  },
+  {
+   "type": "WINDOW_UPDATE",
+   "flags": "0x0",
+   "stream": 0,
+   "len": 4,
+   "increment": 15663105
+  },
+  {
+   "type": "HEADERS",
+   "flags": "0x25",
+   "stream": 1,
+   "len": 234,
+   "priority": {
+    "exclusive": 1,
+    "dep": 0,
+    "weight": 256
+   },
+   "hpack_hex": "80000000ff82418aa0e41d139d09b8f34dbb87847aa9d07f66a281b0dae053fafc087ed4ce6aadf2a7979c89c6bfb5319b90fb9580ae0536da84e632580ae053c0497ca589d34d1f43aeba0c41a4c7a98f33a69a3fdf9a68fa1d75d0620d263d4c79a68fbed00177fe8d48e62b03ee697e8d48e62b1e0b1d7f5f2c7cfdf6800bbd518b2d4b70ddf45abefb4005df904092b6b9ac1c8558d520a4b6c2ad617b5a54251f0131408a4148b4a549275a42a13f8690e4b692d49f408a4148b4a549275a93c85f86a87dcd30d25f408a4148b4a549275906497f83a8f517408a4148b4a549275ad416cf023f31"
+  }
+ ]
+}
