@@ -292,6 +292,74 @@ impl MainWindowConfig {
     }
 }
 
+/// Clip the view's layer to its frame. wgpu may replace the layer when it
+/// builds the Metal surface, so this is called again after every frame move
+/// and after a present.
+#[cfg(target_os = "macos")]
+fn clip_view_layer(view: id) {
+    unsafe {
+        let layer: id = msg_send![view, layer];
+        if layer != nil {
+            let masks: bool = true;
+            let _: () = msg_send![layer, setMasksToBounds: masks];
+        }
+    }
+}
+
+/// Move an existing `NSView` and clip its layer. Does not touch the engine,
+/// so a content load can inset the page while the engine is borrowed.
+#[cfg(target_os = "macos")]
+pub fn place_raw_view(view: isize, bounds: Bounds) {
+    if view == 0 {
+        return;
+    }
+    let view = view as id;
+    unsafe {
+        let superview: id = msg_send![view, superview];
+        if superview != nil {
+            let parent: cocoa::foundation::NSRect = msg_send![superview, frame];
+            let frame = cocoa::foundation::NSRect::new(
+                cocoa::foundation::NSPoint::new(
+                    bounds.x as f64,
+                    parent.size.height - bounds.y as f64 - bounds.height as f64,
+                ),
+                cocoa::foundation::NSSize::new(bounds.width as f64, bounds.height as f64),
+            );
+            let _: () = msg_send![view, setFrame: frame];
+        }
+        clip_view_layer(view);
+    }
+}
+
+/// The host view's frame size in pixels, after [`place_raw_view`] or
+/// `set_bounds`. `None` when there is no view. This is the frame on screen,
+/// which can move while the engine's stored bounds have not.
+#[cfg(target_os = "macos")]
+pub fn raw_view_content_size(view: isize) -> Option<(u32, u32)> {
+    if view == 0 {
+        return None;
+    }
+    let view = view as id;
+    unsafe {
+        let frame: cocoa::foundation::NSRect = msg_send![view, frame];
+        let width = frame.size.width.round();
+        let height = frame.size.height.round();
+        if width < 1.0 || height < 1.0 {
+            return None;
+        }
+        Some((width as u32, height as u32))
+    }
+}
+
+/// Clip an existing `NSView`'s layer. No-op when the view has no layer yet.
+#[cfg(target_os = "macos")]
+pub fn clip_raw_view(view: isize) {
+    if view == 0 {
+        return;
+    }
+    clip_view_layer(view as id);
+}
+
 /// The main ViewHost that manages all views.
 pub struct ViewHost {
     views: RwLock<HashMap<ViewId, Arc<Mutex<ViewState>>>>,
@@ -313,6 +381,18 @@ pub struct ViewHost {
 }
 
 impl ViewHost {
+    /// The platform pointer stored for `view_id` (an `NSView` on macOS). 0
+    /// when the view is unknown.
+    pub fn raw_view(&self, view_id: ViewId) -> isize {
+        let Ok(views) = self.views.read() else {
+            return 0;
+        };
+        let Some(state) = views.get(&view_id) else {
+            return 0;
+        };
+        state.lock().map(|guard| guard.hwnd_raw).unwrap_or(0)
+    }
+
     /// Create a new ViewHost.
     pub fn new() -> Self {
         #[cfg(windows)]
@@ -743,7 +823,6 @@ impl ViewHost {
     // the caller from a real one. That is worse than an error: it succeeded.
     // Replaced by the real X11 implementation above.
 
-
     /// Set the bounds of a view.
     pub fn set_bounds(&self, view_id: ViewId, bounds: Bounds) -> Result<(), ViewHostError> {
         let views = self.views.read().unwrap();
@@ -797,6 +876,7 @@ impl ViewHost {
                         cocoa::foundation::NSSize::new(bounds.width as f64, bounds.height as f64),
                     );
                     let _: () = msg_send![view, setFrame: frame];
+                    clip_view_layer(view);
                 }
             }
         }

@@ -7,6 +7,9 @@
 //!
 //! Unlike hiwave-smoke, this does NOT require a display and can run in CI.
 
+mod inspector;
+mod report;
+
 use clap::Parser;
 use rustkit_engine::inspector::{CollectingSink, JsonLinesSink};
 use rustkit_engine::{EngineBuilder, EngineConfig, Inspector, InspectorSink, InspectorSummary, ScriptOutcome, ScriptRecord};
@@ -22,7 +25,7 @@ use url::Url;
 #[derive(Parser, Debug, Clone)]
 #[command(name = "parity-capture")]
 #[command(about = "Headless frame capture for parity testing")]
-#[command(group(clap::ArgGroup::new("source").required(true).args(["html_file", "url"])))]
+#[command(group(clap::ArgGroup::new("source").required(true).args(["html_file", "url", "inspector_dump"])))]
 struct Args {
     /// Path to HTML file to render
     #[arg(long)]
@@ -136,6 +139,18 @@ struct Args {
     #[arg(long)]
     event_log_error_text: bool,
 
+    /// Filter subresources through the app's shield (EasyList, EasyPrivacy
+    /// and the interim domain floor), so a block shows in the event log as
+    /// `failure.blocked_by`. Off by default: the board runs unfiltered.
+    #[arg(long)]
+    shield: bool,
+
+    /// With `--shield`: wait up to this long for the filter lists to be
+    /// built before loading. Until they are, blocks come from the domain
+    /// floor (`blocked_by.list = "domain-floor"`).
+    #[arg(long, default_value_t = 30_000, value_name = "MS")]
+    shield_wait_ms: u64,
+
     /// Print the element diagnostics record (JSON) of the first element
     /// matching this CSS selector. Repeatable.
     #[arg(long, value_name = "SELECTOR")]
@@ -160,6 +175,48 @@ struct Args {
     /// (stripped by default).
     #[arg(long)]
     diagnostics_keep_query: bool,
+
+    /// Write the page report (JSON): page state, covering boxes, content
+    /// per viewport band and a ranked "most likely cause" list, from the
+    /// final layout (dev-tools T4).
+    #[arg(long, value_name = "FILE")]
+    report: Option<String>,
+
+    /// Write the page report as one page of text.
+    #[arg(long, value_name = "FILE")]
+    report_text: Option<String>,
+
+    /// Turn script on for an --html-file load, so the load runs the page's
+    /// inline classic scripts (fixture mode otherwise runs none), as for a
+    /// built-in page a host loads directly. A script that throws fails the
+    /// capture.
+    #[arg(long)]
+    run_inline_scripts: bool,
+
+    /// Render the HiWave Inspector for this capture's diagnostics dump into
+    /// this directory: inspector.html (the page with its input),
+    /// inspector.png and inspector.display-list.json.
+    #[arg(long, value_name = "DIR")]
+    inspector_out: Option<String>,
+
+    /// Show this dump (as --dump-diagnostics writes it) in the Inspector
+    /// instead of capturing a page. Needs --inspector-out.
+    #[arg(long, value_name = "FILE", requires = "inspector_out", conflicts_with_all = ["html_file", "url"])]
+    inspector_dump: Option<String>,
+
+    /// An inspector_diff.py result (tools/inspector) for the Inspector to
+    /// mark and compare.
+    #[arg(long, value_name = "FILE", requires = "inspector_out")]
+    inspector_diff: Option<String>,
+
+    /// Select the captured page's element at viewport point `X,Y` (CSS px)
+    /// in the Inspector, as click-to-inspect will.
+    #[arg(long, value_name = "X,Y", value_parser = parse_point_arg, requires = "inspector_out", conflicts_with = "inspector_dump")]
+    inspector_select_at: Option<(f32, f32)>,
+
+    /// Inspector viewport, `WxH`.
+    #[arg(long, value_name = "WxH", value_parser = parse_size, default_value = "1280x800")]
+    inspector_size: (u32, u32),
 
     /// Enable verbose output
     #[arg(long, short)]
@@ -200,6 +257,17 @@ struct CaptureResult {
     diagnostics: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     diagnostics_path: Option<String>,
+    /// `--inspector-out`
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    inspector: Option<inspector::InspectorOutput>,
+    /// `--report`: the layout half, built while the view exists; the event
+    /// rules are added once the load's records are in (`run_capture`).
+    #[serde(skip)]
+    page_report: Option<report::Report>,
+    /// True when this capture ran on the content thread (`HIWAVE_CONTENT_THREAD`).
+    /// Absent means an older capture tool. `false` is the flag-off worker.
+    #[serde(default)]
+    content_thread: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -286,6 +354,9 @@ impl CaptureResult {
             event_summary: None,
             diagnostics: None,
             diagnostics_path: None,
+            inspector: None,
+            page_report: None,
+            content_thread: false,
         }
     }
 
@@ -323,8 +394,52 @@ struct LiveStats {
     idle_at_end: bool,
 }
 
+/// Wakes the live loop's sleep when work arrives off the page thread, as the
+/// app's event loop is woken (`rustkit_engine::set_live_wake`): an inserted
+/// script's fetch finishing is not `in_flight`, so without it a page with no
+/// timer set slept the rest of `--live-ms` and its inserted scripts ran only
+/// on the last turn.
+#[derive(Default)]
+struct LiveWake {
+    woken: std::sync::Mutex<bool>,
+    arrived: std::sync::Condvar,
+}
+
+impl LiveWake {
+    /// The process's one waker, installed in the engine on first use.
+    fn installed() -> Arc<LiveWake> {
+        static WAKE: std::sync::OnceLock<Arc<LiveWake>> = std::sync::OnceLock::new();
+        WAKE.get_or_init(|| {
+            let wake = Arc::new(LiveWake::default());
+            let engine_side = Arc::clone(&wake);
+            rustkit_engine::set_live_wake(Arc::new(move || engine_side.wake()));
+            wake
+        })
+        .clone()
+    }
+
+    fn wake(&self) {
+        *self.woken.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.arrived.notify_one();
+    }
+
+    /// Sleep up to `limit`, less if woken (or woken since the last sleep).
+    fn sleep(&self, limit: Duration) {
+        let woken = self.woken.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut woken, _) = self
+            .arrived
+            .wait_timeout_while(woken, limit, |woken| !*woken)
+            .unwrap_or_else(|e| e.into_inner());
+        *woken = false;
+    }
+}
+
 /// The app's pacing (`hiwave-app` `process_events`): a turn when the next
-/// timer is due or a request is out, never sooner than the last turn took.
+/// timer is due, a request is out or the engine wakes the loop. Timer and
+/// request waits are never shorter than the last turn took (nor
+/// `MIN_LIVE_TURN`). The engine's wake skips that floor and ends the wait at
+/// once, as the app's poke does, so a page that keeps waking the loop gets
+/// back-to-back turns.
 fn run_live(
     rt: &tokio::runtime::Runtime,
     engine: &mut rustkit_engine::Engine,
@@ -337,6 +452,7 @@ fn run_live(
     let began = Instant::now();
     let mut clock = began;
     let mut stats = LiveStats::default();
+    let wake = LiveWake::installed();
     tracing::info!(live_ms, "Live loop started");
     loop {
         let started = Instant::now();
@@ -359,9 +475,10 @@ fn run_live(
         if left.is_zero() {
             break;
         }
-        // An idle page still gets its time: in the app only input wakes it.
+        // An idle page still gets its time: in the app only input, or the
+        // engine's wake, ends the wait.
         let wait = next.map_or(left, |wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN));
-        std::thread::sleep(wait.min(left));
+        wake.sleep(wait.min(left));
     }
     stats.wall_ms = began.elapsed().as_millis() as u64;
     stats
@@ -407,9 +524,14 @@ fn main() {
 
     let started = Instant::now();
     let args_clone = args.clone();
+    // Flag off: today's worker. Flag on: the page thread's name and stack,
+    // so a 26-case run with HIWAVE_CONTENT_THREAD set is not the flag-off
+    // capture again. The tool has no window, so the headless presenter stays
+    // with the page on that thread.
+    let (worker_name, worker_stack) = capture_worker_spec(rustkit_engine::content_thread_enabled());
     let handler = std::thread::Builder::new()
-        .name("capture-worker".into())
-        .stack_size(16 * 1024 * 1024)
+        .name(worker_name.into())
+        .stack_size(worker_stack)
         .spawn(move || run_capture(&args_clone))
         .expect("failed to spawn capture worker thread");
     let mut result = match handler.join() {
@@ -429,6 +551,17 @@ fn main() {
     }
 }
 
+/// Where a capture runs. `HIWAVE_CONTENT_THREAD` selects the content
+/// thread (the name the page thread uses, and its stack). Anything else
+/// keeps the capture worker the campaign has always used.
+fn capture_worker_spec(content_thread: bool) -> (&'static str, usize) {
+    if content_thread {
+        ("page", rustkit_engine::content_stack_bytes())
+    } else {
+        ("capture-worker", 16 * 1024 * 1024)
+    }
+}
+
 /// The user agent the shipping RustKit content view sends
 /// (hiwave-app/src/webview_rustkit.rs). Live sites branch on it, so a URL
 /// capture must present as the product does, not as a test tool.
@@ -443,12 +576,20 @@ const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7
 /// The capture, then its Inspector event log and summary, whichever way
 /// the capture ended.
 fn run_capture(args: &Args) -> CaptureResult {
-    let wants_events = args.event_log.is_some() || args.event_summary;
+    let wants_report = args.report.is_some() || args.report_text.is_some();
+    let wants_events = args.event_log.is_some() || args.event_summary || wants_report;
     let sink = wants_events.then(CollectingSink::default);
     let mut inspector: Option<Arc<Inspector>> = None;
     let mut result = capture(args, sink.as_ref(), &mut inspector);
+    result.content_thread = std::thread::current().name() == Some("page");
     if let Some(sink) = sink {
         let records = sink.records();
+        if let Some(mut page) = result.page_report.take() {
+            let json: Vec<serde_json::Value> =
+                records.iter().filter_map(|r| serde_json::to_value(r).ok()).collect();
+            report::apply_events(&mut page, &json);
+            write_report_files(args, &page);
+        }
         if let Some(ref path) = args.event_log {
             match write_event_log(path, &records) {
                 Ok(()) => result.event_log_path = Some(path.clone()),
@@ -475,6 +616,17 @@ fn write_event_log(path: &str, records: &[rustkit_engine::InspectorRecord]) -> s
 
 fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Arc<Inspector>>) -> CaptureResult {
     let mut result = CaptureResult::new(args);
+
+    if let Some(ref dump_path) = args.inspector_dump {
+        let dump = match fs::read_to_string(dump_path) {
+            Ok(d) => d,
+            Err(e) => return result.failed("error", format!("Failed to read {dump_path}: {e}")),
+        };
+        if let Err(e) = write_inspector(args, &dump, None, &mut result) {
+            return result.failed("error", e);
+        }
+        return result;
+    }
 
     // Read HTML file (URL mode fetches inside the engine instead)
     let html_content = match &args.html_file {
@@ -512,11 +664,14 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         None => None,
     };
 
-    let engine_result = EngineBuilder::new()
+    let mut builder = EngineBuilder::new()
         .with_config(capture_config(args, replay_proxy))
         .user_agent(user_agent)
-        .javascript_enabled(url.is_some() || args.actions.is_some())
-        .build();
+        .javascript_enabled(url.is_some() || args.actions.is_some() || args.run_inline_scripts);
+    if let Some(interceptor) = shield_interceptor(args) {
+        builder = builder.request_interceptor(interceptor);
+    }
+    let engine_result = builder.build();
 
     let mut engine = match engine_result {
         Ok(e) => e,
@@ -586,6 +741,16 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
     } else if let Some(html) = html_content {
         if let Err(e) = engine.load_html(view_id, &html) {
             return result.failed("error", format!("Failed to load HTML: {:?}", e));
+        }
+        // With script on, `load_html` ran the inline scripts.
+        if args.run_inline_scripts {
+            let log = engine.script_log(view_id).unwrap_or_default();
+            if let Some(failed) = inline_script_failure(&log) {
+                return result.failed(
+                    "error",
+                    format!("Inline script failed: {} {:?}", failed.source, failed.outcome),
+                );
+            }
         }
     }
 
@@ -659,6 +824,27 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
 
     write_diagnostics(&engine, view_id, args, &mut result);
 
+    if args.inspector_out.is_some() {
+        let opts = rustkit_engine::DiagnosticsOptions {
+            include_url_query: args.diagnostics_keep_query,
+            max_elements: args.diagnostics_max_elements,
+        };
+        let dump = engine
+            .all_element_diagnostics(view_id, &opts)
+            .map_err(|e| format!("Failed to build diagnostics: {e:?}"))
+            .and_then(|d| serde_json::to_string(&d).map_err(|e| e.to_string()));
+        let select = match args.inspector_select_at {
+            Some((x, y)) => match engine.inspector_selection_at(view_id, x, y) {
+                Ok(sel) => sel.map(|s| s.node_id),
+                Err(e) => return result.failed("error", format!("Inspector selection failed: {e:?}")),
+            },
+            None => None,
+        };
+        if let Err(e) = dump.and_then(|d| write_inspector(args, &d, select, &mut result)) {
+            return result.failed("error", e);
+        }
+    }
+
     // Clean up
     let _ = engine.destroy_view(view_id);
 
@@ -713,6 +899,77 @@ fn write_diagnostics(
             Err(e) => error!("Failed to build diagnostics: {:?}", e),
         }
     }
+    if args.report.is_some() || args.report_text.is_some() {
+        result.page_report = layout_report(engine, view_id, &opts);
+    }
+}
+
+/// The most elements the page report reads. A consent dialog is often the
+/// last thing in the body, so the report reads past the dump's default cap.
+const REPORT_MAX_ELEMENTS: usize = 20_000;
+
+/// The layout half of `--report`, from the final layout.
+fn layout_report(
+    engine: &rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    opts: &rustkit_engine::DiagnosticsOptions,
+) -> Option<report::Report> {
+    use rustkit_engine::{DiagnosticTarget, DiagnosticsOptions};
+    let opts = DiagnosticsOptions { max_elements: opts.max_elements.max(REPORT_MAX_ELEMENTS), ..opts.clone() };
+    let dump = match engine.all_element_diagnostics(view_id, &opts).map(serde_json::to_value) {
+        Ok(Ok(dump)) => dump,
+        Ok(Err(e)) => {
+            error!("Failed to serialise the report's diagnostics: {:?}", e);
+            return None;
+        }
+        Err(e) => {
+            error!("Failed to build the report's diagnostics: {:?}", e);
+            return None;
+        }
+    };
+    let (w, h) = (
+        dump["page"]["viewport"][0].as_f64().unwrap_or(0.0) as f32,
+        dump["page"]["viewport"][1].as_f64().unwrap_or(0.0) as f32,
+    );
+    let centre = engine
+        .element_diagnostics(view_id, &DiagnosticTarget::Point { x: w / 2.0, y: h / 2.0 }, &opts)
+        .ok()
+        .flatten()
+        .and_then(|r| serde_json::to_value(r).ok());
+    let mut page = report::page_report(&dump, centre.as_ref());
+    if dump["truncated"].as_bool() == Some(true) {
+        page.not_checked.push(format!("elements past the first {} (the page has {})", opts.max_elements, page.elements));
+    }
+    Some(page)
+}
+
+/// `--report` and `--report-text`.
+fn write_report_files(args: &Args, page: &report::Report) {
+    if let Some(ref path) = args.report {
+        match serde_json::to_string_pretty(&page).map(|json| fs::write(path, json)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!("Failed to write the report: {:?}", e),
+            Err(e) => error!("Failed to serialise the report: {:?}", e),
+        }
+    }
+    if let Some(ref path) = args.report_text {
+        if let Err(e) = fs::write(path, report::report_text(&page)) {
+            error!("Failed to write the report text: {:?}", e);
+        }
+    }
+}
+
+/// `--inspector-out`: the Inspector for `dump`, with `--inspector-diff`.
+fn write_inspector(args: &Args, dump: &str, select: Option<usize>, result: &mut CaptureResult) -> Result<(), String> {
+    let Some(ref out) = args.inspector_out else { return Ok(()) };
+    let diff = match args.inspector_diff {
+        Some(ref p) => Some(fs::read_to_string(p).map_err(|e| format!("Failed to read {p}: {e}"))?),
+        None => None,
+    };
+    let written = inspector::render_inspector(dump, diff.as_deref(), select, args.inspector_size, Path::new(out))
+        .map_err(|e| format!("Inspector: {e}"))?;
+    result.inspector = Some(written);
+    Ok(())
 }
 
 /// `X,Y` in CSS px.
@@ -1310,8 +1567,34 @@ fn analyze_layout_json(json_str: &str) -> Option<LayoutStats> {
     Some(stats)
 }
 
+/// The first script of an `--html-file` load that failed: it threw, the
+/// engine failed, the budget stopped it, or it was skipped though the load
+/// meant to run it (too large, or the engine panicked earlier). A script the
+/// HTML load does not run (an external `<script src>`, a module, `nomodule`)
+/// is not a failure.
+fn inline_script_failure(log: &[ScriptRecord]) -> Option<&ScriptRecord> {
+    log.iter().find(|r| match r.outcome {
+        ScriptOutcome::Threw(_) | ScriptOutcome::EngineFailed(_) | ScriptOutcome::OverBudget => true,
+        ScriptOutcome::Skipped(why) => why != rustkit_engine::HTML_LOAD_RUNS_INLINE_CLASSIC_ONLY,
+        _ => false,
+    })
+}
+
 /// The engine configuration a capture runs with: the parity defaults, plus
 /// whatever the command line overrides.
+/// The app's shield as the engine's request interceptor, with `--shield`
+/// only, once its filter lists are built or `--shield-wait-ms` has passed.
+fn shield_interceptor(args: &Args) -> Option<rustkit_net::RequestInterceptor> {
+    if !args.shield {
+        return None;
+    }
+    // The event log names the list and rule of a block.
+    hiwave_shield_intercept::name_matched_rules();
+    let ready = hiwave_shield_intercept::wait_until_ready(Duration::from_millis(args.shield_wait_ms));
+    eprintln!("shield: on, filter lists {}", if ready { "ready" } else { "not ready (domain floor only)" });
+    Some(hiwave_shield_intercept::create_shield_interceptor())
+}
+
 fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     let mut config = EngineConfig::for_parity_testing();
     if let Some(horizon) = args.timer_horizon_ms {
@@ -1333,6 +1616,36 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// #799 review (3): `--run-inline-scripts` fails a capture only on a
+    /// script that threw, failed the engine or ran out of budget. An external
+    /// `<script src>` or a module the HTML load skips is not one.
+    #[test]
+    fn run_inline_scripts_fails_only_on_scripts_that_failed() {
+        let log_of = |html: &str| {
+            let mut engine = EngineBuilder::new().javascript_enabled(true).build().expect("engine");
+            let view = engine
+                .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+                .expect("view");
+            engine.load_html(view, html).expect("load_html");
+            engine.script_log(view).unwrap_or_default().to_vec()
+        };
+        let skipped = log_of(
+            "<html><body><script src=\"/app.js\"></script>\
+<script type=\"module\">window.m = 1;</script><script>var ok = 1;</script></body></html>",
+        );
+        assert!(skipped.iter().any(|r| matches!(r.outcome, ScriptOutcome::Skipped(_))), "{skipped:?}");
+        assert!(inline_script_failure(&skipped).is_none(), "{skipped:?}");
+        let threw = log_of("<html><body><script src=\"/app.js\"></script><script>throw new Error('x');</script></body></html>");
+        let failed = inline_script_failure(&threw).expect("a thrown script fails the capture");
+        assert_eq!(failed.source, "inline#2", "{threw:?}");
+        // #799 nit: an inline classic script past the size cap was meant to
+        // run and did not.
+        let big = format!("<html><body><script>/*{}*/</script></body></html>", "x".repeat(4 * 1024 * 1024 + 1));
+        let too_large = log_of(&big);
+        let failed = inline_script_failure(&too_large).expect("a too-large inline script fails the capture");
+        assert!(matches!(failed.outcome, ScriptOutcome::Skipped(why) if why.starts_with("too large")), "{too_large:?}");
+    }
+
     fn parsed(extra: &[&str]) -> Args {
         let mut argv = vec!["parity-capture", "--url", "https://example.test/"];
         argv.extend_from_slice(extra);
@@ -1341,6 +1654,31 @@ mod tests {
 
     // The live loop is the app's, not the board's: a capture turns it only
     // when asked.
+    // The board runs unfiltered; `--shield` puts the app's shield in front
+    // of every subresource, and a block names its list and rule.
+    #[test]
+    fn the_shield_filters_requests_only_with_the_flag() {
+        assert!(shield_interceptor(&parsed(&[])).is_none());
+        let interceptor = shield_interceptor(&parsed(&["--shield", "--shield-wait-ms", "0"])).expect("an interceptor");
+        let request = |url: &str| {
+            let mut request = rustkit_net::Request::get(Url::parse(url).unwrap());
+            request.destination = rustkit_net::RequestDestination::Script;
+            request.referrer = Some(Url::parse("https://news.example/").unwrap());
+            request
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        match rt.block_on(interceptor.intercept(&request("https://doubleclick.net/pagead.js"))) {
+            rustkit_net::InterceptAction::BlockedBy(reason) => {
+                assert!(!reason.list.is_empty() && reason.rule.is_some(), "{reason:?}")
+            }
+            other => panic!("not blocked with a reason: {other:?}"),
+        }
+        assert!(matches!(
+            rt.block_on(interceptor.intercept(&request("https://news.example/app.js"))),
+            rustkit_net::InterceptAction::Allow
+        ));
+    }
+
     #[test]
     fn the_live_loop_is_turned_only_when_asked() {
         assert_eq!(parsed(&[]).live_ms, None);
@@ -1381,8 +1719,10 @@ mod tests {
         assert!(capture_config(&parsed(&["--event-log-console-text"]), None).inspector.keep_console_text);
         assert!(!capture_config(&parsed(&["--event-log", "x.jsonl"]), None).inspector.keep_error_text);
         assert!(capture_config(&parsed(&["--event-log-error-text"]), None).inspector.keep_error_text);
-        // Nothing records unless asked: no buffer either way.
-        assert!(!capture_config(&parsed(&["--event-summary"]), None).inspector.buffer);
+        // The flags add a sink; the buffer is the tab ring (T6b), on from
+        // the start only with HIWAVE_DEVTOOLS_RING=1.
+        let config = capture_config(&parsed(&["--event-summary"]), None);
+        assert_eq!(config.inspector.capacity, rustkit_engine::InspectorConfig::tab().capacity);
     }
 
     /// A fixture capture with both flags: the log is JSON Lines of the
@@ -1416,6 +1756,72 @@ mod tests {
         let summary = result.event_summary.expect("a summary");
         assert_eq!(summary.events as usize, kinds.len());
         assert_eq!(summary.schema, rustkit_engine::inspector::SUMMARY_SCHEMA);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A page whose only pending work is an inserted script's fetch (no
+    /// timer set, nothing `in_flight`) still runs the script when its fetch
+    /// arrives, not on the live window's last turn.
+    #[test]
+    fn an_inserted_script_runs_when_its_fetch_arrives_not_at_the_end_of_the_window() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let (ctype, body) = if line.starts_with("GET /late.js") {
+                        std::thread::sleep(Duration::from_millis(300));
+                        ("text/javascript", "console.log('late ran');".to_string())
+                    } else {
+                        let page = "<html><body>x<script>setTimeout(function () { var s = document.createElement('script'); s.src = '/late.js'; document.body.appendChild(s); }, 50);</script></body></html>";
+                        ("text/html", page.to_string())
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-wake-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("events.jsonl");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--live-ms",
+            "6000",
+            "--event-log",
+            log.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let records: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let at = |pred: &dyn Fn(&serde_json::Value) -> bool| records.iter().find(|r| pred(r)).map(|r| r["t_ms"].as_f64().unwrap());
+        let load = at(&|r| r["type"] == "load_finished").expect("load_finished");
+        let ran = at(&|r| r["type"] == "console").expect("late.js logged");
+        assert!(ran - load < 2_000.0, "late.js ran {:.0} ms after load (the window is 6000 ms)", ran - load);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1538,6 +1944,56 @@ mod tests {
     }
 
     #[test]
+    fn inspector_flags_parse() {
+        let argv = |extra: &[&str]| {
+            let mut v = vec!["parity-capture"];
+            v.extend_from_slice(extra);
+            Args::try_parse_from(v)
+        };
+        // A dump file is a source of its own; it needs an output directory
+        // and no page.
+        let a = argv(&["--inspector-dump", "d.json", "--inspector-out", "o"]).unwrap();
+        assert_eq!((a.inspector_dump.as_deref(), a.inspector_size), (Some("d.json"), (1280, 800)));
+        assert!(argv(&["--inspector-dump", "d.json"]).is_err());
+        assert!(argv(&["--inspector-dump", "d.json", "--inspector-out", "o", "--html-file", "x.html"]).is_err());
+        // A point selects in a captured page, not in a dump file.
+        assert!(argv(&["--inspector-dump", "d.json", "--inspector-out", "o", "--inspector-select-at", "1,2"]).is_err());
+        let b = parsed(&["--inspector-out", "o", "--inspector-select-at", "3,4.5", "--inspector-size", "800x600"]);
+        assert_eq!((b.inspector_select_at, b.inspector_size), (Some((3.0, 4.5)), (800, 600)));
+        assert!(Args::try_parse_from(["parity-capture", "--url", "https://e.test/", "--inspector-diff", "x"]).is_err());
+        assert!(!parsed(&[]).run_inline_scripts);
+        assert!(parsed(&["--run-inline-scripts"]).run_inline_scripts);
+    }
+
+    /// The fixture dump and diff (fixtures/inspector), rendered as the
+    /// parity case's page is.
+    #[test]
+    fn the_inspector_renders_a_dump_file_to_png_and_display_list() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/inspector");
+        let dump = fs::read_to_string(root.join("target.planted.dump.json")).unwrap();
+        let diff = fs::read_to_string(root.join("f2_planted.diff.json")).unwrap();
+        let out = std::env::temp_dir().join(format!("parity-capture-inspector-{}", std::process::id()));
+        let written = inspector::render_inspector(&dump, Some(&diff), None, (1280, 800), &out).unwrap();
+        assert_eq!((written.elements, written.truncated), (21, false));
+        assert_eq!(fs::read_to_string(&written.html_path).unwrap(), fs::read_to_string(root.join("inspector_page.html")).unwrap());
+        let png = fs::read(&written.png_path).unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!((u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap())), (1280, 800));
+        let list: serde_json::Value = serde_json::from_str(&fs::read_to_string(&written.display_list_path).unwrap()).unwrap();
+        let texts: Vec<&str> = list["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| (c["op"] == "text").then(|| c["text"].as_str().unwrap().trim()))
+            .collect();
+        for want in ["HiWave Inspector", "first difference", "Difference from Chromium (STYLE)", "flex-grow"] {
+            assert!(texts.contains(&want), "{want:?} not painted: {texts:?}");
+        }
+        assert!(!out.join("inspector.ppm").exists(), "the intermediate frame is removed");
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
     fn diagnostics_flags_parse() {
         let args = parsed(&["--diagnose", "#a", "--diagnose", "div > p", "--diagnose-at", "10,20.5"]);
         assert_eq!(args.diagnose, vec!["#a".to_string(), "div > p".to_string()]);
@@ -1557,5 +2013,130 @@ mod tests {
         assert_eq!(parse_point("point:-10.0:40.5"), Some((-10.0, 40.5)));
         assert_eq!(parse_point("String(\"fallback_clicked\")"), None);
         assert_eq!(parse_point("missing"), None);
+    }
+
+    #[test]
+    fn the_content_thread_flag_selects_the_page_worker() {
+        let (name, stack) = capture_worker_spec(false);
+        assert_eq!((name, stack), ("capture-worker", 16 * 1024 * 1024));
+        let (name, stack) = capture_worker_spec(true);
+        assert_eq!(name, "page");
+        assert!(stack >= 8 * 1024 * 1024, "content stack {stack}");
+        let got = std::thread::Builder::new()
+            .name(name.into())
+            .stack_size(stack)
+            .spawn(|| std::thread::current().name().unwrap().to_string())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(got, "page");
+    }
+
+    /// `--report` and `--report-text` on a fixture: the report JSON and text.
+    fn report_for(name: &str, html: &str) -> (serde_json::Value, String) {
+        let dir = std::env::temp_dir().join(format!("parity-capture-report-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let page = dir.join("page.html");
+        fs::write(&page, html).unwrap();
+        let (json, text) = (dir.join("report.json"), dir.join("report.txt"));
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--html-file",
+            page.to_str().unwrap(),
+            "--report",
+            json.to_str().unwrap(),
+            "--report-text",
+            text.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let report = serde_json::from_str(&fs::read_to_string(&json).expect("report written")).unwrap();
+        let text = fs::read_to_string(&text).expect("report text written");
+        let _ = fs::remove_dir_all(&dir);
+        (report, text)
+    }
+
+    fn causes(report: &serde_json::Value) -> Vec<String> {
+        report["ranked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| format!("{} {}", c["rule"].as_str().unwrap(), c["line"].as_str().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn a_fixed_dialog_over_a_locked_body_is_the_first_cause() {
+        let (report, text) = report_for(
+            "lock",
+            "<html><head><style>body { margin: 0; overflow: hidden } .story { height: 3000px }
+#consent { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 9999; background: white }</style></head>
+<body><div class=\"story\"><p>story</p></div><div id=\"consent\" class=\"ot-sdk banner\"><p>cookies</p></div></body></html>",
+        );
+        assert_eq!(
+            causes(&report),
+            vec![
+                "R1 scroll locked (body overflow-y:hidden) by overlay: fixed div#consent.ot-sdk.banner (z 9999) covers 100% of the viewport",
+                // The fixture's story is one empty 3000px box.
+                "R9 below the fold is empty from y=800 (document 3016px tall): no text or image starts in 800..1600",
+            ],
+            "{text}"
+        );
+        assert!(text.contains("1. [R1] scroll locked"), "{text}");
+    }
+
+    /// cnn, 2026-10-24: the consent script makes the body `position: fixed`
+    /// with `overflow: hidden`. The body is the lock, not the overlay, and
+    /// its content is still the page's; a bottom bar smaller than the
+    /// covering share is what the lock names.
+    #[test]
+    fn a_fixed_body_is_the_lock_and_the_largest_fixed_box_is_named() {
+        let (report, text) = report_for(
+            "fixed-body",
+            "<html><head><style>body { margin: 0; position: fixed; overflow: hidden; width: 100% }
+p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 160px; z-index: 50; background: white }</style></head>
+<body><p>one</p><p>two</p><p>three</p><p>four</p><p>five</p><p>six</p><div style=\"position: fixed; left: 0; right: 0; bottom: 0; height: 160px; z-index: 50; background: white\"><p>cookies</p></div></body></html>",
+        );
+        // No id or class: named by its structural selector's last steps.
+        assert_eq!(
+            causes(&report),
+            vec!["R1 scroll locked (body overflow-y:hidden) by overlay: fixed body:nth-child(2) > div:nth-child(7) (z 50) covers 20% of the viewport"],
+            "{text}"
+        );
+        assert_eq!(report["covering"], serde_json::json!([]), "{text}");
+        assert_eq!(report["bands"][1]["text"], 3, "{text}");
+    }
+
+    #[test]
+    fn an_empty_viewport_band_below_content_is_r9() {
+        let (report, text) = report_for(
+            "band",
+            "<html><body style=\"margin: 0\"><p>top</p><div style=\"height: 2400px\"></div><p>end</p></body></html>",
+        );
+        assert_eq!(
+            causes(&report),
+            vec!["R9 below the fold is empty from y=800 (document 2500px tall): no text or image starts in 800..1600"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_page_with_nothing_to_read_in_the_first_viewport_is_r10() {
+        let (report, text) = report_for("blank", "<html><body><div style=\"height:10px\"></div></body></html>");
+        let causes = causes(&report);
+        assert_eq!(causes.len(), 1, "{text}");
+        assert!(causes[0].starts_with("R10 the first viewport has no text and no image ("), "{text}");
+    }
+
+    #[test]
+    fn a_short_plain_page_fires_no_rule_and_says_what_it_did_not_check() {
+        let (report, text) = report_for("plain", "<html><body><p>a</p><img src=\"data:,\" width=\"10\" height=\"10\"></body></html>");
+        assert_eq!(causes(&report), Vec::<String>::new(), "{text}");
+        assert!(text.contains("(no rule fired)"), "{text}");
+        // develop has no T2/T3 records: those rules are named as skipped.
+        let skipped: Vec<&str> = report["not_checked"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
+        assert!(skipped.iter().any(|n| n.starts_with("R3, R4")) && skipped.iter().any(|n| n.starts_with("R7")), "{skipped:?}");
     }
 }

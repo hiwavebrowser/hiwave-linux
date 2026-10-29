@@ -595,6 +595,16 @@ impl Context {
         &mut self.vm.runtime_limits
     }
 
+    /// Start a new per-script recursion high-water mark.
+    ///
+    /// HIWAVE PATCH (recursion). The frame count itself is not reset: it
+    /// returns to the dummy frame when a script ends, including on an
+    /// uncatchable stop.
+    #[inline]
+    pub fn reset_recursion_max(&mut self) {
+        self.vm.max_frame_depth.set(0);
+    }
+
     // HIWAVE PATCH (interrupt)
     /// Set the interrupt word: a value any thread may store to stop the
     /// script running on this context. It is read at every call and every
@@ -615,6 +625,37 @@ impl Context {
     #[inline]
     pub fn set_interrupt_turn(&mut self, turn: u64) {
         self.vm.interrupt_turn = turn;
+    }
+    // END HIWAVE PATCH
+
+    // HIWAVE PATCH (stop finally)
+    /// Let a stop (the interrupt word naming the running turn, or the loop
+    /// limit) run the `finally` blocks it unwinds through, never a `catch`,
+    /// for at most `grace` from the first: script that has a scheduler
+    /// re-arm itself in a `finally` keeps it working after a stop. Past
+    /// the grace, and for `u64::MAX` (Stop), the stop is as upstream's: no
+    /// more script runs. `None` (the default) turns it off.
+    #[inline]
+    pub fn set_stop_finally_grace(&mut self, grace: Option<std::time::Duration>) {
+        self.vm.stop_finally_grace = grace;
+    }
+
+    /// Whether a stop is running a `finally` block now, inside its grace
+    /// (see [`Context::set_stop_finally_grace`]). A host that refuses calls
+    /// after a deadline answers this block's.
+    #[inline]
+    #[must_use]
+    pub fn stop_finally_running(&self) -> bool {
+        self.vm
+            .stop_unwind
+            .as_ref()
+            .is_some_and(|stop| !stop.running.is_empty() && std::time::Instant::now() < stop.until)
+    }
+
+    /// Forget the stop that ended: the next stops afresh.
+    #[inline]
+    pub fn end_stop_unwind(&mut self) {
+        self.vm.stop_unwind = None;
     }
     // END HIWAVE PATCH
 

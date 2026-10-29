@@ -1112,9 +1112,8 @@ pub enum Display {
     TableColumn,
     TableColumnGroup,
     /// `contents`: the element generates no box; its children take its
-    /// place. Only the UA style of `<slot>` sets it (author `display:
-    /// contents` is still unsupported, see `parse_display`), and the
-    /// engine's box-tree build removes such boxes, so layout never sees one.
+    /// place (CSS Display 3). Author `display: contents` and the UA style
+    /// of `<slot>` both set it, and the box-tree build removes such boxes.
     Contents,
 }
 
@@ -1155,6 +1154,30 @@ impl Display {
             self,
             Display::InlineBlock | Display::InlineFlex | Display::InlineGrid | Display::InlineTable
         )
+    }
+
+    /// CSS Display 3 §2.7: the block-level equivalent of this display.
+    ///
+    /// `inline` / `inline-block` become `block`, the inline-level inner
+    /// displays become their block-level forms, and a table-internal
+    /// display becomes `block`. `none` and `contents` generate no box, so
+    /// they are left alone (there is nothing to blockify).
+    pub fn blockified(self) -> Self {
+        match self {
+            Display::Inline | Display::InlineBlock => Display::Block,
+            Display::InlineFlex => Display::Flex,
+            Display::InlineGrid => Display::Grid,
+            Display::InlineTable => Display::Table,
+            Display::TableRow
+            | Display::TableRowGroup
+            | Display::TableHeaderGroup
+            | Display::TableFooterGroup
+            | Display::TableCell
+            | Display::TableCaption
+            | Display::TableColumn
+            | Display::TableColumnGroup => Display::Block,
+            other => other,
+        }
     }
 
     /// `table` or `inline-table`: the box that runs table layout.
@@ -2684,18 +2707,55 @@ pub struct ComputedStyle {
 
     // Visual
     pub opacity: f32,
+    /// `clip-path` as authored (empty for `none`); layout resolves the
+    /// basic shape against the box it clips. Not inherited.
+    pub clip_path: String,
     pub visibility: Visibility,
     pub pointer_events: PointerEvents,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
     pub text_overflow: TextOverflow,
+    /// The cascaded `display` was `-webkit-box` (`Some(false)`) or
+    /// `-webkit-inline-box` (`Some(true)`). `display` keeps its previous
+    /// value: the legacy flexbox is not laid out, except in the line-clamp
+    /// form, see [`ComputedStyle::line_clamp`]. Not inherited.
+    pub webkit_box: Option<bool>,
+    /// `-webkit-box-orient: vertical` (or `block-axis`). Not inherited.
+    pub webkit_box_orient_vertical: bool,
+    /// `-webkit-line-clamp: <integer>`; `None` is `none`. Not inherited.
+    pub webkit_line_clamp: Option<u32>,
+    /// css-contain-3 §6.1 `container-type`. Not inherited.
+    pub container_type: ContainerType,
+    /// css-contain-3 §6.2 `container-name`; empty is `none`. Not inherited.
+    pub container_name: Vec<String>,
+    /// A `width` (bit 1), `min-width` (2) or `max-width` (4) value that
+    /// `Length` cannot carry (`min-content`, `-webkit-max-content`,
+    /// `MAX-CONTENT`, ...); layout keeps the previous value. `@container`
+    /// treats the box's width as unknown. Not inherited.
+    pub width_keywords: u8,
+    /// A `writing-mode` other than `horizontal-tb` was declared. Layout
+    /// does not honour it yet, but `@container` treats the box's width as
+    /// unknown (its inline size is the physical height). Not inherited.
+    pub writing_mode_declared: bool,
+    /// `columns` or `column-width` other than `auto` was declared. Layout
+    /// does not split into columns for them yet, but `@container` treats a
+    /// child's width as unknown. Not inherited.
+    pub columns_declared: bool,
+    /// An author `display: contents` (with `display` set to
+    /// `Display::Contents`): the element generates no box, and `@container`
+    /// treats it as having no size. Not inherited.
+    pub display_contents_declared: bool,
 
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,
 
     // Backdrop filter (blur, grayscale, etc.)
     pub backdrop_filter: BackdropFilter,
+    /// `filter` (Filter Effects 1 §5) as declared, lowercased; empty is
+    /// `none`. Paint reads the colour-matrix functions from it
+    /// (`rustkit_layout::filter_color_matrix`). Not inherited.
+    pub filter: String,
 
     // Image/replaced element
     pub image_url: Option<String>,
@@ -2796,6 +2856,35 @@ impl ComputedStyle {
             .chain(self.transform.ops.iter().cloned())
             .collect();
         std::borrow::Cow::Owned(TransformList { ops })
+    }
+
+    /// css-overflow-4 §4.2, the legacy form: a `display: -webkit-box` (or
+    /// `-webkit-inline-box`) with `-webkit-box-orient: vertical` and
+    /// `-webkit-line-clamp: N` shows only its first N line boxes. `Some(N)`
+    /// when all three are set; any of them alone does nothing, as in Chrome.
+    pub fn line_clamp(&self) -> Option<u32> {
+        match (
+            self.webkit_box,
+            self.webkit_box_orient_vertical,
+            self.webkit_line_clamp,
+        ) {
+            (Some(_), true, Some(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Run once the cascade is done: a line-clamped `-webkit-box` is laid
+    /// out as a block container (Chrome computes its display to
+    /// `flow-root`), so the clamp has line boxes to count. Every other
+    /// `-webkit-box` is left alone.
+    pub fn apply_line_clamp_display(&mut self) {
+        if let (Some(inline), Some(_)) = (self.webkit_box, self.line_clamp()) {
+            self.display = if inline {
+                Display::InlineBlock
+            } else {
+                Display::Block
+            };
+        }
     }
 
     /// Create default style.
@@ -2943,6 +3032,10 @@ pub struct Rule {
     /// Media query lists of the enclosing `@media` blocks, outermost first;
     /// the rule applies only where all of them match (`Rule::applies_at`).
     pub media: Vec<String>,
+    /// Preludes of the enclosing `@container` blocks, outermost first; the
+    /// rule applies to an element only where each holds for its query
+    /// container.
+    pub container: Vec<String>,
     /// Full dotted name of the rule's cascade layer; `None` when unlayered.
     pub layer: Option<String>,
     /// The layer's rank in the document's layer order (`assign_layer_order`):
@@ -3086,6 +3179,7 @@ impl Stylesheet {
             .into_iter()
             .map(|r| Rule {
                 media: r.media,
+                container: r.container,
                 layer: r.layer,
                 layer_order: UNLAYERED,
                 selector: match encode_selector_escapes(&r.selector) {
@@ -3128,6 +3222,7 @@ impl Stylesheet {
 }
 
 pub mod background;
+mod color_mix;
 pub mod mask;
 pub use mask::Mask;
 
@@ -3135,7 +3230,7 @@ pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
 pub mod media;
-pub use media::media_query_list_matches;
+pub use media::{media_query_list_matches, media_query_list_serialize};
 
 pub mod content;
 pub mod selector_escape;
@@ -3328,6 +3423,10 @@ pub fn parse_color(value: &str) -> Option<Color> {
             _ => return None,
         };
         return Some(Color::new(r, g, b, a));
+    }
+
+    if value.starts_with("color-mix(") {
+        return color_mix::parse_color_mix(&value.to_lowercase());
     }
 
     // rgb() / rgba()
@@ -3768,6 +3867,81 @@ pub fn parse_border_spacing(value: &str) -> Option<(Length, Length)> {
     }
 }
 
+/// `display: -webkit-box` / `-webkit-inline-box`: `Some(inline)`, else
+/// `None` (see [`ComputedStyle::webkit_box`]).
+pub fn parse_webkit_box_display(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "-webkit-box" => Some(false),
+        "-webkit-inline-box" => Some(true),
+        _ => None,
+    }
+}
+
+/// css-contain-3 §6.1 `container-type`: what an `@container` query may ask
+/// of the element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContainerType {
+    /// `normal`: a container for style queries only, not for size queries.
+    #[default]
+    Normal,
+    /// `inline-size`: its inline size can be queried.
+    InlineSize,
+    /// `size`: its inline and block sizes can be queried.
+    Size,
+}
+
+/// `container-type: normal | size | inline-size`; `None` when invalid.
+pub fn parse_container_type(value: &str) -> Option<ContainerType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some(ContainerType::Normal),
+        "inline-size" => Some(ContainerType::InlineSize),
+        "size" => Some(ContainerType::Size),
+        _ => None,
+    }
+}
+
+/// `container-name: none | <custom-ident>+`; `None` when invalid.
+pub fn parse_container_name(value: &str) -> Option<Vec<String>> {
+    let names: Vec<&str> = value.split_whitespace().collect();
+    if names.len() == 1 && names[0].eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    let reserved = |n: &str| {
+        ["none", "and", "or", "not", "initial", "inherit", "unset", "default"]
+            .iter()
+            .any(|r| n.eq_ignore_ascii_case(r))
+    };
+    let ident = |n: &str| {
+        let body = n.strip_prefix('-').unwrap_or(n);
+        body.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '-' || !c.is_ascii())
+            && n.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii())
+    };
+    (!names.is_empty() && names.iter().all(|n| ident(n) && !reserved(n)))
+        .then(|| names.iter().map(|n| n.to_string()).collect())
+}
+
+/// The `container` shorthand: `<container-name> [ / <container-type> ]?`.
+pub fn parse_container(value: &str) -> Option<(Vec<String>, ContainerType)> {
+    let (name, kind) = match value.split_once('/') {
+        Some((n, t)) => (n, parse_container_type(t)?),
+        None => (value, ContainerType::Normal),
+    };
+    Some((parse_container_name(name)?, kind))
+}
+
+/// `-webkit-line-clamp: none | <integer [1,∞]>`. `Some(None)` is `none`;
+/// `None` is an invalid value (the declaration is dropped).
+pub fn parse_webkit_line_clamp(value: &str) -> Option<Option<u32>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    match value.parse::<u32>() {
+        Ok(n) if n >= 1 => Some(Some(n)),
+        _ => None,
+    }
+}
+
 /// Parse display value.
 ///
 /// Besides the legacy single keywords, this takes css-display-3's
@@ -3777,7 +3951,7 @@ pub fn parse_border_spacing(value: &str) -> Option<(Length, Length)> {
 /// (its new formatting context only matters for floats and margin collapse);
 /// `list-item` lays out as its outer display, with no marker. The CSS 2.1
 /// table keywords (and `block table` / `inline table`) map to the table
-/// variants. `contents` and `ruby` stay unsupported (`None`).
+/// variants. `ruby` stays unsupported (`None`).
 pub fn parse_display(value: &str) -> Option<Display> {
     let value = value.trim().to_lowercase();
     match value.as_str() {
@@ -3789,6 +3963,7 @@ pub fn parse_display(value: &str) -> Option<Display> {
         "grid" => return Some(Display::Grid),
         "inline-grid" => return Some(Display::InlineGrid),
         "none" => return Some(Display::None),
+        "contents" => return Some(Display::Contents),
         "table" => return Some(Display::Table),
         "inline-table" => return Some(Display::InlineTable),
         "table-row-group" => return Some(Display::TableRowGroup),
@@ -3884,8 +4059,8 @@ mod tests {
             // Legacy keywords are unchanged.
             ("inline-block", Some(Display::InlineBlock)),
             ("none", Some(Display::None)),
-            // Unsupported or invalid: still ignored.
-            ("contents", None),
+            ("contents", Some(Display::Contents)),
+            // Invalid: still ignored.
             ("block block", None),
             ("flex list-item", None),
             ("block wobble", None),
@@ -3894,6 +4069,68 @@ mod tests {
         for (value, want) in cases {
             assert_eq!(parse_display(value), *want, "display: {value:?}");
         }
+    }
+
+    #[test]
+    fn webkit_line_clamp_needs_webkit_box_vertical_orient_and_a_count() {
+        assert_eq!(parse_webkit_box_display("-webkit-box"), Some(false));
+        assert_eq!(parse_webkit_box_display(" -WEBKIT-INLINE-BOX "), Some(true));
+        assert_eq!(parse_webkit_box_display("flex"), None);
+        assert_eq!(parse_webkit_line_clamp("2"), Some(Some(2)));
+        assert_eq!(parse_webkit_line_clamp("none"), Some(None));
+        for bad in ["0", "-1", "1.5", "2px", ""] {
+            assert_eq!(parse_webkit_line_clamp(bad), None, "{bad:?}");
+        }
+
+        let mut s = ComputedStyle::new();
+        s.webkit_box = Some(false);
+        s.webkit_box_orient_vertical = true;
+        s.webkit_line_clamp = Some(2);
+        assert_eq!(s.line_clamp(), Some(2));
+        s.display = Display::Flex;
+        s.apply_line_clamp_display();
+        assert_eq!(
+            s.display,
+            Display::Block,
+            "a clamped -webkit-box is a block container"
+        );
+        s.webkit_box = Some(true);
+        s.apply_line_clamp_display();
+        assert_eq!(s.display, Display::InlineBlock);
+
+        // Any one of the three missing: no clamp, display untouched.
+        for (webkit_box, vertical, count) in [
+            (None, true, Some(2)),
+            (Some(false), false, Some(2)),
+            (Some(false), true, None),
+        ] {
+            let mut s = ComputedStyle::new();
+            s.display = Display::Inline;
+            (
+                s.webkit_box,
+                s.webkit_box_orient_vertical,
+                s.webkit_line_clamp,
+            ) = (webkit_box, vertical, count);
+            assert_eq!(s.line_clamp(), None);
+            s.apply_line_clamp_display();
+            assert_eq!(s.display, Display::Inline);
+        }
+    }
+
+    #[test]
+    fn display_blockifies_inline_level_and_table_internal_values() {
+        assert_eq!(Display::Inline.blockified(), Display::Block);
+        assert_eq!(Display::InlineBlock.blockified(), Display::Block);
+        assert_eq!(Display::InlineFlex.blockified(), Display::Flex);
+        assert_eq!(Display::InlineGrid.blockified(), Display::Grid);
+        assert_eq!(Display::InlineTable.blockified(), Display::Table);
+        assert_eq!(Display::TableCell.blockified(), Display::Block);
+        assert_eq!(Display::TableRow.blockified(), Display::Block);
+        assert_eq!(Display::TableCaption.blockified(), Display::Block);
+        assert_eq!(Display::Contents.blockified(), Display::Contents);
+        assert_eq!(Display::None.blockified(), Display::None);
+        assert_eq!(Display::Block.blockified(), Display::Block);
+        assert_eq!(Display::Flex.blockified(), Display::Flex);
     }
 
     #[test]
@@ -4857,6 +5094,12 @@ mod computed_style_field_guards {
             float, clear, border_top_style, border_right_style,
             border_bottom_style, border_left_style, translate, rotate, scale,
             text_overflow, column_count, custom_properties,
+            // 2026-10-29 S1 sync additions (73ae13cb..d16d0f89), all NOT
+            // inherited in inherit_from (note: writing_mode_declared non-inheritance
+            // while writing-mode is inherited in CSS is flagged in audit-castor.md).
+            clip_path, webkit_box, webkit_box_orient_vertical, webkit_line_clamp,
+            container_type, container_name, width_keywords, writing_mode_declared,
+            columns_declared, display_contents_declared, filter,
         } = ComputedStyle::new();
 
         // THE PARTITION IS CHECKED, NOT MERELY DOCUMENTED - and every
@@ -4999,7 +5242,24 @@ mod computed_style_field_guards {
             border_top_style, border_right_style, border_bottom_style,
             border_left_style, translate, rotate, scale, text_overflow,
             column_count, custom_properties,
+            // 2026-10-29 S1 sync additions.
+            clip_path, webkit_box, webkit_box_orient_vertical, webkit_line_clamp,
+            container_type, container_name, width_keywords, writing_mode_declared,
+            columns_declared, display_contents_declared, filter,
         } = ComputedStyle::new();
+
+        // 2026-10-29 S1 sync additions: verify initial values.
+        assert!(clip_path.is_empty(), "clip-path initial is none (empty)");
+        assert_eq!(webkit_box, None, "webkit_box initial is None");
+        assert!(!webkit_box_orient_vertical, "webkit_box_orient_vertical initial is false");
+        assert_eq!(webkit_line_clamp, None, "webkit-line-clamp initial is none (None)");
+        assert_eq!(container_type, ContainerType::Normal, "container-type initial is normal");
+        assert!(container_name.is_empty(), "container-name initial is none (empty)");
+        assert_eq!(width_keywords, 0, "width_keywords initial is 0");
+        assert!(!writing_mode_declared, "writing_mode_declared initial is false");
+        assert!(!columns_declared, "columns_declared initial is false");
+        assert!(!display_contents_declared, "display_contents_declared initial is false");
+        assert!(filter.is_empty(), "filter initial is none (empty)");
 
         // Wave-6 additions: each derived default is the CSS initial.
         assert_eq!(float, Float::None, "float initial is none");

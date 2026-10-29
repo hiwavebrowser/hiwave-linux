@@ -22,8 +22,8 @@
 //! never need to clear a turn-targeted word: every writer uses `fetch_max`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::atomic::{fence, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 /// The interrupt word's "every turn": this view runs no more script until
@@ -45,9 +45,31 @@ static NEXT_VIEW: AtomicU64 = AtomicU64::new(1);
 
 /// Microseconds since the first call, the clock turn start times are on.
 /// Finer than the budgets so a turn is never judged by a rounded clock.
-fn now_us() -> u64 {
+pub fn mono_us() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
+
+fn now_us() -> u64 {
+    mono_us()
+}
+
+const SETTER_NONE: u8 = 0;
+const SETTER_WATCHDOG: u8 = 1;
+const SETTER_STOP_ALL: u8 = 2;
+const SETTER_CANCEL: u8 = 3;
+const SETTER_COMMIT: u8 = 4;
+const SETTER_CLEAR: u8 = 5;
+
+fn setter_name(tag: u8) -> &'static str {
+    match tag {
+        SETTER_WATCHDOG => "watchdog",
+        SETTER_STOP_ALL => "stop_all",
+        SETTER_CANCEL => "cancel",
+        SETTER_COMMIT => "commit",
+        SETTER_CLEAR => "clear",
+        _ => "-",
+    }
 }
 
 /// One view's stop state.
@@ -61,11 +83,28 @@ pub struct ViewControl {
     /// because Boa holds it ([`boa_engine::Context::set_interrupt_word`]).
     interrupt: Arc<AtomicU64>,
     /// Cancel every load whose navigation id is at or below this; 0 =
-    /// none. Not read yet: it is the load cancel's (M3b).
+    /// none. Only grows ([`ViewControl::cancel_nav`]).
     pub cancel_nav: AtomicU64,
+    /// The view's newest navigation id; 0 = none yet (M3b).
+    nav: AtomicU64,
+    /// The navigation whose load is in progress; 0 = none.
+    loading_nav: AtomicU64,
+    /// The newest navigation whose document has replaced the view's; 0 =
+    /// none. Until `loading_nav` commits, the word belongs to the previous
+    /// document's script, which a cancel of the new load must not stop.
+    committed_nav: AtomicU64,
+    /// Held while `loading_nav` is read or written together with the
+    /// interrupt word, so a cancel for a load that just ended cannot set
+    /// [`ALL`] on the next document after it cleared the word.
+    nav_lock: Mutex<()>,
     /// Bumped on Stop and Close, never lowered. Not read yet: navigations a
     /// stopped page raised are dropped by it from M4.
     pub nav_epoch: AtomicU64,
+    /// Who last wrote [`Self::interrupt`], for the console-log line. The
+    /// opcode check does not read these.
+    setter_tag: AtomicU8,
+    setter_at_us: AtomicU64,
+    setter_target: AtomicU64,
 }
 
 impl ViewControl {
@@ -74,8 +113,34 @@ impl ViewControl {
             id: NEXT_VIEW.fetch_add(1, Ordering::Relaxed),
             interrupt: Arc::new(AtomicU64::new(0)),
             cancel_nav: AtomicU64::new(0),
+            nav: AtomicU64::new(0),
+            loading_nav: AtomicU64::new(0),
+            committed_nav: AtomicU64::new(0),
+            nav_lock: Mutex::new(()),
             nav_epoch: AtomicU64::new(0),
+            setter_tag: AtomicU8::new(SETTER_NONE),
+            setter_at_us: AtomicU64::new(0),
+            setter_target: AtomicU64::new(0),
         }
+    }
+
+    fn note_setter(&self, tag: u8, target: u64) {
+        self.setter_target.store(target, Ordering::Relaxed);
+        // 0 means "nobody has written". A write in the first microsecond
+        // of the clock still has to be distinguishable from that.
+        self.setter_at_us.store(now_us().max(1), Ordering::Relaxed);
+        self.setter_tag.store(tag, Ordering::Release);
+    }
+
+    /// The word, and who last wrote it: tag, monotonic time, target turn.
+    pub fn word_writer(&self) -> (u64, &'static str, u64, u64) {
+        let tag = self.setter_tag.load(Ordering::Acquire);
+        (
+            self.interrupt.load(Ordering::Relaxed),
+            setter_name(tag),
+            self.setter_at_us.load(Ordering::Relaxed),
+            self.setter_target.load(Ordering::Relaxed),
+        )
     }
 
     /// This view's id in [`ThreadStamp`] (`turn_view`).
@@ -86,11 +151,22 @@ impl ViewControl {
     /// Stop `turn` if it is this view's running turn. Never lowers the
     /// word: a later turn's id, or [`ALL`], stays.
     pub fn interrupt_turn(&self, turn: u64) {
+        self.note_setter(SETTER_WATCHDOG, turn);
         self.interrupt.fetch_max(turn, Ordering::Relaxed);
     }
 
     /// Stop every turn of this view until [`ViewControl::clear_all`].
     pub fn stop_all(&self) {
+        self.write_all(SETTER_STOP_ALL);
+    }
+
+    /// [`ViewControl::stop_all`] from a navigation cancel.
+    pub fn stop_cancelled(&self) {
+        self.write_all(SETTER_CANCEL);
+    }
+
+    fn write_all(&self, tag: u8) {
+        self.note_setter(tag, ALL);
         self.interrupt.store(ALL, Ordering::Relaxed);
     }
 
@@ -98,15 +174,111 @@ impl ViewControl {
     /// commits in the view. A turn id in the word is left: it names a turn
     /// that has ended. Whether `ALL` was set.
     pub fn clear_all(&self) -> bool {
-        self.interrupt
+        let cleared = self
+            .interrupt
             .compare_exchange(ALL, 0, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
+            .is_ok();
+        if cleared {
+            self.note_setter(SETTER_CLEAR, 0);
+        }
+        cleared
     }
 
     /// Whether the word stops `turn`.
     pub fn stops(&self, turn: u64) -> bool {
         let word = self.interrupt.load(Ordering::Relaxed);
         word != 0 && (word == ALL || word == turn)
+    }
+
+    /// Navigation `nav_id` has started and its load is in progress. Called
+    /// by the page thread only, before the load's first await; ids grow.
+    pub fn begin_nav(&self, nav_id: u64) {
+        let _held = self.nav_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.nav.store(nav_id, Ordering::SeqCst);
+        self.loading_nav.store(nav_id, Ordering::SeqCst);
+    }
+
+    /// Navigation `nav_id`'s document has replaced the view's: from here
+    /// the word is its script's. Lifts [`ALL`], which ended with the
+    /// previous document, unless `nav_id` was cancelled already, whose
+    /// script then never starts. Called by the page thread only.
+    pub fn commit_nav(&self, nav_id: u64) {
+        let _held = self.nav_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.committed_nav.store(nav_id, Ordering::SeqCst);
+        if self.nav_cancelled(nav_id) {
+            self.write_all(SETTER_COMMIT);
+        } else {
+            self.clear_all();
+        }
+    }
+
+    /// Whether `nav_id`'s document has replaced the view's.
+    pub fn nav_committed(&self, nav_id: u64) -> bool {
+        nav_id != 0 && self.committed_nav.load(Ordering::SeqCst) == nav_id
+    }
+
+    /// The load of `nav_id` is over. Whether it ended uncancelled: a
+    /// cancel that arrives after this finds no load and leaves the word
+    /// alone, and one that arrived before it is reported here.
+    pub fn end_load(&self, nav_id: u64) -> bool {
+        let _held = self.nav_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self
+            .loading_nav
+            .compare_exchange(nav_id, 0, Ordering::SeqCst, Ordering::SeqCst);
+        !self.nav_cancelled(nav_id)
+    }
+
+    /// Cancel navigation `nav_id` and every earlier one, from any thread.
+    /// If its load is in progress and has committed its document, the
+    /// interrupt word is set to [`ALL`], so a script of that load that is
+    /// running now stops at its next call or loop back-edge, and none of
+    /// its later scripts starts; the next document clears it. Before the
+    /// commit the word is the previous document's and is left alone: the
+    /// load ends at its next await. Whether a load in progress was
+    /// cancelled.
+    pub fn cancel_nav(&self, nav_id: u64) -> bool {
+        if nav_id == 0 {
+            return false;
+        }
+        let _held = self.nav_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.cancel_nav.fetch_max(nav_id, Ordering::SeqCst);
+        let loading = self.loading_nav.load(Ordering::SeqCst);
+        let hit = loading != 0 && loading <= nav_id;
+        if hit && self.committed_nav.load(Ordering::SeqCst) == loading {
+            self.write_all(SETTER_CANCEL);
+        }
+        hit
+    }
+
+    /// Navigation `nav_id` ended without committing a document (a refused
+    /// connection, a fetch error, a 204). The document still on screen gets
+    /// its script back: lift [`ALL`], which the window raised when it
+    /// started `nav_id`. Not when a newer navigation or a Stop cancelled
+    /// it; that one raised ALL for its own reason. Whether ALL was lifted
+    /// for this navigation. Held under the nav lock, as `cancel_nav`, so a
+    /// cancel cannot land between the check and the lift.
+    pub fn end_uncommitted(&self, nav_id: u64) -> bool {
+        let _held = self.nav_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if nav_id == 0 || self.nav_committed(nav_id) || self.nav_cancelled(nav_id) {
+            return false;
+        }
+        self.clear_all();
+        true
+    }
+
+    /// Whether `nav_id` has been cancelled.
+    pub fn nav_cancelled(&self, nav_id: u64) -> bool {
+        nav_id != 0 && self.cancel_nav.load(Ordering::SeqCst) >= nav_id
+    }
+
+    /// The view's newest navigation id; 0 = none yet.
+    pub fn current_nav(&self) -> u64 {
+        self.nav.load(Ordering::SeqCst)
+    }
+
+    /// The navigation whose load is in progress; 0 = none.
+    pub fn loading_nav(&self) -> u64 {
+        self.loading_nav.load(Ordering::SeqCst)
     }
 
     /// The word itself, for Boa.
@@ -162,19 +334,14 @@ impl ThreadStamp {
         self.turn_started_us.store(started, Ordering::Relaxed);
         self.turn_budget_us.store(budget_us, Ordering::Relaxed);
         self.turn.store(id, Ordering::Release);
-        // Pairs with the watchdog's fence between publishing when it will
-        // next wake and its last look: either it sees this turn or this sees
-        // when it wakes, and wakes it if that is after this turn's budget
-        // (it may be sleeping a whole tick after stopping another turn).
-        fence(Ordering::SeqCst);
+        // Wake the watchdog if it would sleep past this turn's budget (it
+        // may be sleeping a whole tick after stopping another turn), or is
+        // awake and may have looked before this turn was published. The
+        // lock orders the publish above before the watchdog's next look.
         if let Some(watchdog) = self.watchdog.upgrade() {
-            let parked = watchdog.parked.swap(false, Ordering::Relaxed);
-            let wakes = watchdog.wake_at_us.load(Ordering::Relaxed);
-            if parked || started.saturating_add(budget_us) < wakes {
-                if let Some(thread) = watchdog.thread.get() {
-                    thread.unpark();
-                }
-            }
+            watchdog
+                .sleep
+                .turn_opened(started.saturating_add(budget_us));
         }
         id
     }
@@ -195,6 +362,18 @@ impl ThreadStamp {
     /// The open turn's id; 0 = idle.
     pub fn current_turn(&self) -> u64 {
         self.turn.load(Ordering::Relaxed)
+    }
+
+    /// The open turn's id, how long it has been open, and its budget, in
+    /// microseconds. Zeros when idle.
+    pub fn timing(&self) -> (u64, u64, u64) {
+        let turn = self.turn.load(Ordering::Relaxed);
+        if turn == 0 {
+            return (0, 0, 0);
+        }
+        let started = self.turn_started_us.load(Ordering::Relaxed);
+        let budget = self.turn_budget_us.load(Ordering::Relaxed);
+        (turn, now_us().saturating_sub(started), budget)
     }
 
     /// The open turn, if the read was not torn by a turn ending or
@@ -220,16 +399,15 @@ impl ThreadStamp {
     }
 }
 
-#[derive(Default)]
 struct Shared {
+    /// The longest this watchdog sleeps while a turn is open ([`TICK`];
+    /// a test may lengthen it to tell a missed wake from a slow runner).
+    tick: Duration,
     stamps: Mutex<Vec<Weak<ThreadStamp>>>,
     views: Mutex<HashMap<u64, Weak<ViewControl>>>,
-    /// Set by the watchdog before it parks with no turn open.
-    parked: AtomicBool,
-    /// When the watchdog next wakes on its own (`now_us`); `u64::MAX`
-    /// while parked with no turn open.
-    wake_at_us: AtomicU64,
-    thread: OnceLock<std::thread::Thread>,
+    /// The watchdog's sleep. The thread holds it strongly and `Shared`
+    /// only weakly, so it can sleep without keeping the watchdog alive.
+    sleep: Arc<Sleep>,
     /// Turns the watchdog has stopped (a diagnostic).
     stopped: AtomicU64,
 }
@@ -237,9 +415,103 @@ struct Shared {
 impl Drop for Shared {
     fn drop(&mut self) {
         // The thread holds only a `Weak`: woken, it finds it dead and ends.
-        if let Some(thread) = self.thread.get() {
-            thread.unpark();
+        self.sleep.wake();
+    }
+}
+
+/// The watchdog's sleep and the wake a newly opened turn sends it.
+///
+/// One lock for the watchdog's decision to sleep and for a turn's check of
+/// that decision, so no wake is lost between them: a turn opened before the
+/// watchdog takes the lock to sleep makes it look again, and a turn opened
+/// after reads the time it will wake. A turn takes this lock once, when it
+/// opens; the watchdog takes it about once a tick.
+#[derive(Default)]
+struct Sleep {
+    state: Mutex<SleepState>,
+    woken: Condvar,
+}
+
+#[derive(Debug)]
+struct SleepState {
+    /// When the sleeping watchdog wakes on its own (`now_us`). `u64::MAX`
+    /// while it sleeps with no turn open, and while it is awake: a turn
+    /// opened then always reaches it.
+    wake_at_us: u64,
+    /// A turn opened, or the watchdog was dropped, since the watchdog last
+    /// woke: it looks again before it sleeps.
+    kicked: bool,
+    /// The watchdog is waiting on [`Sleep::woken`]. A diagnostic: the
+    /// timing tests wait for it so that the turn they open finds the
+    /// watchdog asleep.
+    sleeping: bool,
+}
+
+impl Default for SleepState {
+    fn default() -> Self {
+        Self {
+            wake_at_us: u64::MAX,
+            kicked: false,
+            sleeping: false,
         }
+    }
+}
+
+impl Sleep {
+    fn lock(&self) -> MutexGuard<'_, SleepState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A turn whose budget ends at `ends_us` has been published: wake the
+    /// watchdog unless it already wakes by then.
+    fn turn_opened(&self, ends_us: u64) {
+        let mut state = self.lock();
+        if ends_us < state.wake_at_us {
+            state.kicked = true;
+            drop(state);
+            self.woken.notify_one();
+        }
+    }
+
+    /// Wake the watchdog whatever it is waiting for.
+    fn wake(&self) {
+        self.lock().kicked = true;
+        self.woken.notify_one();
+    }
+
+    /// Called by the watchdog after a look that found the next budget ends
+    /// in `wait` (`None`: no turn open). Sleeps until then, or until a turn
+    /// that ends sooner opens. Returns at once if a turn opened during the
+    /// look, which may have missed it.
+    fn sleep(&self, wait: Option<Duration>) {
+        let mut state = self.lock();
+        if !state.kicked {
+            // The time published is the time slept to, from the same look.
+            let wake_at = wait.map_or(u64::MAX, |wait| {
+                now_us().saturating_add(wait.as_micros() as u64)
+            });
+            state.wake_at_us = wake_at;
+            state.sleeping = true;
+            while !state.kicked {
+                if wake_at == u64::MAX {
+                    state = self.woken.wait(state).unwrap_or_else(|e| e.into_inner());
+                    continue;
+                }
+                let now = now_us();
+                if now >= wake_at {
+                    break;
+                }
+                state = self
+                    .woken
+                    .wait_timeout(state, Duration::from_micros(wake_at - now))
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+        }
+        // Awake: every turn opened from here on kicks, until the next sleep.
+        state.kicked = false;
+        state.sleeping = false;
+        state.wake_at_us = u64::MAX;
     }
 }
 
@@ -261,9 +533,9 @@ impl Shared {
                     let ends = open.started_us.saturating_add(open.budget_us);
                     let wait = if now >= ends {
                         over.push(open);
-                        TICK
+                        self.tick
                     } else {
-                        Duration::from_micros(ends - now).min(TICK)
+                        Duration::from_micros(ends - now).min(self.tick)
                     };
                     due = Some(due.map_or(wait, |d| d.min(wait)));
                 }
@@ -305,13 +577,26 @@ pub struct Watchdog {
 impl Watchdog {
     /// A watchdog with a thread of its own.
     pub fn spawn() -> Self {
-        let shared = Arc::new(Shared::default());
+        Self::spawn_with_tick(TICK)
+    }
+
+    /// [`Watchdog::spawn`] with its own longest sleep. Tests use a long
+    /// one: a wake the watchdog misses then costs the whole tick, which no
+    /// loaded runner is slow enough to hide.
+    fn spawn_with_tick(tick: Duration) -> Self {
+        let shared = Arc::new(Shared {
+            tick,
+            stamps: Mutex::default(),
+            views: Mutex::default(),
+            sleep: Arc::default(),
+            stopped: AtomicU64::new(0),
+        });
         let weak = Arc::downgrade(&shared);
-        let handle = std::thread::Builder::new()
+        let sleep = Arc::clone(&shared.sleep);
+        std::thread::Builder::new()
             .name("watchdog".into())
-            .spawn(move || run(weak))
+            .spawn(move || run(weak, sleep))
             .expect("spawn the watchdog thread");
-        let _ = shared.thread.set(handle.thread().clone());
         Self { shared }
     }
 
@@ -356,37 +641,121 @@ impl Watchdog {
     }
 }
 
-fn run(shared: Weak<Shared>) {
+fn run(shared: Weak<Shared>, sleep: Arc<Sleep>) {
     loop {
         let Some(live) = shared.upgrade() else {
             return;
         };
-        let first = live.scan();
-        // Say when this thread wakes next (never, with nothing open), then
-        // look once more: a turn published after that look sees it and
-        // unparks this thread if its budget ends sooner.
-        let wake_at = first.map_or(u64::MAX, |wait| {
-            now_us().saturating_add(wait.as_micros() as u64)
-        });
-        live.wake_at_us.store(wake_at, Ordering::Relaxed);
-        live.parked.store(first.is_none(), Ordering::Relaxed);
-        fence(Ordering::SeqCst);
         let wait = live.scan();
-        if wait.is_none() != first.is_none() {
-            // A turn opened or closed between the looks: look again.
-            continue;
-        }
         drop(live);
-        match wait {
-            Some(wait) => std::thread::park_timeout(wait),
-            None => std::thread::park(),
-        }
+        sleep.sleep(wait);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_racing_the_end_of_an_uncommitted_navigation_keeps_its_stop() {
+        // #730 follow-up (b): the page lowered ALL for a navigation that
+        // never committed after reading "not cancelled", unlocked. A newer
+        // navigation's cancel and stop landing between the two was undone,
+        // and the old document's script ran on under the new load.
+        let control = Arc::new(ViewControl::new());
+        control.begin_nav(1);
+        control.commit_nav(1);
+        assert!(control.end_load(1));
+        control.stop_all();
+        control.begin_nav(2);
+        let held = control.nav_lock.lock().unwrap();
+        let ending = {
+            let control = Arc::clone(&control);
+            std::thread::spawn(move || control.end_uncommitted(2))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // A newer navigation, as `ContentThread::navigate`: cancel, then stop.
+        control.cancel_nav.fetch_max(2, Ordering::SeqCst);
+        control.stop_all();
+        drop(held);
+        let lifted = ending.join().unwrap();
+        assert!(!lifted, "ALL was lifted for a navigation already cancelled");
+        assert!(control.stops(42), "the newer navigation's stop was undone");
+    }
+
+    #[test]
+    fn an_uncommitted_navigation_gives_the_shown_document_its_script_back() {
+        let control = ViewControl::new();
+        control.begin_nav(1);
+        control.commit_nav(1);
+        assert!(control.end_load(1));
+        control.stop_all();
+        control.begin_nav(2);
+        assert!(control.end_load(2));
+        assert!(control.end_uncommitted(2));
+        assert!(!control.stops(42));
+        assert!(!control.end_uncommitted(1), "a committed navigation is not ended again");
+    }
+
+    #[test]
+    fn a_cancel_stops_the_running_load_and_every_earlier_one() {
+        let control = ViewControl::new();
+        control.begin_nav(3);
+        assert!(!control.nav_cancelled(3));
+        control.commit_nav(3);
+        assert!(control.cancel_nav(3), "the load in progress was hit");
+        assert!(control.nav_cancelled(3) && control.nav_cancelled(2));
+        assert!(control.stops(42), "its running script stops");
+        assert!(!control.end_load(3), "the load reports the cancel");
+    }
+
+    #[test]
+    fn a_cancel_before_the_commit_spares_the_previous_document() {
+        let control = ViewControl::new();
+        control.begin_nav(1);
+        control.commit_nav(1);
+        assert!(control.end_load(1));
+        control.begin_nav(2);
+        assert!(control.cancel_nav(2), "the load in progress was hit");
+        assert!(control.nav_cancelled(2));
+        assert!(!control.stops(42), "the shown document keeps its script");
+        assert!(!control.end_load(2), "the load reports the cancel");
+    }
+
+    #[test]
+    fn a_commit_after_the_cancel_stops_the_new_documents_script() {
+        let control = ViewControl::new();
+        control.begin_nav(1);
+        assert!(control.cancel_nav(1));
+        assert!(!control.stops(42));
+        control.commit_nav(1);
+        assert!(
+            control.stops(42),
+            "none of the cancelled load's script runs"
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_the_load_ended_leaves_the_word_alone() {
+        let control = ViewControl::new();
+        control.begin_nav(1);
+        assert!(control.end_load(1));
+        assert!(!control.cancel_nav(1), "no load in progress");
+        assert!(!control.stops(7), "the finished document keeps its script");
+        assert!(!control.cancel_nav(0), "0 names no navigation");
+    }
+
+    #[test]
+    fn a_late_cancel_for_an_older_navigation_spares_the_newer_one() {
+        let control = ViewControl::new();
+        control.begin_nav(1);
+        control.begin_nav(2);
+        assert!(!control.cancel_nav(1), "navigation 2 is the one loading");
+        assert!(!control.nav_cancelled(2));
+        assert!(!control.stops(5));
+        assert_eq!(control.current_nav(), 2);
+        assert_eq!(control.loading_nav(), 2);
+    }
 
     #[test]
     fn writers_never_lower_the_word() {
@@ -409,6 +778,27 @@ mod tests {
         control.interrupt_turn(11);
         assert!(!control.clear_all(), "clear_all leaves a turn id");
         assert!(control.stops(11));
+    }
+
+    #[test]
+    fn the_last_writer_of_the_word_is_recorded() {
+        let control = ViewControl::new();
+        control.interrupt_turn(4);
+        let (word, tag, at, target) = control.word_writer();
+        assert_eq!((word, tag, target), (4, "watchdog", 4));
+        assert!(at > 0);
+        control.begin_nav(1);
+        control.commit_nav(1);
+        assert!(control.cancel_nav(1));
+        let (word, tag, _, target) = control.word_writer();
+        assert_eq!((word, tag, target), (ALL, "cancel", ALL));
+        assert!(control.clear_all());
+        let (word, tag, _, target) = control.word_writer();
+        assert_eq!((word, tag, target), (0, "clear", 0));
+        control.begin_nav(2);
+        control.cancel_nav(2);
+        control.commit_nav(2);
+        assert_eq!(control.word_writer().1, "commit");
     }
 
     #[test]
@@ -457,8 +847,19 @@ mod tests {
         assert_eq!(stamp.read(), None);
     }
 
+    // The three tests that bound how soon the watchdog thread stops a turn.
+    // Cargo runs the suite in parallel. On a loaded macOS runner the short
+    // turn below was stopped at 275 ms, and once at 396 ms, against a 200 ms
+    // ceiling, while these tests spun beside it. They share one lock.
+    fn one_watchdog_timing_test() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        // A panicking test must not poison the other two.
+        LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
     #[test]
     fn the_watchdog_stops_a_turn_past_its_budget_and_not_the_next() {
+        let _timing = one_watchdog_timing_test();
         let watchdog = Watchdog::spawn();
         let stamp = watchdog.thread_stamp();
         let view = watchdog.view_control();
@@ -487,11 +888,23 @@ mod tests {
         stamp.end_turn();
     }
 
+    /// After stopping a turn the watchdog sleeps a whole tick; a turn whose
+    /// budget ends sooner (the grace turn after a stop) wakes it. A missed
+    /// wake waits out that sleep, so the stop lands at about a tick after
+    /// the short turn opened. With the process's 250 ms tick that is too
+    /// close to what a loaded runner adds to a 30 ms turn (275 ms and
+    /// 396 ms were seen on CI): the watchdog here gets a tick of its own,
+    /// long enough that a missed wake lands far past any runner's slack,
+    /// and the ceiling sits between the two.
     #[test]
     fn a_short_turn_opened_while_the_watchdog_sleeps_a_tick_is_stopped_on_time() {
-        // After stopping a turn the watchdog sleeps a whole tick; a turn
-        // whose budget ends sooner (the grace turn after a stop) wakes it.
-        let watchdog = Watchdog::spawn();
+        const LONG_TICK: Duration = Duration::from_secs(2);
+        const SHORT_TURN: Duration = Duration::from_millis(30);
+        // Half a tick: a missed wake costs the whole tick, a slow runner
+        // has had up to about 970 ms on top of the 30 ms turn.
+        const CEILING: Duration = Duration::from_secs(1);
+        let _timing = one_watchdog_timing_test();
+        let watchdog = Watchdog::spawn_with_tick(LONG_TICK);
         let stamp = watchdog.thread_stamp();
         let view = watchdog.view_control();
         let first = stamp.begin_turn(&view, Duration::from_millis(0));
@@ -503,26 +916,42 @@ mod tests {
             );
             std::thread::yield_now();
         }
-        stamp.end_turn();
+        // With the stopped turn still open (the script is unwinding), wait
+        // for the watchdog to be in its tick-long sleep: its last look saw
+        // that turn, so it sleeps a tick, not until woken, and only the
+        // short turn's own wake can bring it back before the tick ends.
+        // Ending the turn first would let the watchdog sleep with nothing
+        // open, until any turn wakes it, which tests nothing.
         let started = Instant::now();
-        let short = stamp.begin_turn(&view, Duration::from_millis(30));
-        while !view.stops(short) {
+        while !watchdog.shared.sleep.lock().sleeping {
             assert!(
                 started.elapsed() < Duration::from_secs(2),
+                "the watchdog never went to sleep after the first stop"
+            );
+            std::thread::yield_now();
+        }
+        stamp.end_turn();
+        let started = Instant::now();
+        let short = stamp.begin_turn(&view, SHORT_TURN);
+        while !view.stops(short) {
+            assert!(
+                started.elapsed() < LONG_TICK + Duration::from_secs(2),
                 "the short turn was never stopped"
             );
             std::thread::yield_now();
         }
         let took = started.elapsed();
         stamp.end_turn();
+        assert!(took >= SHORT_TURN, "stopped early: {took:?}");
         assert!(
-            took < Duration::from_millis(200),
-            "stopped after {took:?}, a tick late"
+            took < CEILING,
+            "stopped after {took:?}: the short turn did not wake the watchdog from its {LONG_TICK:?} tick"
         );
     }
 
     #[test]
     fn the_watchdog_ends_with_its_last_owner_and_its_stamps_still_work() {
+        let _timing = one_watchdog_timing_test();
         let watchdog = Watchdog::spawn();
         let weak = Arc::downgrade(&watchdog.shared);
         let stamp = watchdog.thread_stamp();

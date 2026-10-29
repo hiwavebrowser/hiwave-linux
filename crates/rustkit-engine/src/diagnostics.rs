@@ -353,7 +353,7 @@ pub(crate) struct DiagnosticsSource<'a> {
     pub layout: Option<&'a LayoutBox>,
     pub scroll: (f32, f32),
     pub viewport: (u32, u32),
-    pub checked: &'a HashMap<usize, bool>,
+    pub checked: std::cell::Ref<'a, HashMap<usize, bool>>,
 }
 
 struct Builder<'a> {
@@ -1439,7 +1439,11 @@ impl Engine {
         let mut unavailable = BTreeMap::new();
         let viewport = match view.headless_bounds {
             Some(b) => (b.width, b.height),
-            None => self.presenter.surface_size(view.viewhost_id).unwrap_or((0, 0)),
+            None => self
+                .presenter
+                .as_ref()
+                .and_then(|presenter| presenter.surface_size(view.viewhost_id).ok())
+                .unwrap_or((0, 0)),
         };
         let commit = option_env!("HIWAVE_BUILD_COMMIT").map(str::to_string);
         if commit.is_none() {
@@ -1467,10 +1471,10 @@ impl Engine {
             .ok_or_else(|| EngineError::RenderError("No document available".into()))?;
         Ok(DiagnosticsSource {
             document,
-            layout: view.layout.as_ref(),
+            layout: view.layout.as_deref(),
             scroll: view.scroll_offset,
             viewport: page.viewport,
-            checked: &view.checked_states,
+            checked: view.lay.checked_states.borrow(),
         })
     }
 
@@ -1516,7 +1520,7 @@ impl Engine {
                 let mut stack = vec![src.document.root().clone()];
                 let mut found = None;
                 while let Some(n) = stack.pop() {
-                    match SelectorMatcher.node_matches(&n, sel, src.checked) {
+                    match SelectorMatcher.node_matches(&n, sel, &src.checked) {
                         None => return Err(EngineError::RenderError(format!("invalid selector: {sel}"))),
                         Some(true) => {
                             found = Some(n);

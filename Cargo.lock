@@ -2822,6 +2822,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hiwave-shield-intercept"
+version = "0.1.0"
+dependencies = [
+ "hiwave-shield",
+ "http",
+ "rustkit-net",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "hiwave-smoke"
 version = "0.1.0"
 dependencies = [
@@ -4315,8 +4326,11 @@ name = "parity-capture"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "hiwave-shield-intercept",
+ "png",
  "rustkit-engine",
  "rustkit-layout",
+ "rustkit-net",
  "rustkit-viewhost",
  "serde",
  "serde_json",
@@ -5367,6 +5381,7 @@ version = "0.1.0"
 dependencies = [
  "num_cpus",
  "rustkit-core",
+ "rustkit-css",
  "rustkit-dom",
  "rustkit-js",
  "serde",
@@ -5503,6 +5518,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wgpu 24.0.5",
  "windows 0.58.0",
 ]
 
@@ -5527,7 +5543,9 @@ dependencies = [
  "futures",
  "h2",
  "http",
+ "httpdate",
  "native-tls",
+ "psl",
  "rustls",
  "rustls-native-certs",
  "thiserror 1.0.69",
@@ -5644,6 +5662,7 @@ dependencies = [
  "bytemuck",
  "hashbrown 0.14.5",
  "png",
+ "pollster",
  "rustkit-common",
  "rustkit-css",
  "rustkit-layout",

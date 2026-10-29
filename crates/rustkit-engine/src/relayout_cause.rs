@@ -233,6 +233,9 @@ pub struct RelayoutStats {
     /// Relayouts that kept the laid-out tree: the build changed only what
     /// is painted, so the layout pass was skipped.
     pub layouts_skipped: u32,
+    /// Forced layouts: script read geometry after a DOM write in the same
+    /// task, so the page was laid out (not painted) for the read.
+    pub forced_layouts: u64,
     /// Time spent in them, layout and the paint it ends with.
     pub total_ms: f64,
     /// The most recent relayout's first cause.
@@ -382,6 +385,17 @@ impl Drop for StageTimer {
             stages.add(self.stage, ms);
             c.set(stages);
         });
+        // The same figure goes to the window-hold breakdown (W-gate).
+        crate::wgate::add(
+            match self.stage {
+                Stage::Build => crate::wgate::HoldStage::Build,
+                Stage::Layout => crate::wgate::HoldStage::Layout,
+                Stage::DisplayList => crate::wgate::HoldStage::DisplayList,
+                Stage::Snapshot => crate::wgate::HoldStage::Snapshot,
+                Stage::Render => crate::wgate::HoldStage::Render,
+            },
+            ms,
+        );
     }
 }
 
@@ -427,13 +441,29 @@ mod tests {
             url("https://example.com:8443/a/b?token=secret#frag"),
             "https://example.com:8443/a/b"
         );
+        assert_eq!(
+            url("http://user:pass@example.com/path?q=1"),
+            "http://example.com/path",
+            "userinfo must not reach the log"
+        );
+        assert_eq!(
+            url("wss://chat.example/socket?token=x"),
+            "wss://chat.example/socket"
+        );
+        assert_eq!(url("ws://chat.example/socket"), "ws://chat.example/socket");
         assert_eq!(url("about:blank"), "about:blank");
+        assert_eq!(
+            url("about:a-very-long-about-path-that-exceeds-thirty-two-chars"),
+            "about:a-very-long-about-path-that-exce",
+            "about: keeps at most 32 path characters"
+        );
         assert_eq!(
             url("data:text/html,<p>a long inline document body here</p>"),
             "data:"
         );
         assert_eq!(url("file:///Users/someone/page.html"), "file:");
         assert_eq!(url("blob:https://a.example/0b5e-uuid"), "blob:");
+        assert_eq!(url("javascript:alert(1)"), "javascript:");
     }
 
     #[test]

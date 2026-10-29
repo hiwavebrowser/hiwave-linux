@@ -22,7 +22,7 @@
 //! [module]: https://tc39.es/ecma262/#sec-abstract-module-records
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -41,6 +41,7 @@ use boa_parser::{Parser, Source};
 pub use loader::*;
 pub use namespace::ModuleNamespace;
 use source::SourceTextModule;
+pub(crate) use source::abandon_interrupted_module_body; // HIWAVE PATCH (interrupt)
 pub use synthetic::{SyntheticModule, SyntheticModuleInitializer};
 
 use crate::bytecompiler::ToJsString;
@@ -406,16 +407,15 @@ impl Module {
                 // 1. If hostDefined is not present, let hostDefined be empty.
 
                 // 2. Let pc be ! NewPromiseCapability(%Promise%).
-                let pc = PromiseCapability::new(
-                    &context.intrinsics().constructors().promise().constructor(),
-                    context,
-                )
-                .expect(
-                    "capability creation must always succeed when using the `%Promise%` intrinsic",
-                );
+                // HIWAVE PATCH (interrupt): built directly; constructing
+                // %Promise% can be interrupted.
+                let pc = PromiseCapability::new_intrinsic(context);
 
                 // 4. Perform InnerModuleLoading(state, module).
-                self.inner_load(
+                // HIWAVE PATCH (interrupt): only a runtime limit (the
+                // interrupt) stopping the final `resolve` makes this fail.
+                // That ends the embedder's turn; the load stays pending.
+                drop(self.inner_load(
                     // 3. Let state be the GraphLoadingState Record {
                     //     [[IsLoading]]: true, [[PendingModulesCount]]: 1, [[Visited]]: « »,
                     //     [[PromiseCapability]]: pc, [[HostDefined]]: hostDefined
@@ -427,7 +427,7 @@ impl Module {
                         visited: RefCell::default(),
                     }),
                     context,
-                );
+                )); // HIWAVE PATCH (interrupt): closes `drop(`
 
                 // 5. Return pc.[[Promise]].
                 JsPromise::from_object(pc.promise().clone())
@@ -440,15 +440,17 @@ impl Module {
     /// Abstract operation [`InnerModuleLoading`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-InnerModuleLoading
-    fn inner_load(&self, state: &Rc<GraphLoadingState>, context: &mut Context) {
+    // HIWAVE PATCH (interrupt): returns the error of the `resolve` call
+    // below (was `.expect`), which the interrupt can stop.
+    fn inner_load(&self, state: &Rc<GraphLoadingState>, context: &mut Context) -> JsResult<()> {
         // 1. Assert: state.[[IsLoading]] is true.
         assert!(state.loading.get());
 
         if let ModuleKind::SourceText(src) = self.kind() {
             // continues on `inner_load
-            src.inner_load(self, state, context);
+            src.inner_load(self, state, context)?;
             if !state.loading.get() {
-                return;
+                return Ok(());
             }
         }
 
@@ -470,10 +472,10 @@ impl Module {
             state
                 .capability
                 .resolve()
-                .call(&JsValue::undefined(), &[], context)
-                .expect("marking a module as loaded should not fail");
+                .call(&JsValue::undefined(), &[], context)?; // HIWAVE PATCH (interrupt): `?`
         }
         // 6. Return unused.
+        Ok(()) // HIWAVE PATCH (interrupt): returns `JsResult`
     }
 
     /// Abstract method [`GetExportedNames([exportStarSet])`][spec].
@@ -648,34 +650,47 @@ impl Module {
     #[allow(dropping_copy_types)]
     #[inline]
     pub fn load_link_evaluate(&self, context: &mut Context) -> JsPromise {
-        self.load(context)
-            .then(
-                Some(
-                    NativeFunction::from_copy_closure_with_captures(
-                        |_, _, module, context| {
-                            module.link(context)?;
-                            Ok(JsValue::undefined())
-                        },
-                        self.clone(),
-                    )
-                    .to_js_function(context.realm()),
-                ),
+        // HIWAVE PATCH (interrupt): `PerformPromiseThen` with a %Promise%
+        // capability built directly, instead of `JsPromise::then` (was
+        // `.expect`), whose species lookup and capability construction the
+        // interrupt can stop. Same result for these engine-made promises.
+        fn then(
+            promise: &JsPromise,
+            on_fulfilled: crate::object::JsFunction,
+            context: &mut Context,
+        ) -> JsPromise {
+            let (result, functions) = JsPromise::new_pending(context);
+            let capability = PromiseCapability {
+                promise: result.clone().into(),
+                functions,
+            };
+            builtins::Promise::perform_promise_then(
+                promise,
+                Some(on_fulfilled),
                 None,
+                Some(capability),
                 context,
-            )
-            .expect("`then` cannot fail for a native `JsPromise`")
-            .then(
-                Some(
-                    NativeFunction::from_copy_closure_with_captures(
-                        |_, _, module, context| Ok(module.evaluate(context)?.into()),
-                        self.clone(),
-                    )
-                    .to_js_function(context.realm()),
-                ),
-                None,
-                context,
-            )
-            .expect("`then` cannot fail for a native `JsPromise`")
+            );
+            result
+        }
+        // END HIWAVE PATCH
+
+        let load = self.load(context);
+        let link = NativeFunction::from_copy_closure_with_captures(
+            |_, _, module, context| {
+                module.link(context)?;
+                Ok(JsValue::undefined())
+            },
+            self.clone(),
+        )
+        .to_js_function(context.realm());
+        let linked = then(&load, link, context);
+        let evaluate = NativeFunction::from_copy_closure_with_captures(
+            |_, _, module, context| Ok(module.evaluate(context)?.into()),
+            self.clone(),
+        )
+        .to_js_function(context.realm());
+        then(&linked, evaluate, context)
     }
 
     /// Abstract operation [`GetModuleNamespace ( module )`][spec].
@@ -795,6 +810,63 @@ impl<T: IntoIterator<Item = (JsString, NativeFunction)> + Clone> IntoJsModule fo
             context,
         )
     }
+}
+
+/// A dynamic `import()` whose promise rejected. The embedder drains these
+/// for its console mirror. Boa does not print them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicImportFailure {
+    /// The specifier the script passed to `import()`.
+    pub specifier: String,
+    /// Resolved module URL, or empty when the specifier did not resolve.
+    pub url: String,
+    /// Why the promise rejected.
+    pub reason: String,
+}
+
+thread_local! {
+    static DYNAMIC_IMPORT_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static DYNAMIC_IMPORT_FAILURES: RefCell<VecDeque<DynamicImportFailure>> =
+        const { RefCell::new(VecDeque::new()) };
+}
+
+const DYNAMIC_IMPORT_FAILURE_CAP: usize = 256;
+
+/// Marks the loader call that belongs to a dynamic `import()`, so a nested
+/// static dependency requested after the module is in hand is not one.
+pub fn enter_dynamic_import() {
+    DYNAMIC_IMPORT_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+}
+
+/// Leaves the dynamic-import loader scope opened by [`enter_dynamic_import`].
+pub fn exit_dynamic_import() {
+    DYNAMIC_IMPORT_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+}
+
+/// Whether the module loader is inside a dynamic `import()` load.
+#[must_use]
+pub fn in_dynamic_import() -> bool {
+    DYNAMIC_IMPORT_DEPTH.with(|depth| depth.get() > 0)
+}
+
+/// Records one rejected dynamic `import()` for [`take_dynamic_import_failures`].
+pub fn record_dynamic_import_failure(specifier: &str, url: &str, reason: &str) {
+    DYNAMIC_IMPORT_FAILURES.with(|slot| {
+        let mut failures = slot.borrow_mut();
+        if failures.len() >= DYNAMIC_IMPORT_FAILURE_CAP {
+            failures.pop_front();
+        }
+        failures.push_back(DynamicImportFailure {
+            specifier: specifier.to_string(),
+            url: url.to_string(),
+            reason: reason.to_string(),
+        });
+    });
+}
+
+/// Drains dynamic `import()` failures recorded since the last call.
+pub fn take_dynamic_import_failures() -> Vec<DynamicImportFailure> {
+    DYNAMIC_IMPORT_FAILURES.with(|slot| slot.borrow_mut().drain(..).collect())
 }
 
 #[test]

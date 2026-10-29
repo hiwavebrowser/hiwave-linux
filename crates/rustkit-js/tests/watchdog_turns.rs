@@ -78,8 +78,10 @@ fn try_catch_around_the_spin_cannot_swallow_the_stop() {
     );
     assert!(result.is_err() && stopped, "{result:?}");
     assert!(took < BUDGET + SLACK, "{took:?}");
+    // The `finally` runs (the stop's grace; a scheduler re-arms there), and
+    // the `catch` and what follows the statement do not.
     let (flags, stopped, _) = page.turn("caught + ',' + finished", BUDGET);
-    assert_eq!(flags.unwrap(), r#"String("0,0")"#);
+    assert_eq!(flags.unwrap(), r#"String("0,1")"#);
     assert!(!stopped);
 }
 
@@ -108,21 +110,36 @@ fn after_a_stop_the_same_runtime_runs_new_scripts_correctly() {
 
 #[test]
 fn an_interrupt_set_between_turns_does_not_kill_the_next_turn() {
+    // Nothing here is about time: the next turn must run whatever the
+    // word says. It gets a budget no loaded runner reaches, so a stop can
+    // only come from the stale word. With `BUDGET` (300 ms) the debug
+    // build's 10,000 iterations ran past it on a loaded Mac (load 50:
+    // 1 run in 10), and the watchdog's own stop read as the stale word's.
+    const NO_TIME_LIMIT: Duration = Duration::from_secs(60);
     let mut page = page();
     // The previous turn's id, set after it ended: as a watchdog or Stop
     // that fired just too late would.
-    page.runtime.begin_turn(&page.stamp, BUDGET);
+    page.runtime.begin_turn(&page.stamp, NO_TIME_LIMIT);
     let ended = page.stamp.current_turn();
     page.runtime.end_turn(&page.stamp);
     page.control.interrupt_turn(ended);
-    let (value, stopped, _) = page.turn(
+    let (value, stopped, took) = page.turn(
         "var n = 0; for (var i = 0; i < 10000; i++) { n++; } n",
-        BUDGET,
+        NO_TIME_LIMIT,
     );
-    assert_eq!(value.unwrap(), "Number(10000.0)");
+    let watchdog_stops = page._watchdog.turns_stopped();
+    assert_eq!(
+        value.as_deref(),
+        Ok("Number(10000.0)"),
+        "took {took:?}, watchdog stops {watchdog_stops}"
+    );
     assert!(
         !stopped,
-        "a word naming an ended turn is not this turn's stop"
+        "a word naming an ended turn is not this turn's stop (took {took:?}, watchdog stops {watchdog_stops})"
+    );
+    assert_eq!(
+        watchdog_stops, 0,
+        "the watchdog stopped a turn (took {took:?})"
     );
 }
 
@@ -284,6 +301,47 @@ fn bookkeeping_is_not_stopped_by_the_word() {
     assert_eq!(format!("{taken:?}"), r#"String("[1,2,3]")"#);
     // Page script in the same turn still is.
     assert!(page.runtime.evaluate_script("(function () {})()").is_err());
+    page.runtime.end_turn(&page.stamp);
+}
+
+/// The script burns its allowance, then the microtask drain resumes an
+/// async function and a promise reaction. Both call the host. The grace
+/// turn used to leave the host deadline in the past, so those calls threw
+/// an uncatchable error and the await path reported "async function was
+/// interrupted" with no `vm.check_interrupt` (the word still named the
+/// stopped turn).
+#[test]
+fn a_reaction_after_the_deadline_still_reaches_the_host() {
+    let mut page = page();
+    page.runtime
+        .register_host_function("probe", 0, Box::new(|_| rustkit_js::JsValue::Undefined))
+        .unwrap();
+    page.runtime
+        .evaluate_script("var canary = 'pending', reaction = 'none';")
+        .unwrap();
+    page.runtime
+        .begin_turn(&page.stamp, Duration::from_millis(40));
+    page.runtime
+        .set_execution_deadline(Some(Instant::now() + Duration::from_millis(40)));
+    let script = r#"
+        var gate = new Promise(function (resolve) { resolve(); });
+        async function STICKY_CANARY() {
+          await gate;
+          probe();
+          canary = 'ok';
+        }
+        STICKY_CANARY();
+        gate.then(function () { probe(); reaction = 'ran'; });
+        var t = Date.now();
+        while (Date.now() - t < 80) {}
+        probe();
+    "#;
+    let _ = page.runtime.evaluate_script(script);
+    let state = page
+        .runtime
+        .evaluate_script("canary + '|' + reaction")
+        .unwrap();
+    assert_eq!(format!("{state:?}"), r#"String("ok|ran")"#);
     page.runtime.end_turn(&page.stamp);
 }
 

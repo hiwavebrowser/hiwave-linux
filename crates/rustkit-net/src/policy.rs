@@ -8,11 +8,12 @@
 //! resource caps. A denied request returns [`Denial`]; script only ever sees
 //! an error, never the denied response.
 //!
-//! Deliberate limits (stated, not half-built): script requests carry no
-//! cookies (there is no cookie jar to partition; `credentials` degrades to
-//! `omit` on the wire, though CORS is still checked as if the page had asked
-//! for credentials), responses arrive whole (no streaming bodies), and
-//! `WebSocket`/`EventSource`/`sendBeacon` are out of scope.
+//! Deliberate limits (stated, not half-built): only a request to the page's
+//! own origin sends and keeps cookies (unless it asked for `omit`); a
+//! cross-origin one carries none, whatever its `credentials`, though CORS is
+//! still checked as if the page had asked for credentials. Responses arrive
+//! whole (no streaming bodies), and `WebSocket`/`EventSource`/`sendBeacon`
+//! are out of scope.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -132,8 +133,9 @@ pub enum Denial {
     ResponseTooLarge,
     Timeout,
     BudgetExhausted,
-    /// The shield (EasyList) blocked it, exactly as it blocks a subresource.
-    Shield,
+    /// The shield (EasyList) blocked it, exactly as it blocks a subresource;
+    /// with its list and rule when the shield gave them.
+    Shield(Option<crate::BlockReason>),
     /// A module script whose response is not a JavaScript MIME type.
     BadMime(String),
     /// A module script whose response is not 2xx.
@@ -203,6 +205,55 @@ impl CancelToken {
 
     pub fn is_cancelled(&self) -> bool {
         *self.tx.borrow()
+    }
+}
+
+/// How long one request waited for its in-flight slots (the per-origin and
+/// per-page caps queue a request; they never refuse it). The policy stamps
+/// when the request starts waiting and when it has both slots; a watcher
+/// (the Inspector) reads it. Clones share the stamps.
+#[derive(Clone, Debug, Default)]
+pub struct SlotWait(Arc<SlotWaitStamps>);
+
+#[derive(Debug, Default)]
+struct SlotWaitStamps {
+    queued: std::sync::OnceLock<Instant>,
+    granted: std::sync::OnceLock<Instant>,
+}
+
+impl SlotWait {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The request starts waiting for a slot (the first call counts).
+    pub fn queued(&self) {
+        let _ = self.0.queued.set(Instant::now());
+    }
+
+    /// The request has its slot (the first call counts).
+    pub fn granted(&self) {
+        let _ = self.0.granted.set(Instant::now());
+    }
+
+    /// True while the request is queued behind a cap: it started waiting
+    /// and has no slot yet.
+    pub fn is_waiting(&self) -> bool {
+        self.0.queued.get().is_some() && self.0.granted.get().is_none()
+    }
+
+    /// True if the request was queued at `t`: it had started waiting and had
+    /// no slot yet. A slot freed by a request that hit the same deadline
+    /// arrives after it, so it does not count.
+    pub fn waiting_at(&self, t: Instant) -> bool {
+        self.0.queued.get().is_some_and(|q| *q <= t) && self.0.granted.get().map_or(true, |g| *g >= t)
+    }
+
+    /// Time spent waiting for slots, up to now if it still is; `None` if the
+    /// request never reached the queue (refused first, or not yet started).
+    pub fn waited(&self) -> Option<Duration> {
+        let queued = *self.0.queued.get()?;
+        Some(self.0.granted.get().copied().unwrap_or_else(Instant::now).saturating_duration_since(queued))
     }
 }
 
@@ -341,7 +392,7 @@ fn split_list(v: Option<&str>) -> Vec<String> {
 
 fn map_net_error(e: NetError) -> Denial {
     match e {
-        NetError::Blocked => Denial::Shield,
+        NetError::Blocked(reason) => Denial::Shield(reason),
         NetError::Timeout(_) | NetError::HttpError(rustkit_http::HttpError::Timeout) => Denial::Timeout,
         NetError::HttpError(rustkit_http::HttpError::AddressDenied(a)) => Denial::PrivateNetwork(a),
         NetError::HttpError(rustkit_http::HttpError::BodyTooLarge(_)) => Denial::ResponseTooLarge,
@@ -447,7 +498,18 @@ impl FetchPolicy {
         loader: &ResourceLoader,
         req: ScriptRequest,
     ) -> Result<ScriptResponse, Denial> {
-        self.execute_raced(loader, req, None).await
+        self.execute_raced(loader, req, None, None).await
+    }
+
+    /// [`execute`](Self::execute) that stamps `wait` (when given) as the
+    /// request queues for, and gets, its in-flight slots.
+    pub async fn execute_waited(
+        &self,
+        loader: &ResourceLoader,
+        req: ScriptRequest,
+        wait: Option<&SlotWait>,
+    ) -> Result<ScriptResponse, Denial> {
+        self.execute_raced(loader, req, None, wait).await
     }
 
     /// [`execute`](Self::execute) that `token` can also end. An aborted
@@ -459,7 +521,7 @@ impl FetchPolicy {
         req: ScriptRequest,
         token: &CancelToken,
     ) -> Result<ScriptResponse, Denial> {
-        self.execute_raced(loader, req, Some(token)).await
+        self.execute_raced(loader, req, Some(token), None).await
     }
 
     async fn execute_raced(
@@ -467,6 +529,7 @@ impl FetchPolicy {
         loader: &ResourceLoader,
         req: ScriptRequest,
         token: Option<&CancelToken>,
+        wait: Option<&SlotWait>,
     ) -> Result<ScriptResponse, Denial> {
         let mut page = self.cancel.subscribe();
         let mut own = token.map(|t| t.tx.subscribe());
@@ -479,7 +542,7 @@ impl FetchPolicy {
                     None => std::future::pending::<()>().await,
                 }
             } => Err(Denial::Cancelled),
-            r = self.execute_governed(loader, req) => r,
+            r = self.execute_governed(loader, req, wait) => r,
         }
     }
 
@@ -487,6 +550,7 @@ impl FetchPolicy {
         &self,
         loader: &ResourceLoader,
         req: ScriptRequest,
+        wait: Option<&SlotWait>,
     ) -> Result<ScriptResponse, Denial> {
         if self.total.fetch_add(1, Ordering::SeqCst) >= self.limits.max_total_requests {
             self.total.fetch_sub(1, Ordering::SeqCst);
@@ -505,6 +569,9 @@ impl FetchPolicy {
             .entry(origin_key)
             .or_insert_with(|| Arc::new(Semaphore::new(self.limits.max_in_flight_per_origin)))
             .clone();
+        if let Some(w) = wait {
+            w.queued();
+        }
         let _origin_slot = origin_sem.acquire_owned().await.map_err(|_| Denial::BudgetExhausted)?;
         let _page_slot = self
             .page_slots
@@ -512,6 +579,9 @@ impl FetchPolicy {
             .acquire_owned()
             .await
             .map_err(|_| Denial::BudgetExhausted)?;
+        if let Some(w) = wait {
+            w.granted();
+        }
 
         match tokio::time::timeout(self.limits.timeout, self.run(loader, req)).await {
             Ok(r) => r,
@@ -521,8 +591,8 @@ impl FetchPolicy {
 
     /// Fetch one module script (static import, `<script type=module src>`).
     ///
-    /// Module fetches are always CORS-mode with same-origin credentials (and
-    /// cookies are never sent), go through the same budgets, per-hop vet,
+    /// Module fetches are always CORS-mode with same-origin credentials (so
+    /// only a module from the page's own origin carries cookies), go through the same budgets, per-hop vet,
     /// shield and CSP (`script-src`) as every other governed request, and
     /// must answer 2xx with a JavaScript MIME type. `referrer` is the
     /// importing module's URL; it is not sent (Referer is page-scoped).
@@ -530,11 +600,23 @@ impl FetchPolicy {
         &self,
         loader: &ResourceLoader,
         specifier_url: &Url,
+        referrer: &Url,
+    ) -> Result<ModuleSource, Denial> {
+        self.fetch_module_waited(loader, specifier_url, referrer, None).await
+    }
+
+    /// [`fetch_module`](Self::fetch_module) that stamps `wait` (see
+    /// [`execute_waited`](Self::execute_waited)).
+    pub async fn fetch_module_waited(
+        &self,
+        loader: &ResourceLoader,
+        specifier_url: &Url,
         _referrer: &Url,
+        wait: Option<&SlotWait>,
     ) -> Result<ModuleSource, Denial> {
         let mut req = ScriptRequest::get(specifier_url.clone());
         req.destination = RequestDestination::Script;
-        let r = self.execute(loader, req).await?;
+        let r = self.execute_waited(loader, req, wait).await?;
         if !(200..300).contains(&r.status) {
             return Err(Denial::BadStatus(r.status));
         }
@@ -775,7 +857,13 @@ impl FetchPolicy {
             RequestDestination::Script => RequestDestination::Script,
             _ => RequestDestination::Fetch,
         };
-        request.credentials = CredentialsMode::Omit;
+        // Cookies go with a request to the page's own origin that asked for
+        // credentials, and nowhere else.
+        request.credentials = match req.credentials {
+            CredentialsMode::Omit => CredentialsMode::Omit,
+            _ if cross || hop.tainted => CredentialsMode::Omit,
+            _ => CredentialsMode::SameOrigin,
+        };
         request.timeout = Some(self.limits.timeout);
         request.referrer = Some(self.page_url.clone());
         // The shared cache is keyed by URL alone, so only a same-origin GET
@@ -849,7 +937,7 @@ impl FetchPolicy {
             )
             .await
             .map_err(|e| match map_net_error(e) {
-                d @ (Denial::PrivateNetwork(_) | Denial::Shield | Denial::Timeout) => d,
+                d @ (Denial::PrivateNetwork(_) | Denial::Shield(_) | Denial::Timeout) => d,
                 other => Denial::Preflight(other.to_string()),
             })?;
         if !resp.status.is_success() {
@@ -1517,6 +1605,38 @@ mod tests {
         assert!(s.peak.load(Ordering::SeqCst) <= 2, "more than 2 in flight to one origin: {}", s.peak.load(Ordering::SeqCst));
     }
 
+    /// Dev-tools T2 (E): a request queued behind the per-origin cap says how
+    /// long it waited, and says it is still waiting until it has a slot.
+    #[tokio::test]
+    async fn a_request_queued_behind_the_cap_reports_its_wait() {
+        let s = serve_with(Duration::from_millis(300), |_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"ok")).await;
+        let limits = FetchLimits { max_in_flight_per_origin: 1, ..FetchLimits::default() };
+        let p = Arc::new(allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s.port],
+        ));
+        let l = Arc::new(loader());
+        let (first, second) = (SlotWait::new(), SlotWait::new());
+        assert_eq!(first.waited(), None, "not started");
+        let a = {
+            let (p, l, url, w) = (p.clone(), l.clone(), s.url("/a"), first.clone());
+            tokio::spawn(async move { p.execute_waited(&l, ScriptRequest::get(url), Some(&w)).await })
+        };
+        wait_until(|| s.seen().len() == 1).await;
+        let b = {
+            let (p, l, url, w) = (p.clone(), l.clone(), s.url("/b"), second.clone());
+            tokio::spawn(async move { p.execute_waited(&l, ScriptRequest::get(url), Some(&w)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(second.is_waiting(), "the second request should be queued behind the first");
+        assert!(!first.is_waiting());
+        a.await.unwrap().expect("first");
+        b.await.unwrap().expect("second");
+        assert!(!second.is_waiting());
+        assert!(first.waited().unwrap() < Duration::from_millis(100), "{:?}", first.waited());
+        assert!(second.waited().unwrap() >= Duration::from_millis(150), "{:?}", second.waited());
+    }
+
     // ---- cancellation (Z2-C5): navigating away must close the sockets ---------
 
     async fn wait_until(mut f: impl FnMut() -> bool) {
@@ -1734,16 +1854,53 @@ mod tests {
         ic.add_handler(Arc::new(BlockAds));
         let l = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(ic)).unwrap();
         let sub = l.fetch(Request::get(s.url("/ads/x.js"))).await;
-        assert!(matches!(sub, Err(NetError::Blocked)));
+        assert!(matches!(sub, Err(NetError::Blocked(None))));
         let p = allow_ports(page("http://page.test/"), &[s.port]);
         let r = p.execute(&l, ScriptRequest::get(s.url("/ads/x.js"))).await;
-        assert_eq!(r.unwrap_err(), Denial::Shield);
+        assert_eq!(r.unwrap_err(), Denial::Shield(None));
         assert_eq!(s.hits(), 0);
         // And a redirect hop into a blocked URL is blocked too.
         let to = format!("http://127.0.0.1:{}/ads/y.js", s.port);
         let r2 = serve(move |_| resp(302, &[("Location", &to), ("Access-Control-Allow-Origin", "*")], b"")).await;
         let p = allow_ports(page("http://page.test/"), &[s.port, r2.port]);
-        assert_eq!(p.execute(&l, ScriptRequest::get(r2.url("/"))).await.unwrap_err(), Denial::Shield);
+        assert_eq!(p.execute(&l, ScriptRequest::get(r2.url("/"))).await.unwrap_err(), Denial::Shield(None));
+        assert_eq!(s.hits(), 0);
+    }
+
+    /// Dev-tools T2: a shield that names its list and rule has them carried
+    /// to the caller, on a subresource's error and on a script's denial,
+    /// redirect hop included.
+    #[tokio::test]
+    async fn a_shield_block_carries_its_list_and_rule() {
+        struct BlockAdsBy;
+        impl InterceptHandler for BlockAdsBy {
+            fn intercept(&self, request: &Request) -> InterceptAction {
+                if request.url.path().contains("/ads/") {
+                    InterceptAction::BlockedBy(crate::BlockReason {
+                        list: "EasyList".into(),
+                        rule: Some("/ads/*$script".into()),
+                    })
+                } else {
+                    InterceptAction::Allow
+                }
+            }
+        }
+        let want = crate::BlockReason { list: "EasyList".into(), rule: Some("/ads/*$script".into()) };
+        let s = serve(|_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"ad")).await;
+        let mut ic = RequestInterceptor::new();
+        ic.add_handler(Arc::new(BlockAdsBy));
+        let l = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(ic)).unwrap();
+        match l.fetch(Request::get(s.url("/ads/x.js"))).await {
+            Err(NetError::Blocked(Some(reason))) => assert_eq!(reason, want),
+            other => panic!("not blocked with a reason: {other:?}"),
+        }
+        let p = allow_ports(page("http://page.test/"), &[s.port]);
+        let r = p.execute(&l, ScriptRequest::get(s.url("/ads/x.js"))).await;
+        assert_eq!(r.unwrap_err(), Denial::Shield(Some(want.clone())));
+        let to = format!("http://127.0.0.1:{}/ads/y.js", s.port);
+        let r2 = serve(move |_| resp(302, &[("Location", &to), ("Access-Control-Allow-Origin", "*")], b"")).await;
+        let p = allow_ports(page("http://page.test/"), &[s.port, r2.port]);
+        assert_eq!(p.execute(&l, ScriptRequest::get(r2.url("/"))).await.unwrap_err(), Denial::Shield(Some(want)));
         assert_eq!(s.hits(), 0);
     }
 
@@ -2036,7 +2193,7 @@ mod tests {
         ic.add_handler(Arc::new(BlockAds));
         let l = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(ic)).unwrap();
         let p = allow_ports(page("http://page.test/"), &[s.port]);
-        assert_eq!(module(&p, &l, &s.url("/ads/m.js")).await.unwrap_err(), Denial::Shield);
+        assert_eq!(module(&p, &l, &s.url("/ads/m.js")).await.unwrap_err(), Denial::Shield(None));
         assert_eq!(s.hits(), 0);
 
         // script-src, not connect-src, governs modules; 'self' and * work.

@@ -5,6 +5,7 @@ exclude = ["third_party/boa_engine"]
 members = [
     "crates/hiwave-core",
     "crates/hiwave-shield",
+    "crates/hiwave-shield-intercept",
     "crates/hiwave-mcp",
     "crates/hiwave-vault",
     "crates/hiwave-shell",
@@ -100,6 +101,7 @@ rfd = "0.15"
 # Internal dependencies - HiWave crates
 hiwave-core = { path = "crates/hiwave-core" }
 hiwave-shield = { path = "crates/hiwave-shield" }
+hiwave-shield-intercept = { path = "crates/hiwave-shield-intercept" }
 hiwave-mcp = { path = "crates/hiwave-mcp" }
 hiwave-vault = { path = "crates/hiwave-vault" }
 hiwave-shell = { path = "crates/hiwave-shell" }
