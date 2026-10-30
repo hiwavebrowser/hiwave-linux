@@ -900,6 +900,52 @@ mod tests {
         assert!(line.contains("frames=\"set x > set x\""), "{line}");
         assert!(!line.contains('\n'), "{line}");
     }
+
+    #[test]
+    fn aliases_do_not_race_across_threads_or_leak_across_force_for_test() {
+        let _reset = Reset;
+        // 1. Simulate a test (like inspector_engine_tests) that calls
+        // force_for_test(Some(true)), records inline#1, and calls
+        // force_for_test(None) without dropping console_log::tests::Reset.
+        force_for_test(Some(true));
+        alias("inline#1", "https://stale-from-earlier-test.example/");
+        force_for_test(None);
+
+        // 2. Now start a fresh forced test on this thread and also run a
+        // concurrent Reset on another thread between alias() and console_message().
+        force_for_test(Some(true));
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        alias("chunk#thread-a", "https://thread-a.example/app.js");
+
+        std::thread::spawn(|| {
+            let _other_reset = Reset;
+            force_for_test(Some(true));
+            alias("chunk#thread-b", "https://thread-b.example/other.js");
+        })
+        .join()
+        .expect("other thread");
+
+        console_message(
+            LogLevel::Log,
+            "from-a",
+            Some(&ScriptPosition { path: "chunk#thread-a".into(), line: 1, column: 1 }),
+        );
+        console_message(
+            LogLevel::Log,
+            "inline-a",
+            Some(&ScriptPosition { path: "inline#1".into(), line: 1, column: 1 }),
+        );
+        let text = sink.lock().unwrap().join("\n");
+        assert!(
+            text.contains("console log https://thread-a.example/app.js:1:1 from-a"),
+            "concurrent Reset on another thread cleared this thread's alias: {text}"
+        );
+        assert!(
+            text.contains("console log inline#1:1:1 inline-a"),
+            "stale alias from before force_for_test(None) leaked into new test: {text}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "headless"))]

@@ -33354,8 +33354,9 @@ mod cascade_wire_tests {
     fn an_invalid_flex_shorthand_keeps_the_earlier_flex() {
         let e = engine();
         // Three bare numbers are invalid: the basis needs a unit unless it
-        // is `0` (`flex: 1 1 0` stays valid).
-        for junk in ["1 junk", "junk 5", "1 2 3 4", "1 2 junk", "1 2 3", "1 1 1"] {
+        // is `0` (`flex: 1 1 0` stays valid). Basis between two numbers
+        // (`2 10px 3`) is also invalid; numbers must be contiguous.
+        for junk in ["1 junk", "junk 5", "1 2 3 4", "1 2 junk", "1 2 3", "1 1 1", "2 10px 3"] {
             let mut s = ComputedStyle::default();
             e.lctx.apply_style_property(&mut s, "flex", "2 3 10px");
             e.lctx.apply_style_property(&mut s, "flex", junk);
@@ -33393,6 +33394,20 @@ mod cascade_wire_tests {
         e.lctx.apply_style_property(&mut s, "flex", "3 3 10px");
         e.lctx.apply_style_property(&mut s, "flex", "2 calc(100% - 20px)");
         assert_eq!((s.flex_grow, s.flex_shrink), (2.0, 1.0), "flex: <grow> <calc basis>");
+        let mut s = ComputedStyle::default();
+        e.lctx.apply_style_property(&mut s, "flex", "10px 2 3");
+        assert_eq!(
+            (s.flex_grow, s.flex_shrink, s.flex_basis),
+            (2.0, 3.0, rustkit_css::FlexBasis::Length(10.0)),
+            "flex: 10px 2 3 (<basis> <grow> <shrink>)"
+        );
+        let mut s = ComputedStyle::default();
+        e.lctx.apply_style_property(&mut s, "flex", "10px 1 0");
+        assert_eq!(
+            (s.flex_grow, s.flex_shrink, s.flex_basis),
+            (1.0, 0.0, rustkit_css::FlexBasis::Length(10.0)),
+            "flex: 10px 1 0 (<basis> <grow> <shrink>)"
+        );
     }
 
     #[test]
