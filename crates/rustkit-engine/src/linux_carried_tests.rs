@@ -68,10 +68,10 @@ fn selector_matches_compat(
     // The carried tests describe ancestors ROOT-FIRST (the old engine's
     // convention); the adopted matcher walks them NEAREST-FIRST. Reverse at
     // the seam so each side keeps its own convention.
-    let anc: Vec<(String, Vec<String>, Option<String>)> = ancestors
+    let anc: Vec<AncestorKey> = ancestors
         .iter()
         .rev()
-        .map(|a| (a.tag.clone(), a.classes.clone(), a.id.clone()))
+        .map(|a| (a.tag.clone(), a.classes.clone(), a.id.clone(), None))
         .collect();
     let anc: Vec<Ancestor> = anc.into_iter().map(std::rc::Rc::new).collect();
     let _ = e;
@@ -84,17 +84,17 @@ fn selector_matches_compat(
 fn shim_engine() -> Engine {
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     Engine {
-        font_loader: Arc::new(FontLoader::new()),
-        config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-        compositor: test_compositor(), renderer: None,
-        loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-        image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-        style_trace: std::cell::RefCell::new(None),
-        render_failing: std::collections::HashSet::new(),
-        building_view: std::cell::Cell::new(None),
-        building_focus: std::cell::Cell::new(None),
-        svg_cache: std::collections::HashMap::new(),
-    }
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
+        }
 }
 
     /// Carry `position` and the offsets from the computed style onto the
@@ -546,16 +546,16 @@ mod box_shadow_paint_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         }
     }
     /// The BoxShadow commands themselves, not their Debug rendering.
@@ -729,15 +729,18 @@ mod box_shorthand_and_auto_margins {
             #c{width:400px;height:50px;margin:0 auto}</style></head>
             <body><div id=c>x</div></body></html>"#;
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let e = Engine { font_loader: Arc::new(FontLoader::new()), config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+        let e = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(), };
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
+        };
         let doc = Document::parse_html(html).expect("parse");
         let mut l = e.build_layout_from_document(&doc, &[]);
         l.layout(&rustkit_layout::Dimensions {
@@ -764,15 +767,18 @@ mod canvas_background_propagation {
 
     fn first_command(html: &str) -> String {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let e = Engine { font_loader: Arc::new(FontLoader::new()), config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+        let e = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(), };
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
+        };
         let doc = Document::parse_html(html).expect("parse");
         let mut l = e.build_layout_from_document(&doc, &[]);
         l.layout(&rustkit_layout::Dimensions {
@@ -938,21 +944,16 @@ mod child_combinator_tests {
         // would pass every test above and change nothing on screen.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
-            font_loader: Arc::new(FontLoader::new()),
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: test_compositor(),
-            renderer: None,
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         };
         // Two elements carry .item. Only the FIRST is an immediate child of
         // .menu; the second sits under a nested ul. Before the fix both were
@@ -1101,21 +1102,16 @@ mod external_stylesheet_tests {
         // specificity because external is placed first.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
-            font_loader: Arc::new(FontLoader::new()),
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: test_compositor(),
-            renderer: None,
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         };
         let d = doc(r#"<html><head><style>p { width: 10px; }</style></head>
                       <body><div><p>x</p></div></body></html>"#);
@@ -1154,21 +1150,16 @@ mod external_stylesheet_tests {
     fn engine_for_test() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
-            font_loader: Arc::new(FontLoader::new()),
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: test_compositor(),
-            renderer: None,
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         }
     }
 
@@ -1218,16 +1209,16 @@ mod external_stylesheet_tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         };
         // Adopted engine: <style> collection returns parsed sheets rather
         // than raw text. Same two assertions, one level up.
@@ -1254,16 +1245,16 @@ mod flex_column_cross_stretch {
     fn laid_out(html: &str, w: f32) -> Vec<(bool, f32, f32)> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         };
         let doc = Document::parse_html(html).expect("parse");
         let mut layout = e.build_layout_from_document(&doc, &[]);
@@ -1387,7 +1378,9 @@ mod flex_property_tests {
         let s = st("flex: 1");
         assert_eq!(s.flex_grow, 1.0);
         assert_eq!(s.flex_shrink, 1.0);
-        assert_eq!(s.flex_basis, FlexBasis::Length(0.0), "flex: 1 must set basis 0, not auto");
+        // 0% since the 2026-10-15 adoption (css-flexbox-1 §7.1.1): still a
+        // zero basis, not auto; `content` only in an auto-height column.
+        assert_eq!(s.flex_basis, FlexBasis::Percent(0.0), "flex: 1 must set basis 0, not auto");
     }
 
     #[test]
@@ -1497,16 +1490,16 @@ mod flexbox_45_automatic_minimum {
         );
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         };
         let doc = Document::parse_html(&html).expect("parse");
         let mut layout = e.build_layout_from_document(&doc, &[]);
@@ -1535,16 +1528,16 @@ mod flexbox_45_automatic_minimum {
         );
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         };
         let doc = Document::parse_html(&html).expect("parse");
         let mut layout = e.build_layout_from_document(&doc, &[]);
@@ -1674,16 +1667,16 @@ mod font_size_cascade_absolutise {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         }
     }
 
@@ -1938,16 +1931,16 @@ mod grid_intrinsic_track_sizing {
         );
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         };
         let doc = Document::parse_html(&html).expect("parse");
         let mut layout = e.build_layout_from_document(&doc, &[]);
@@ -2041,16 +2034,16 @@ mod html_root_inheritance {
     fn text_style(html: &str) -> ComputedStyle {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         };
         let doc = Document::parse_html(html).expect("parse");
         let lay = e.build_layout_from_document(&doc, &[]);
@@ -2125,23 +2118,16 @@ mod inheritance_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
-            font_loader: Arc::new(FontLoader::new()),
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
-            compositor: test_compositor(),
-            renderer: None,
-            loader: Arc::new(
-                ResourceLoader::new(LoaderConfig::default()).expect("loader"),
-            ),
-            image_manager: Arc::new(ImageManager::new()),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         }
     }
 
@@ -2319,16 +2305,16 @@ mod l1_live_relative_units_reach_flex_and_grid {
     fn element_xs(html: &str) -> Vec<f32> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         };
         let doc = Document::parse_html(html).expect("parse");
         let mut layout = e.build_layout_from_document(&doc, &[]);
@@ -2735,16 +2721,16 @@ mod position_wire_tests {
         // resting on my own helper being called.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         };
         // The div carries text because the adopted builder PRUNES empty
         // elements — measured here: the same document with `<div class="pin">
@@ -2933,22 +2919,27 @@ mod rounded_rect_tests {
     }
     fn corners(css: &str) -> (Length, Length, Length, Length) {
         let s = st(css);
-        (s.border_top_left_radius, s.border_top_right_radius,
-         s.border_bottom_right_radius, s.border_bottom_left_radius)
+        let all = [&s.border_top_left_radius, &s.border_top_right_radius,
+                   &s.border_bottom_right_radius, &s.border_bottom_left_radius];
+        for c in all {
+            assert_eq!(c.horizontal, c.vertical, "a one-value radius is circular");
+        }
+        (s.border_top_left_radius.horizontal.clone(), s.border_top_right_radius.horizontal.clone(),
+         s.border_bottom_right_radius.horizontal.clone(), s.border_bottom_left_radius.horizontal.clone())
     }
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         }
     }
     /// The rounded-rect commands as VALUES.
@@ -3016,10 +3007,10 @@ mod rounded_rect_tests {
     fn a_longhands_set_one_corner_each() {
         let _gpu = gpu_serial();
         let s = st("border-top-left-radius: 7px; border-bottom-right-radius: 9px");
-        assert_eq!(s.border_top_left_radius, Length::Px(7.0));
-        assert_eq!(s.border_bottom_right_radius, Length::Px(9.0));
-        assert_eq!(s.border_top_right_radius, Length::Zero, "untouched corners stay 0");
-        assert_eq!(s.border_bottom_left_radius, Length::Zero);
+        assert_eq!(s.border_top_left_radius, rustkit_css::CornerRadius::circular(Length::Px(7.0)));
+        assert_eq!(s.border_bottom_right_radius, rustkit_css::CornerRadius::circular(Length::Px(9.0)));
+        assert_eq!(s.border_top_right_radius, rustkit_css::CornerRadius::circular(Length::Zero), "untouched corners stay 0");
+        assert_eq!(s.border_bottom_left_radius, rustkit_css::CornerRadius::circular(Length::Zero));
     }
 
     #[test]
@@ -3028,7 +3019,7 @@ mod rounded_rect_tests {
         let mut s = ComputedStyle::new();
         apply_inline_style_decls(&mut s, "border-radius: 8px");
         apply_inline_style_decls(&mut s, "border-radius: banana");
-        assert_eq!(s.border_top_left_radius, Length::Px(8.0),
+        assert_eq!(s.border_top_left_radius, rustkit_css::CornerRadius::circular(Length::Px(8.0)),
                    "a typo must not reset corners it never mentioned");
     }
 
@@ -3042,7 +3033,8 @@ mod rounded_rect_tests {
         );
         assert_eq!(r.len(), 1, "one background must emit one rounded command; got {r:?}");
         assert_eq!((r[0].top_left, r[0].top_right, r[0].bottom_right, r[0].bottom_left),
-                   (1.0, 2.0, 3.0, 4.0),
+                   (rustkit_layout::CornerRadius::circular(1.0), rustkit_layout::CornerRadius::circular(2.0),
+                    rustkit_layout::CornerRadius::circular(3.0), rustkit_layout::CornerRadius::circular(4.0)),
                    "each corner must arrive at its own value, in CSS order");
     }
 
@@ -3065,7 +3057,7 @@ mod rounded_rect_tests {
             r#"<html><head><style>div{background:#f00;width:200px;height:200px;font-size:32px;border-radius:2em}</style></head><body><div></div></body></html>"#,
         );
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].top_left, 64.0, "2em at font-size 32px is 64px");
+        assert_eq!(r[0].top_left, rustkit_layout::CornerRadius::circular(64.0), "2em at font-size 32px is 64px");
     }
 }
 
@@ -3169,16 +3161,16 @@ mod text_decoration_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
-            font_loader: Arc::new(FontLoader::new()),
-            config: EngineConfig::default(), views: HashMap::new(), viewhost: ViewHost::new(),
-            compositor: test_compositor(), renderer: None,
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(test_compositor())),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()), event_tx, event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            building_view: std::cell::Cell::new(None),
-            building_focus: std::cell::Cell::new(None),
-            svg_cache: std::collections::HashMap::new(),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: std::rc::Rc::new(layout_ctx::LayoutCtx::default()),
         }
     }
     fn display_list_for(html: &str) -> String {
@@ -3426,7 +3418,7 @@ mod x11_content_path {
         let mut engine = EngineBuilder::new().build().expect("engine");
 
         let parent = engine
-            .viewhost
+            .viewhost()
             .create_main_window(rustkit_viewhost::MainWindowConfig {
                 title: "rustkit x11 content path".to_string(),
                 width: 800,

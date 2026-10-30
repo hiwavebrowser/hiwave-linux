@@ -42,6 +42,19 @@ deps/wincairo/*
 # AI Orchestrator artifacts (large generated files)
 .ai/artifacts/
 .ai/cache/
+.ai/reports/
+.ai/logs/
+.ai/*
+
+# Tools (ignore all except parity_oracle, real_window, element_diff and inspector)
+tools/*
+!tools/parity_oracle/
+!tools/real_window/
+!tools/element_diff/
+!tools/inspector/
+tools/element_diff/out/
+tools/inspector/out/
+tools/real_window/out/
 
 # AI Orchestrator tool and roadmap are tracked
 # tools/ai-orchestrator/ - TRACKED
@@ -51,6 +64,8 @@ deps/wincairo/*
 
 # Internal planning docs
 docs/plans/
+/PARITY_PROGRESS.md
+parity-baseline/workorders/
 
 docs/unshared/*
 
@@ -61,3 +76,10 @@ docs/unshared/*
 # accident twice via `git add -A`; ignored so it cannot happen again.
 __pycache__/
 *.pyc
+*.pyo
+
+# Generated capture output (scripts/multisurface_canary.sh, scripts/builtins_capture.sh).
+multisurface-captures/
+builtins-captures/*.layout.json
+websuite/captures/*.ppm
+/scratch_*/

@@ -48,6 +48,11 @@ pub struct RuleAst {
     /// Media query lists of the `@media` blocks enclosing this rule,
     /// outermost first. The rule applies only where every one matches.
     pub media: Vec<String>,
+    /// Preludes of the `@container` blocks enclosing this rule, outermost
+    /// first (`card (width >= 200px)`): an optional container name, then
+    /// the size condition. The rule applies to an element only where each
+    /// one holds for its query container.
+    pub container: Vec<String>,
     /// Full dotted name of the cascade layer the rule is in, or `None` for
     /// an unlayered rule. An anonymous `@layer { }` block gets a name no
     /// author can write (see `anonymous_layer_name`).
@@ -62,11 +67,14 @@ enum AtBlock {
     /// An `@layer` block: its rules are in the named layer (anonymous when
     /// the prelude names none).
     Layer(String),
+    /// An `@container` block: its prelude is recorded on each of its rules.
+    Container(String),
     /// Its body is declarations (`@font-face`, `@page`): kept as one rule
     /// whose selector is the at-rule prelude, as before.
     Declarations,
     /// Nothing that styles an element in the static frame (`@keyframes`,
-    /// `@container`, `@supports not (...)`, unknown at-rules): skipped whole.
+    /// an `@container` with no condition, an `@supports` that is false,
+    /// unknown at-rules): skipped whole.
     Skip,
 }
 
@@ -79,11 +87,8 @@ fn at_block_kind(prelude: &str) -> AtBlock {
     let condition = at[name_end..].trim();
     match name.as_str() {
         "media" => AtBlock::Rules(Some(condition.to_string())),
-        // Only a negated condition is decided here: every positive feature
-        // query on the board's sites names something Chrome supports, and a
-        // property RustKit lacks is ignored at apply time anyway.
-        "supports" if condition.to_ascii_lowercase().starts_with("not") => AtBlock::Skip,
-        "supports" => AtBlock::Rules(None),
+        "supports" if supports_condition(condition) == Some(true) => AtBlock::Rules(None),
+        "container" if !condition.is_empty() => AtBlock::Container(condition.to_string()),
         "layer" if condition.is_empty() => AtBlock::Layer(anonymous_layer_name()),
         "layer" => AtBlock::Layer(condition.to_string()),
         "font-face" | "page" | "property" | "counter-style" | "font-palette-values" => {
@@ -91,6 +96,203 @@ fn at_block_kind(prelude: &str) -> AtBlock {
         }
         _ => AtBlock::Skip,
     }
+}
+
+/// Decide an `@supports` condition (CSS Conditional 3 §6.1, with
+/// `selector()` and `font-tech()`/`font-format()` from level 4) as Chrome
+/// does. `None` means the prelude does not parse, and the rule is dropped.
+///
+/// A declaration counts as supported unless it is plainly not: a property
+/// no Chromium build has, an empty value, or a `display`/`position` value
+/// outside the keywords. RustKit drops a property it lacks at apply time
+/// anyway, so a page's Chrome branch stays the one RustKit gets.
+fn supports_condition(s: &str) -> Option<bool> {
+    let s = s.trim();
+    if let Some(rest) = strip_keyword(s, "not") {
+        let (term, tail) = split_term(rest.trim_start())?;
+        if !tail.trim().is_empty() {
+            return None;
+        }
+        return supports_in_parens(term).map(|v| !v);
+    }
+    let (mut all, mut any, mut op, mut rest) = (true, false, None, s);
+    loop {
+        let (term, tail) = split_term(rest)?;
+        let v = supports_in_parens(term)?;
+        (all, any) = (all && v, any || v);
+        let tail = tail.trim_start();
+        if tail.is_empty() {
+            return Some(if op == Some("or") { any } else { all });
+        }
+        let (kw, after) = match (strip_keyword(tail, "and"), strip_keyword(tail, "or")) {
+            (Some(a), _) => ("and", a),
+            (_, Some(a)) => ("or", a),
+            _ => return None,
+        };
+        // `and` and `or` never mix without parentheses.
+        if op.is_some_and(|o| o != kw) {
+            return None;
+        }
+        (op, rest) = (Some(kw), after.trim_start());
+    }
+}
+
+/// `s` without a leading case-insensitive keyword that whitespace follows.
+fn strip_keyword<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    let head = s.get(..kw.len())?;
+    let rest = &s[kw.len()..];
+    (head.eq_ignore_ascii_case(kw) && rest.starts_with(char::is_whitespace)).then_some(rest)
+}
+
+/// Split one `( ... )` or `name( ... )` off the front of `s`.
+fn split_term(s: &str) -> Option<(&str, &str)> {
+    let open = s.find('(')?;
+    if !s[..open].chars().all(|c| c.is_alphanumeric() || c == '-') {
+        return None;
+    }
+    let (mut depth, mut quote, mut escaped) = (0usize, None, false);
+    for (i, c) in s.char_indices().skip_while(|&(i, _)| i < open) {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                '"' | '\'' => quote = Some(c),
+                '(' => depth += 1,
+                ')' if depth == 1 => return Some((&s[..=i], &s[i + 1..])),
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// One `<supports-in-parens>`, or a `selector()`/`font-*()` function.
+fn supports_in_parens(term: &str) -> Option<bool> {
+    let open = term.find('(')?;
+    let name = term[..open].to_ascii_lowercase();
+    let arg = term[open + 1..term.len() - 1].trim();
+    Some(match name.as_str() {
+        "" => {
+            if let Some(v) = supports_condition(arg) {
+                v
+            } else if let Some((prop, value)) = arg.split_once(':') {
+                supports_declaration(prop.trim(), value.trim())
+            } else {
+                false // <general-enclosed>: valid, but false
+            }
+        }
+        // Chrome knows every selector a page tests for except other
+        // engines' prefixed pseudo-classes (`:-moz-focusring`).
+        "selector" => {
+            let a = arg.to_ascii_lowercase();
+            !a.is_empty() && !a.contains(":-moz-") && !a.contains(":-ms-")
+        }
+        "font-format" => matches!(
+            arg.to_ascii_lowercase().as_str(),
+            "collection" | "opentype" | "truetype" | "woff" | "woff2"
+        ),
+        "font-tech" => matches!(
+            arg.to_ascii_lowercase().as_str(),
+            "features-opentype" | "variations" | "palettes" | "color-colrv0" | "color-colrv1"
+        ),
+        _ => false,
+    })
+}
+
+fn supports_declaration(prop: &str, value: &str) -> bool {
+    let value = value
+        .trim_end_matches("!important")
+        .trim()
+        .to_ascii_lowercase();
+    if prop.starts_with("--") {
+        return prop.len() > 2;
+    }
+    let prop = prop.to_ascii_lowercase();
+    let ident = prop
+        .trim_start_matches('-')
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if value.is_empty() || prop.is_empty() || !ident {
+        return false;
+    }
+    // Other engines' prefixes, and properties Chromium never shipped.
+    if ["-moz-", "-ms-", "-o-", "-khtml-"]
+        .iter()
+        .any(|p| prop.starts_with(p))
+        || matches!(
+            prop.as_str(),
+            "margin-trim"
+                | "hanging-punctuation"
+                | "-webkit-touch-callout"
+                | "-webkit-overflow-scrolling"
+        )
+    {
+        return false;
+    }
+    if matches!(
+        value.as_str(),
+        "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+    ) {
+        return true;
+    }
+    match prop.as_str() {
+        "display" => supports_display(&value),
+        "position" => matches!(
+            value.as_str(),
+            "static" | "relative" | "absolute" | "fixed" | "sticky"
+        ),
+        _ => true,
+    }
+}
+
+/// Chrome's `display` grammar: one legacy keyword, or up to one each of an
+/// outer type, an inner type and `list-item` (CSS Display 3 §2).
+fn supports_display(value: &str) -> bool {
+    const ONE: &[&str] = &[
+        "none",
+        "contents",
+        "inline-block",
+        "inline-flex",
+        "inline-grid",
+        "inline-table",
+        "table-row-group",
+        "table-header-group",
+        "table-footer-group",
+        "table-row",
+        "table-cell",
+        "table-column-group",
+        "table-column",
+        "table-caption",
+        "ruby-text",
+        "-webkit-box",
+        "-webkit-inline-box",
+        "-webkit-flex",
+        "-webkit-inline-flex",
+    ];
+    if ONE.contains(&value) {
+        return true;
+    }
+    let (mut outer, mut inner, mut item) = (false, None, false);
+    for t in value.split_whitespace() {
+        match t {
+            "block" | "inline" if !outer => outer = true,
+            "flow" | "flow-root" | "flex" | "grid" | "table" | "ruby" | "math"
+                if inner.is_none() =>
+            {
+                inner = Some(t)
+            }
+            "list-item" if !item => item = true,
+            _ => return false,
+        }
+    }
+    !item || matches!(inner, None | Some("flow" | "flow-root"))
 }
 
 /// A name for an anonymous `@layer { }` block. Each anonymous block is a
@@ -181,7 +383,9 @@ pub struct DeclarationAst {
 ///   in the block but the first leaked out and applied at every width, and
 ///   the `}` closing the block was glued onto the next selector, so the
 ///   first rule after every `@media` block (and after `@charset`) was lost.
-/// - It does not support CSS nesting or complex tokenization.
+/// - Nested style rules and nested `@media`/`@supports`/`@layer` (CSS
+///   Nesting 1) are flattened into ordinary rules with `&` resolved.
+/// - It does not do complex tokenization.
 /// - It attempts to be robust for common author CSS and RustKit test inputs.
 pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
     let mut out = StylesheetAst::default();
@@ -270,44 +474,17 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
                     AtBlock::Declarations => {}
                     kind => {
                         let body = take_block(&mut chars);
-                        let (media, layer) = match kind {
-                            AtBlock::Rules(media) => (media, None),
-                            AtBlock::Layer(name) => (None, Some(name)),
+                        let (media, container, layer) = match kind {
+                            AtBlock::Rules(media) => (media, None, None),
+                            AtBlock::Container(c) => (None, Some(c), None),
+                            AtBlock::Layer(name) => (None, None, Some(name)),
                             _ => {
                                 current_selector.clear();
                                 continue;
                             }
                         };
                         let inner = parse_stylesheet(&body)?;
-                        let base = out.rules.len();
-                        if let Some(name) = &layer {
-                            // The block declares its layer where it opens,
-                            // even when it is empty.
-                            out.layer_statements.push(LayerStatementAst {
-                                position: base,
-                                name: name.clone(),
-                                media: media.iter().cloned().collect(),
-                            });
-                        }
-                        for mut statement in inner.layer_statements {
-                            statement.position += base;
-                            if let Some(m) = &media {
-                                statement.media.insert(0, m.clone());
-                            }
-                            if let Some(outer) = &layer {
-                                statement.name = sublayer(outer, Some(&statement.name));
-                            }
-                            out.layer_statements.push(statement);
-                        }
-                        for mut rule in inner.rules {
-                            if let Some(m) = &media {
-                                rule.media.insert(0, m.clone());
-                            }
-                            if let Some(outer) = &layer {
-                                rule.layer = Some(sublayer(outer, rule.layer.as_deref()));
-                            }
-                            out.rules.push(rule);
-                        }
+                        merge_block(&mut out, inner, media, container, layer);
                         current_selector.clear();
                         continue;
                     }
@@ -340,6 +517,7 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
                     selector,
                     declarations: current_decls.clone(),
                     media: Vec::new(),
+                    container: Vec::new(),
                     layer: None,
                 });
             }
@@ -369,6 +547,62 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
         }
 
         let structural = quote.is_none() && depth == 0;
+
+        // A `{` at the top level of a declaration block opens a nested rule
+        // (CSS Nesting 1): `& > * { ... }`, `&:hover { ... }` (whose `:` put
+        // the reader in value position), `.child { ... }`, `@media (...) { ... }`.
+        // Before, its `}` closed the PARENT rule, and the parent's own `}`
+        // then glued onto the next selector, losing that rule as well.
+        // A custom property's value may hold a `{}` block; that stays a value.
+        if c == '{' && structural && in_value && current_property.trim().starts_with("--") {
+            current_value.push('{');
+            current_value.push_str(&take_block(&mut chars));
+            current_value.push('}');
+            continue;
+        }
+        if c == '{' && structural {
+            let prelude = if in_value {
+                format!("{}:{}", current_property, current_value)
+            } else {
+                current_property.clone()
+            };
+            current_property.clear();
+            current_value.clear();
+            in_value = false;
+            // Declarations before a nested rule stay with the parent, and
+            // come before the nested rule in source order.
+            let parent = current_selector.trim().to_string();
+            if !parent.is_empty() && !current_decls.is_empty() {
+                out.rules.push(RuleAst {
+                    selector: parent.clone(),
+                    declarations: std::mem::take(&mut current_decls),
+                    media: Vec::new(),
+                    container: Vec::new(),
+                    layer: None,
+                });
+            }
+            let body = take_block(&mut chars);
+            let prelude = prelude.trim();
+            if parent.is_empty() || prelude.is_empty() {
+                continue;
+            }
+            let (css, media, container, layer) = if prelude.starts_with('@') {
+                // A conditional group rule inside a style rule: its bare
+                // declarations apply to the parent selector.
+                match at_block_kind(prelude) {
+                    AtBlock::Rules(media) => (format!("{parent}{{{body}}}"), media, None, None),
+                    AtBlock::Container(c) => (format!("{parent}{{{body}}}"), None, Some(c), None),
+                    AtBlock::Layer(name) => (format!("{parent}{{{body}}}"), None, None, Some(name)),
+                    _ => continue,
+                }
+            } else {
+                let selector = nest_selector(&parent, prelude);
+                (format!("{selector}{{{body}}}"), None, None, None)
+            };
+            let inner = parse_stylesheet(&css)?;
+            merge_block(&mut out, inner, media, container, layer);
+            continue;
+        }
 
         if !in_value {
             // NOTE: no `structural` check here, deliberately. It looks like it
@@ -415,12 +649,166 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
                 selector,
                 declarations: current_decls,
                 media: Vec::new(),
+                container: Vec::new(),
                 layer: None,
             });
         }
     }
 
     Ok(out)
+}
+
+/// Append the rules and layer statements of a block's body to `out`, each
+/// inside the block's `@media` query list, `@container` condition and
+/// cascade layer.
+fn merge_block(
+    out: &mut StylesheetAst,
+    inner: StylesheetAst,
+    media: Option<String>,
+    container: Option<String>,
+    layer: Option<String>,
+) {
+    let base = out.rules.len();
+    if let Some(name) = &layer {
+        // The block declares its layer where it opens, even when it is empty.
+        out.layer_statements.push(LayerStatementAst {
+            position: base,
+            name: name.clone(),
+            media: media.iter().cloned().collect(),
+        });
+    }
+    for mut statement in inner.layer_statements {
+        statement.position += base;
+        if let Some(m) = &media {
+            statement.media.insert(0, m.clone());
+        }
+        if let Some(outer) = &layer {
+            statement.name = sublayer(outer, Some(&statement.name));
+        }
+        out.layer_statements.push(statement);
+    }
+    for mut rule in inner.rules {
+        if let Some(m) = &media {
+            rule.media.insert(0, m.clone());
+        }
+        if let Some(c) = &container {
+            rule.container.insert(0, c.clone());
+        }
+        if let Some(outer) = &layer {
+            rule.layer = Some(sublayer(outer, rule.layer.as_deref()));
+        }
+        out.rules.push(rule);
+    }
+}
+
+/// Split a selector list at its top-level commas (not inside `()`, `[]`,
+/// strings or escapes).
+fn split_selector_list(list: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut quote, mut start) = (0usize, None::<char>, 0usize);
+    let mut chars = list.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            _ if quote == Some(c) => quote = None,
+            _ if quote.is_some() => {}
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(list[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(list[start..].trim());
+    parts.retain(|p| !p.is_empty());
+    parts
+}
+
+/// Past this many selectors, a nested rule's parent list is kept as one
+/// `:is(...)` instead of being expanded (see `nest_selector`).
+const MAX_NESTED_EXPANSION: usize = 64;
+
+/// The selector a nested style rule matches (CSS Nesting 1 §3): `&` stands
+/// for the parent's selector list, and a nested selector without `&` is
+/// relative to it (`.c` is `& .c`, `> .c` is `& > .c`).
+///
+/// The spec reads `&` as `:is(<parent>)`, but the matcher's `:is()` takes
+/// compound arguments only, so a parent list is expanded instead, one
+/// selector per (parent, nested) pair, as preprocessors do: `.a, .b > p
+/// { & span {} }` is `.a span, .b > p span`. That matches the same elements
+/// wherever `&` leads its selector (every nested rule on the board's sites).
+/// Two known differences: each expanded selector keeps its own specificity
+/// rather than the list's maximum, and a `&` after a combinator
+/// (`.c &` under `.a .b`) requires `.c` above `.a` rather than anywhere
+/// above `.b`.
+fn nest_selector(parent: &str, nested: &str) -> String {
+    let parents = split_selector_list(parent);
+    let nested = split_selector_list(nested);
+    let parents: Vec<String> = if parents.len() * nested.len() <= MAX_NESTED_EXPANSION {
+        parents.into_iter().map(str::to_string).collect()
+    } else {
+        vec![format!(":is({})", parents.join(", "))]
+    };
+    nested
+        .iter()
+        .flat_map(|sel| parents.iter().map(move |amp| substitute_nesting(sel, amp)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `sel` with `amp` in place of each `&`, or `amp sel` when it has none.
+fn substitute_nesting(sel: &str, amp: &str) -> String {
+    if !has_nesting_selector(sel) {
+        return format!("{amp} {sel}");
+    }
+    let mut out = String::with_capacity(sel.len() + amp.len());
+    let mut quote = None::<char>;
+    let mut chars = sel.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+                continue;
+            }
+            _ if quote == Some(c) => quote = None,
+            _ if quote.is_some() => {}
+            '"' | '\'' => quote = Some(c),
+            '&' => {
+                out.push_str(amp);
+                continue;
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Whether a selector contains `&` outside strings and escapes.
+fn has_nesting_selector(sel: &str) -> bool {
+    let mut quote = None::<char>;
+    let mut chars = sel.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            _ if quote == Some(c) => quote = None,
+            _ if quote.is_some() => {}
+            '"' | '\'' => quote = Some(c),
+            '&' => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn flush_decl(
@@ -479,6 +867,22 @@ mod tests {
         assert_eq!(decls[0].value, "url(data:image/png;base64,AAAA)");
         assert_eq!(decls[1].property, "color", "color: red was being eaten");
         assert_eq!(decls[1].value, "red");
+    }
+
+    #[test]
+    fn a_prefixed_mask_with_a_quoted_svg_data_uri_parses_whole() {
+        // The icon idiom on the board sites: a `-webkit-` mask whose quoted
+        // SVG has `;`, `:`, `{`-free markup and quotes of the other kind.
+        let svg = "data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M0 0h16v16z'/></svg>";
+        let css = format!(
+            ".icon {{ -webkit-mask-image: url(\"{svg}\"); mask: url(\"{svg}\") no-repeat 50% / contain; background-color: currentColor; }}"
+        );
+        let ast = parse_stylesheet(&css).expect("parse");
+        let decls = &ast.rules[0].declarations;
+        let names: Vec<&str> = decls.iter().map(|d| d.property.as_str()).collect();
+        assert_eq!(names, ["-webkit-mask-image", "mask", "background-color"]);
+        assert_eq!(decls[0].value, format!("url(\"{svg}\")"));
+        assert_eq!(decls[1].value, format!("url(\"{svg}\") no-repeat 50% / contain"));
     }
 
     #[test]
@@ -632,12 +1036,53 @@ mod tests {
                 rule(".wide", &["screen", "(min-width: 800px)"]),
                 rule(".grid", &[]),
                 rule(".layered", &[]),
+                rule(".in-card", &[]),
                 rule("@font-face", &[]),
                 rule(".after", &[]),
             ]
         );
     }
 
+    #[test]
+    fn supports_blocks_apply_only_when_their_condition_holds() {
+        // #747's css_supports.html (#a-#e), then and/or/not, Tailwind v4's
+        // property-defaults query, and a group rule nested in a style rule.
+        // Before, every positive query applied and every `not` was skipped.
+        let css = r#"
+            @supports (display: grid) { .a { color: green } }
+            @supports not (display: frobnicate) { .b { color: green } }
+            @supports (display: frobnicate) { .c { color: red } }
+            @supports not (display: block) { .d { color: red } }
+            @supports not selector(:popover-open) { .e { color: red } }
+            @supports (display: grid) and (not (margin-trim: inline)) { .f { color: green } }
+            @supports (-moz-appearance: none) or (color: oklch(0 0 0)) { .g { color: green } }
+            @supports (display: grid) and (gap: 1px) or (color: red) { .h { color: red } }
+            @supports ((-webkit-hyphens: none) and (not (margin-trim: inline))) or ((-moz-orient: inline) and (not (color:rgb(from red r g b)))) { .tw { color: green } }
+            .n { color: green; @supports (display: frobnicate) { color: red } }
+            .after { color: green }
+        "#;
+        let selectors: Vec<String> = parse_stylesheet(css)
+            .expect("parse")
+            .rules
+            .into_iter()
+            .map(|r| r.selector)
+            .collect();
+        assert_eq!(selectors, [".a", ".b", ".f", ".g", ".tw", ".n", ".after"]);
+    }
+
+    #[test]
+    fn supports_conditions_follow_the_grammar() {
+        assert_eq!(supports_condition("(display: block flow-root)"), Some(true));
+        assert_eq!(
+            supports_condition("(display: inline list-item flex)"),
+            Some(false)
+        );
+        assert_eq!(
+            supports_condition("(--x: {a}) and font-format(woff2)"),
+            Some(true)
+        );
+        assert_eq!(supports_condition("display: grid"), None);
+    }
     #[test]
     fn layer_blocks_name_their_rules_and_statements_declare_the_order() {
         let css = r#"
@@ -678,6 +1123,162 @@ mod tests {
                 (3, "reset", 1),
                 (4, "x.y", 0),
             ]
+        );
+    }
+
+    fn selectors_and_decls(css: &str) -> Vec<(String, Vec<String>)> {
+        parse_stylesheet(css)
+            .expect("parse")
+            .rules
+            .into_iter()
+            .map(|r| {
+                let decls = r
+                    .declarations
+                    .into_iter()
+                    .map(|d| format!("{}:{}", d.property, d.value))
+                    .collect();
+                (r.selector, decls)
+            })
+            .collect()
+    }
+
+    fn sd(selector: &str, decls: &[&str]) -> (String, Vec<String>) {
+        (selector.to_string(), decls.iter().map(|d| d.to_string()).collect())
+    }
+
+    #[test]
+    fn nested_style_rules_resolve_against_the_parent_and_the_next_rule_survives() {
+        // linkedin's layered bundle stacks its hero with exactly this. Before,
+        // the nested `}` closed `.stack`, `grid-area` became part of a garbage
+        // property, and the stray `}` swallowed `.next`.
+        let css = ".stack { display: grid; & > * { grid-area: 1/-1; min-width: 0 } \
+                   & > [popover]:popover-open { grid-area: auto } } .next { color: red }";
+        assert_eq!(
+            selectors_and_decls(css),
+            vec![
+                sd(".stack", &["display:grid"]),
+                sd(".stack > *", &["grid-area:1/-1", "min-width:0"]),
+                sd(".stack > [popover]:popover-open", &["grid-area:auto"]),
+                sd(".next", &["color:red"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_selector_forms() {
+        let css = ".a { &:hover { color: red } &.b, .c & { color: blue } \
+                   .d { color: green } + .e { color: black } }";
+        assert_eq!(
+            selectors_and_decls(css),
+            vec![
+                sd(".a:hover", &["color:red"]),
+                sd(".a.b, .c .a", &["color:blue"]),
+                sd(".a .d", &["color:green"]),
+                sd(".a + .e", &["color:black"]),
+            ]
+        );
+        // A parent list expands per parent (the matcher's `:is()` takes
+        // compounds only), and nesting goes deep.
+        let css = ".x, .y > p { & span { color: red; &:first-child { color: blue } } }";
+        assert_eq!(
+            selectors_and_decls(css),
+            vec![
+                sd(".x span, .y > p span", &["color:red"]),
+                sd(".x span:first-child, .y > p span:first-child", &["color:blue"]),
+            ]
+        );
+        // Past the expansion cap, the parent list stays one `:is()`.
+        let parents: Vec<String> = (0..9).map(|i| format!(".p{i}")).collect();
+        let nested: Vec<String> = (0..8).map(|i| format!("& .n{i}")).collect();
+        let css = format!("{} {{ {} {{ color: red }} }}", parents.join(", "), nested.join(", "));
+        let ast = parse_stylesheet(&css).expect("parse");
+        assert!(ast.rules[0].selector.starts_with(":is(.p0, .p1,"), "{}", ast.rules[0].selector);
+        assert_eq!(split_selector_list(&ast.rules[0].selector).len(), 8);
+        // `&` inside a string or escaped is not the nesting selector.
+        let css = ".a { [data-x=\"&\"] & { color: red } }";
+        assert_eq!(selectors_and_decls(css), vec![sd("[data-x=\"&\"] .a", &["color:red"])]);
+    }
+
+    #[test]
+    fn declarations_after_a_nested_rule_stay_with_the_parent_in_source_order() {
+        let css = ".a { color: red; & .b { color: blue } width: 1px }";
+        assert_eq!(
+            selectors_and_decls(css),
+            vec![
+                sd(".a", &["color:red"]),
+                sd(".a .b", &["color:blue"]),
+                sd(".a", &["width:1px"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_group_rules_apply_to_the_parent() {
+        let css = ".a { color: red; @media (min-width: 800px) { color: blue; & .b { color: green } } \
+                   @layer top { width: 1px } @container (min-width: 1px) { width: 2px } } .c { color: black }";
+        let ast = parse_stylesheet(css).expect("parse");
+        let got: Vec<(&str, Vec<String>, Vec<String>, Option<&str>)> = ast
+            .rules
+            .iter()
+            .map(|r| {
+                (
+                    r.selector.as_str(),
+                    r.declarations.iter().map(|d| d.value.clone()).collect(),
+                    r.media.clone(),
+                    r.layer.as_deref(),
+                )
+            })
+            .collect();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            vec![
+                (".a", s(&["red"]), vec![], None),
+                (".a", s(&["blue"]), s(&["(min-width: 800px)"]), None),
+                (".a .b", s(&["green"]), s(&["(min-width: 800px)"]), None),
+                (".a", s(&["1px"]), vec![], Some("top")),
+                (".a", s(&["2px"]), vec![], None),
+                (".c", s(&["black"]), vec![], None),
+            ]
+        );
+        assert_eq!(ast.layer_statements[0].name, "top");
+    }
+
+    #[test]
+    fn container_blocks_record_their_condition_on_each_rule() {
+        let css = "@container card (width >= 200px) { .a { color: red } \
+                   @container (min-width: 1px) { .b { color: blue } } } \
+                   @media print { @container x (width > 0px) { .p { color: red } } } \
+                   @container { .bare { color: red } } .c { color: black }";
+        let ast = parse_stylesheet(css).expect("parse");
+        let got: Vec<(&str, Vec<&str>, Vec<&str>)> = ast
+            .rules
+            .iter()
+            .map(|r| {
+                (
+                    r.selector.as_str(),
+                    r.container.iter().map(String::as_str).collect(),
+                    r.media.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (".a", vec!["card (width >= 200px)"], vec![]),
+                (".b", vec!["card (width >= 200px)", "(min-width: 1px)"], vec![]),
+                (".p", vec!["x (width > 0px)"], vec!["print"]),
+                (".c", vec![], vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_custom_property_value_may_hold_a_block() {
+        let css = ".a { --x: { b: c }; color: red } .n { color: blue }";
+        assert_eq!(
+            selectors_and_decls(css),
+            vec![sd(".a", &["--x:{ b: c }", "color:red"]), sd(".n", &["color:blue"])]
         );
     }
 

@@ -1,10 +1,11 @@
 [workspace]
 resolver = "2"
-# Vendored with a patch, not a workspace member (see third_party/boa_gc/HIWAVE_PATCH.md).
-exclude = ["third_party/boa_gc"]
+# Vendored with a patch, not a workspace member (see third_party/boa_engine/PATCHES.md).
+exclude = ["third_party/boa_engine"]
 members = [
     "crates/hiwave-core",
     "crates/hiwave-shield",
+    "crates/hiwave-shield-intercept",
     "crates/hiwave-mcp",
     "crates/hiwave-vault",
     "crates/hiwave-shell",
@@ -100,6 +101,7 @@ rfd = "0.15"
 # Internal dependencies - HiWave crates
 hiwave-core = { path = "crates/hiwave-core" }
 hiwave-shield = { path = "crates/hiwave-shield" }
+hiwave-shield-intercept = { path = "crates/hiwave-shield-intercept" }
 hiwave-mcp = { path = "crates/hiwave-mcp" }
 hiwave-vault = { path = "crates/hiwave-vault" }
 hiwave-shell = { path = "crates/hiwave-shell" }
@@ -128,7 +130,18 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
-# boa_gc 0.20.0 with the weak-phase mark fix backported from 0.22.
-# Drop when Boa is upgraded to >= 0.22. See third_party/boa_gc/HIWAVE_PATCH.md.
+# Pixel-measurement builds (parity-capture for boards, campaigns, A/B frames).
+# Pixels do not depend on optimisation level; build time does. codegen-units=1
+# plus LTO makes the release binary's final crate compile single-threaded, and
+# under the fleet's load that is a 15-40 min build. This profile keeps opt-level
+# 3 but parallel codegen and no LTO. The cascade-speed lane must NOT use it:
+# its metric is wall-clock, which these settings change.
+[profile.parity]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
+
+# boa_engine 0.22.0 with a cross-thread interrupt word. See third_party/boa_engine/PATCHES.md.
 [patch.crates-io]
-boa_gc = { path = "third_party/boa_gc" }
+boa_engine = { path = "third_party/boa_engine" }

@@ -23,9 +23,12 @@ rustkit-layout = { path = "../rustkit-layout" }
 rustkit-js = { path = "../rustkit-js" }
 rustkit-bindings = { path = "../rustkit-bindings" }
 rustkit-net = { path = "../rustkit-net" }
+rustkit-http = { path = "../rustkit-http" }
 rustkit-image = { path = "../rustkit-image" }
 rustkit-svg = { path = "../rustkit-svg" }
 rustkit-renderer = { path = "../rustkit-renderer" }
+# The presenter names the texture a frame is drawn into
+wgpu = "24"
 
 # Async runtime
 tokio = { version = "1.42", features = ["sync", "time", "rt"] }
@@ -33,6 +36,10 @@ futures = "0.3"
 
 # URL handling
 url = "2.5"
+
+# Script-network bridge (script_net.rs): request/response types
+http = "1.2"
+bytes = "1.9"
 
 # Error handling
 thiserror = "1.0"
@@ -44,6 +51,7 @@ tracing = "0.1"
 base64 = "0.22"
 
 # JSON serialization
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Windows (conditional)
@@ -53,4 +61,16 @@ windows = { version = "0.58", features = ["Win32_Foundation"] }
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+
+# tests/macos_live_click.rs makes a real NSWindow and sends it NSEvents.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+cocoa = "0.25"
+objc = "0.2"
+raw-window-handle = "0.6"
+
+# Makes an NSWindow, which AppKit only allows on the main thread, so it runs
+# without the test harness.
+[[test]]
+name = "macos_live_click"
+harness = false
 

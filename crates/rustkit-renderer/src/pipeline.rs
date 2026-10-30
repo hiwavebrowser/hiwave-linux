@@ -426,19 +426,141 @@ pub fn create_color_glyph_pipeline(
     uniform_bind_group_layout: &wgpu::BindGroupLayout,
     texture_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> wgpu::RenderPipeline {
+    create_blended_blit_pipeline(
+        device,
+        surface_format,
+        uniform_bind_group_layout,
+        texture_bind_group_layout,
+        "Color Glyph Pipeline",
+        wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+    )
+}
+
+/// The blend an image quad is drawn with. Decoded images are straight
+/// (non-premultiplied) RGBA, so source-over is `SrcAlpha, OneMinusSrcAlpha`.
+///
+/// Images used to go through the blit pipeline, whose blend is REPLACE: a
+/// transparent texel overwrote the pixel under it with its own colour, so a
+/// PNG logo with a transparent surround painted as a logo in a black box.
+pub const IMAGE_BLEND: wgpu::BlendState = wgpu::BlendState::ALPHA_BLENDING;
+
+/// Create the image pipeline: the blit shader (samples real RGBA) composited
+/// source-over with `IMAGE_BLEND`, so an image's transparent and translucent
+/// texels, and the antialiased edge of a rounded clip, show what is behind
+/// them.
+pub fn create_image_pipeline(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    uniform_bind_group_layout: &wgpu::BindGroupLayout,
+    texture_bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    create_blended_blit_pipeline(
+        device,
+        surface_format,
+        uniform_bind_group_layout,
+        texture_bind_group_layout,
+        "Image Pipeline",
+        IMAGE_BLEND,
+    )
+}
+
+/// The blit shader with a blend other than the blit pipeline's REPLACE.
+fn create_blended_blit_pipeline(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    uniform_bind_group_layout: &wgpu::BindGroupLayout,
+    texture_bind_group_layout: &wgpu::BindGroupLayout,
+    label: &str,
+    blend: wgpu::BlendState,
+) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Color Glyph Shader"),
+        label: Some(label),
         source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
     });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Color Glyph Pipeline Layout"),
+        label: Some(label),
         bind_group_layouts: &[uniform_bind_group_layout, texture_bind_group_layout],
         push_constant_ranges: &[],
     });
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Color Glyph Pipeline"),
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[TextureVertex::LAYOUT],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// The CSS `filter` colour-matrix composite: a layer (premultiplied
+/// colour) laid premultiplied-over its target through a 4x5 matrix held in
+/// a uniform at group 2 (`shaders/filter_matrix.wgsl`).
+pub struct FilterMatrixPipeline {
+    pub pipeline: wgpu::RenderPipeline,
+    pub matrix_layout: wgpu::BindGroupLayout,
+}
+
+pub fn create_filter_matrix_pipeline(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    uniform_bind_group_layout: &wgpu::BindGroupLayout,
+    texture_bind_group_layout: &wgpu::BindGroupLayout,
+) -> FilterMatrixPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Filter Matrix Shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/filter_matrix.wgsl").into()),
+    });
+    let matrix_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("filter_matrix_bind_group_layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Filter Matrix Pipeline Layout"),
+        bind_group_layouts: &[uniform_bind_group_layout, texture_bind_group_layout, &matrix_layout],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Filter Matrix Pipeline"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -473,7 +595,8 @@ pub fn create_color_glyph_pipeline(
         },
         multiview: None,
         cache: None,
-    })
+    });
+    FilterMatrixPipeline { pipeline, matrix_layout }
 }
 
 /// Create the gradient rendering pipeline with uniform and storage buffers.

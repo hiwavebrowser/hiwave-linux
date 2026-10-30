@@ -12,7 +12,112 @@
 mod dom;
 mod inner_text;
 
-pub use dom::SelectorMatchFn;
+thread_local! {
+    static LOCATION_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+static LOCATION_HOOK: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// `url`, `replace` (`location.replace` / reload).
+pub type LocationDiag = fn(&str, bool);
+
+pub fn set_location_armed(on: bool) {
+    LOCATION_ARMED.with(|cell| cell.set(on));
+}
+
+pub fn set_location_hook(hook: Option<LocationDiag>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    LOCATION_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn note_location(url: &str, replace: bool) {
+    if !LOCATION_ARMED.with(std::cell::Cell::get) {
+        return;
+    }
+    let ptr = LOCATION_HOOK.load(std::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: stored from a `LocationDiag` function pointer. The engine
+    // installs one static function for the process.
+    let hook: LocationDiag = unsafe { std::mem::transmute(ptr) };
+    hook(url, replace);
+}
+mod net_bridge;
+pub use net_bridge::{NetDelivery, NetRequest};
+pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
+#[cfg(test)]
+mod net_bridge_tests;
+#[cfg(test)]
+mod web_xhr_tests;
+#[cfg(test)]
+mod web_fetch_tests;
+#[cfg(test)]
+mod web_components_tests;
+#[cfg(test)]
+mod web_streams_tests;
+#[cfg(test)]
+mod web_interfaces_tests;
+#[cfg(test)]
+mod web_blob_tests;
+#[cfg(test)]
+mod web_utils_tests;
+#[cfg(test)]
+mod dom_utils_tests;
+#[cfg(test)]
+mod web_cssom_tests;
+#[cfg(test)]
+mod node_apis_tests;
+#[cfg(test)]
+mod form_controls_tests;
+#[cfg(test)]
+mod web_history_tests;
+#[cfg(test)]
+mod web_scripts_tests;
+#[cfg(test)]
+mod meta_refresh_noscript_tests;
+#[cfg(test)]
+mod geometry_tests;
+#[cfg(test)]
+mod range_tests;
+#[cfg(test)]
+mod scroll_tests;
+#[cfg(test)]
+mod observers_tests;
+#[cfg(test)]
+mod shadow_tests;
+#[cfg(test)]
+mod rejection_event_tests;
+#[cfg(test)]
+mod event_target_ctor_tests;
+#[cfg(test)]
+mod legacy_tests;
+#[cfg(test)]
+mod reflect_tests;
+#[cfg(test)]
+mod traversal_tests;
+#[cfg(test)]
+mod document_members_tests;
+#[cfg(test)]
+mod web_intl_tests;
+#[cfg(test)]
+mod web_match_media_tests;
+#[cfg(test)]
+mod mutation_observer_tests;
+#[cfg(test)]
+mod web_messaging_tests;
+mod web_crypto;
+mod web_match_media;
+mod web_scroll;
+mod web_url;
+
+pub use dom::{
+    BoxGeometry, ControlWrites, ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn,
+};
 pub mod events;
 
 pub use events::{
@@ -52,6 +157,26 @@ pub enum BindingError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ListenerId(u64);
 
+/// An external classic script that script inserted
+/// ([`DomBindings::take_inserted_scripts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertedScript {
+    /// The element's raw NodeId.
+    pub node: usize,
+    /// Its absolute `src`.
+    pub url: String,
+    /// Not async (HTML §4.12.1.1: `async = false` cleared the element's
+    /// "force async"): it runs after the in-order scripts inserted before
+    /// it, not as soon as it arrives.
+    pub in_order: bool,
+    /// Where the page's script that inserted it was (its innermost frame
+    /// in a named script), when the runtime could place it.
+    pub inserted_by: Option<rustkit_js::ScriptPosition>,
+    /// When the page inserted it. The engine takes the queue later, at its
+    /// next drain; the gap is the script's `queued_ms` in the Inspector.
+    pub inserted_at: std::time::Instant,
+}
+
 impl ListenerId {
     fn new() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -84,6 +209,12 @@ pub struct MouseEventBindingData {
     pub alt_key: bool,
     pub shift_key: bool,
     pub meta_key: bool,
+    /// How far the pointer moved since the last move event.
+    pub movement_x: f64,
+    pub movement_y: f64,
+    /// The element the pointer came from or went to (raw NodeId), for the
+    /// over/out/enter/leave events.
+    pub related_target: Option<usize>,
 }
 
 /// Keyboard event data for JavaScript binding.
@@ -300,22 +431,32 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 ///
 /// An exception thrown inside an event listener or a timer callback does
 /// not propagate to whoever fired it (in a browser it goes to
-/// `window.onerror`), so those are caught here and queued in
-/// `__rustkit_errors` for the engine to collect. The one thing that does
+/// `window.onerror`), so those are caught here and handed to the runtime's
+/// host natives (`__rk.reportError`, which page script cannot reach) for the
+/// engine to collect. The one thing that does
 /// propagate is Boa's loop-iteration limit, which a script cannot catch.
 ///
 /// Timers run on a virtual clock the engine advances (`__rustkit_run_timers`),
 /// so a page's `setTimeout(f, 2000)` runs without the load waiting 2s of wall
 /// time. Promise reactions run when the enclosing evaluation returns, not
 /// between two timer callbacks.
+/// The Web API members the bindings report as unimplemented when page
+/// script reaches them (`__rk.unsupported` in the bindings' scripts, a
+/// native page script cannot reach). Nothing else is ever reported.
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 5] = [
+    ("XMLHttpRequest", "open(async=false)"),
+    ("XMLHttpRequest", "responseXML"),
+    ("CustomElementRegistry", "define(extends)"),
+    ("ReadableStream", "getReader(byob)"),
+    ("DOMParser", "parseFromString(XML)"),
+];
+
 const PAGE_LIFECYCLE_JS: &str = r#"
 (function () {
-    var errors = [];
-    window.__rustkit_errors = errors;
+    // Described natively (no page code runs) and queued in the runtime.
+    var reportError = __rk.reportError;
     function report(e) {
-        var msg;
-        try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
-        errors.push(msg);
+        try { reportError(e); } catch (_) {}
     }
 
     function makeEventTarget(target) {
@@ -350,6 +491,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     makeEventTarget(document);
 
     var now = 0, nextId = 1, timers = [];
+    // Real time, for the live turn's slice. Taken now, before page script
+    // can replace `Date.now`.
+    var realNow = Date.now;
     window.__rustkit_fire = function (targetName, type) {
         var target = targetName === 'document' ? document : window;
         target.dispatchEvent({
@@ -360,12 +504,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         });
     };
 
-    function schedule(cb, ms, args, repeat) {
+    function schedule(cb, ms, args, repeat, frame) {
         var delay = Number(ms) || 0;
         if (delay < 0) delay = 0;
         var id = nextId++;
         timers.push({ id: id, seq: id, due: now + delay, cb: cb, args: args,
-                      every: repeat ? Math.max(delay, 1) : 0 });
+                      every: repeat ? Math.max(delay, 1) : 0, frame: !!frame });
         return id;
     }
     function clearTimer(id) {
@@ -382,36 +526,165 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.clearTimeout = clearTimer;
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
-        return schedule(function () { cb(now); }, 16, [], false);
+        return schedule(function () { cb(now); }, 16, [], false, true);
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
+        if (typeof cb !== 'function') throw new TypeError("Failed to execute 'queueMicrotask' on 'Window': The callback provided as parameter 1 is not a function.");
         Promise.resolve().then(function () { try { cb(); } catch (e) { report(e); } });
     };
 
+    function call(timer) {
+        try {
+            if (typeof timer.cb === 'function') timer.cb.apply(window, timer.args);
+            else (0, eval)(String(timer.cb));
+        } catch (e) { report(e); }
+    }
     // Run due timers in (due, scheduling) order until the virtual clock
-    // would pass `horizon` ms or `max` callbacks have run.
-    window.__rustkit_run_timers = function (horizon, max) {
+    // would pass `horizon` ms or `max` callbacks have run. The load's clock
+    // has no frames, so an animation frame there is a 16 ms timer; the live
+    // loop keeps them for its one round a turn (`timersOnly`).
+    //
+    // `until` (live loop only) is a time on the real clock: once a callback
+    // ends past it, the rest wait for the next turn, as when `max` is hit.
+    function runTimers(horizon, max, timersOnly, until) {
         var ran = 0;
-        while (ran < max) {
+        while (ran < max && !(until && realNow() >= until)) {
             var best = -1;
             for (var i = 0; i < timers.length; i++) {
                 var t = timers[i];
+                if (timersOnly && t.frame) continue;
                 if (best < 0 || t.due < timers[best].due ||
                     (t.due === timers[best].due && t.seq < timers[best].seq)) best = i;
             }
             if (best < 0 || timers[best].due > horizon) break;
             var timer = timers[best];
-            now = timer.due;
-            if (timer.every) { timer.due += timer.every; timer.seq = nextId++; }
+            // A timer a cut-short live turn owed runs after the clock has
+            // moved on; the clock does not go back for it.
+            if (timer.due > now) now = timer.due;
+            // An interval that fell behind (a live turn held it back) is not
+            // caught up: its next run counts from now, as in a browser.
+            if (timer.every) {
+                timer.due += timer.every;
+                if (timer.due <= now) timer.due = now + timer.every;
+                timer.seq = nextId++;
+            }
             else timers.splice(best, 1);
             ran++;
-            try {
-                if (typeof timer.cb === 'function') timer.cb.apply(window, timer.args);
-                else (0, eval)(String(timer.cb));
-            } catch (e) { report(e); }
+            call(timer);
         }
         return ran;
+    }
+    window.__rustkit_run_timers = function (horizon, max) {
+        return runTimers(horizon, max, false);
+    };
+    // The load's clock, one callback at a time, so the host can publish a
+    // frame between them. A negative return is `-callbacks` and means the
+    // horizon still has timers due. Zero frame budget never stops early.
+    window.__rustkit_run_timers_framed = function (horizon, max, frameMs) {
+        var start = Date.now();
+        var ran = 0;
+        while (ran < max) {
+            var n = runTimers(horizon, 1, false);
+            if (n === 0) break;
+            ran += n;
+            if (frameMs > 0 && (Date.now() - start) >= frameMs) return -ran;
+        }
+        return ran;
+    };
+    // The live loop's clock: `delta` ms of real time have passed. Run what
+    // came due and leave the clock there, so a timer set next (by a click,
+    // say) counts from now and not from the last callback. With callbacks
+    // still owed (the cap, or the slice below), the clock moves on all the
+    // same: what is owed is overdue, and runs first on the next turn. (Left
+    // behind, the clock stood still under a `setTimeout(0)` chain, each new
+    // link due before every later timer and frame, which never ran.)
+    //
+    // A turn is one frame however long it took: after its timers, the
+    // animation frame callbacks that are due run once, at the turn's time.
+    // One asked for during the round is due a frame later. (As 16 ms timers
+    // a turn of 3 s ran 187 of them back to back.)
+    //
+    // `slice` ms of real time (0: no limit) bounds the turn's timers, as
+    // `max` does: a page that chains `setTimeout(0)` gets the window back
+    // between its callbacks, rather than once 1000 of them have run
+    // (seconds of them, until the watchdog stopped one part-way;
+    // 2026-10-22). The turn's frame still comes.
+    window.__rustkit_advance_timers = function (delta, max, slice) {
+        var target = now + delta;
+        var until = slice > 0 ? realNow() + slice : 0;
+        var ran = runTimers(target, max, true, until);
+        if (ran >= max) {
+            if (now < target) now = target;
+            return ran;
+        }
+        if (now < target) now = target;
+        var round = [];
+        for (var i = 0; i < timers.length; i++) {
+            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
+        }
+        for (var j = 0; j < round.length && ran < max; j++) {
+            // Cancelled by an earlier callback of the round.
+            var at = timers.indexOf(round[j]);
+            if (at < 0) continue;
+            timers.splice(at, 1);
+            ran++;
+            call(round[j]);
+        }
+        return ran;
+    };
+    // Like `__rustkit_advance_timers`, but stop between callbacks once
+    // `frameMs` of wall time has passed so the host can publish a frame.
+    // A negative return is `-callbacks` and means timers are still due.
+    // Zero frame budget never stops early. Callbacks that finish inside
+    // the budget run in this call, and the clock and animation-frame round
+    // match `__rustkit_advance_timers`.
+    //
+    // The elapsed delta is applied even when a callback ran long enough to
+    // stop the turn. Leaving the clock at that callback's due time drops
+    // the time already spent, so the next interval waits a full extra
+    // period after Stop. Timers still due are at or before `target` and
+    // run on the next turn.
+    //
+    // A turn that yields still has its frame (#776): its animation-frame
+    // round runs before it returns. Returning first, a `setTimeout(0)`
+    // chain that outlasted every frame starved `requestAnimationFrame`.
+    window.__rustkit_advance_timers_framed = function (delta, max, frameMs) {
+        var target = now + delta;
+        var start = Date.now();
+        var ran = 0;
+        var yielded = false;
+        while (ran < max) {
+            var n = runTimers(target, 1, true);
+            if (n === 0) break;
+            ran += n;
+            if (frameMs > 0 && (Date.now() - start) >= frameMs) {
+                yielded = true;
+                break;
+            }
+        }
+        if (now < target) now = target;
+        if (ran >= max) return yielded ? -ran : ran;
+        var round = [];
+        for (var i = 0; i < timers.length; i++) {
+            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
+        }
+        for (var j = 0; j < round.length && ran < max; j++) {
+            var at = timers.indexOf(round[j]);
+            if (at < 0) continue;
+            timers.splice(at, 1);
+            ran++;
+            call(round[j]);
+        }
+        return yielded ? -ran : ran;
+    };
+    // Ms until the earliest timer is due (0 when overdue), -1 with none set.
+    window.__rustkit_next_timer = function () {
+        var due = -1;
+        for (var i = 0; i < timers.length; i++) {
+            if (due < 0 || timers[i].due < due) due = timers[i].due;
+        }
+        return due < 0 ? -1 : Math.max(0, due - now);
     };
 })();
 "#;
@@ -445,6 +718,178 @@ pub enum DomDirty {
     Style,
 }
 
+/// The pending `DomDirty` bucket, and whether script has written to the
+/// DOM since the engine last published a layout. The bucket is the
+/// engine's to take when script settles; the second is what a geometry
+/// read inside the task asks, to lay the page out first (forced layout).
+#[derive(Debug, Default)]
+pub(crate) struct DirtyMark {
+    bucket: Cell<DomDirty>,
+    since_layout: Cell<bool>,
+}
+
+impl DirtyMark {
+    /// A script write that invalidated `bucket`.
+    pub(crate) fn mark(&self, bucket: DomDirty) {
+        if bucket != DomDirty::Clean {
+            self.bucket.set(self.bucket.get().max(bucket));
+            self.since_layout.set(true);
+        }
+    }
+
+    pub(crate) fn get(&self) -> DomDirty {
+        self.bucket.get()
+    }
+
+    fn take(&self) -> DomDirty {
+        self.bucket.replace(DomDirty::Clean)
+    }
+
+    /// Whether the published layout predates a script write.
+    pub(crate) fn written_since_layout(&self) -> bool {
+        self.since_layout.get()
+    }
+
+    /// A layout of the DOM as it is now was published.
+    pub(crate) fn laid_out(&self) {
+        self.since_layout.set(false);
+    }
+}
+
+/// Which kind of script DOM write dirtied the page. Diagnostics only: the
+/// engine logs it as the cause of the relayout that follows, and nothing
+/// decides on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MutationKind {
+    /// An attribute other than `style` set or removed.
+    Attribute,
+    /// A node inserted, removed or moved, or an element's children replaced
+    /// (`innerHTML`).
+    ChildList,
+    /// Text content (`textContent`, `innerText`, a text node's data).
+    Text,
+    /// The `style` attribute (`element.style.x = ...` writes through it).
+    Style,
+    /// A form control's value or checkedness.
+    FormValue,
+}
+
+impl MutationKind {
+    /// Every kind, in a fixed order (the order counts are kept and logged in).
+    pub const ALL: [MutationKind; 5] = [
+        MutationKind::Attribute,
+        MutationKind::ChildList,
+        MutationKind::Text,
+        MutationKind::Style,
+        MutationKind::FormValue,
+    ];
+
+    /// The snake_case name the relayout log uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MutationKind::Attribute => "attribute",
+            MutationKind::ChildList => "child_list",
+            MutationKind::Text => "text",
+            MutationKind::Style => "style",
+            MutationKind::FormValue => "form_value",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The script DOM writes that dirtied the page since the last take: the
+/// first one (its kind and node) and a count per kind. Kept beside
+/// `DomDirty`, marked by the same writes, taken by the engine when it takes
+/// the dirty bucket.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScriptMutations {
+    /// The first dirtying write: its kind and its node as `tag#id` (`tag`
+    /// alone without an id; empty for a non-element).
+    pub first: Option<(MutationKind, String)>,
+    counts: [u32; 5],
+}
+
+impl ScriptMutations {
+    /// Record one dirtying write. `node` is only called for the first one.
+    pub fn record(&mut self, kind: MutationKind, node: impl FnOnce() -> String) {
+        if self.first.is_none() {
+            self.first = Some((kind, node()));
+        }
+        let count = &mut self.counts[kind.index()];
+        *count = count.saturating_add(1);
+    }
+
+    /// How many writes of `kind` were recorded.
+    pub fn count(&self, kind: MutationKind) -> u32 {
+        self.counts[kind.index()]
+    }
+
+    /// Every write recorded, of any kind.
+    pub fn total(&self) -> u32 {
+        self.counts.iter().sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.first.is_none()
+    }
+}
+
+/// One script DOM write, per node (the incremental-restyle note's §3.1
+/// `MutationLog`). Recorded beside `DomDirty` and `ScriptMutations` by the
+/// same writes; the engine reads them to work out which nodes the writes can
+/// restyle. NodeIds are raw: a write to a node's data keeps its NodeId.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationRecord {
+    /// The node written to. For a [`MutationKind::ChildList`] record this is
+    /// the parent whose children changed.
+    pub node: usize,
+    pub kind: MutationKind,
+    /// The attribute set or removed (lowercased on an HTML element);
+    /// `checked` for a checkedness change.
+    pub attr: Option<String>,
+    /// The value before the write, kept for `class` and `id` only (`None`
+    /// also when the attribute was absent).
+    pub old: Option<String>,
+    /// [`MutationKind::ChildList`]: the node inserted, removed or moved
+    /// under `node`. `None` means all of `node`'s children were replaced
+    /// (`innerHTML`, `textContent`, `innerText` on an element).
+    pub child: Option<usize>,
+}
+
+/// The most records a [`MutationLog`] keeps between takes.
+pub const MUTATION_LOG_CAP: usize = 4096;
+
+/// The per-node script DOM writes since the last take, in write order.
+/// Past [`MUTATION_LOG_CAP`] records it gives up: `full` is set, the
+/// records are dropped, and the engine must treat the whole page as dirty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MutationLog {
+    pub records: Vec<MutationRecord>,
+    pub full: bool,
+}
+
+impl MutationLog {
+    /// Append one record, or overflow into `full`.
+    pub fn push(&mut self, record: MutationRecord) {
+        if self.full {
+            return;
+        }
+        if self.records.len() >= MUTATION_LOG_CAP {
+            self.full = true;
+            self.records = Vec::new();
+            return;
+        }
+        self.records.push(record);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty() && !self.full
+    }
+}
+
 /// DOM bindings context.
 pub struct DomBindings {
     runtime: RefCell<JsRuntime>,
@@ -456,19 +901,76 @@ pub struct DomBindings {
     _ipc_queue: RefCell<Vec<IpcMessage>>,
     /// Pending invalidation from script DOM writes (see `DomDirty`).
     /// Shared with the tree-write host functions, which mark it.
-    dirty: Rc<Cell<DomDirty>>,
+    dirty: Rc<DirtyMark>,
+    /// What the writes behind `dirty` were (see `ScriptMutations`).
+    mutations: Rc<RefCell<ScriptMutations>>,
+    /// The same writes per node (see `MutationLog`).
+    mutation_log: Rc<RefCell<MutationLog>>,
+    /// The scroll offset script reads and writes (see `web_scroll`).
+    scroll: web_scroll::SharedScroll,
 }
 
 impl DomBindings {
+    /// Install the test-only host re-entry probe on this page's runtime.
+    pub fn install_reentry_probe(&self) {
+        self.runtime.borrow_mut().install_reentry_probe();
+    }
+
     /// Create new DOM bindings.
     pub fn new(mut runtime: JsRuntime) -> Result<Self, BindingError> {
         debug!("Initializing DOM bindings");
 
+        // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
+        runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
         Self::inject_globals(&mut runtime)?;
         let dom_host = dom::SharedDomHost::default();
-        let dirty = Rc::new(Cell::new(DomDirty::Clean));
-        dom::install(&mut runtime, &dom_host, &dirty)?;
+        let dirty = Rc::new(DirtyMark::default());
+        let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
+        let mutation_log = Rc::new(RefCell::new(MutationLog::default()));
+        dom::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
+        // Event subclasses, geometry types and interface objects pages test with
+        // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
+        runtime.evaluate_script(include_str!("web_interfaces.js"))?;
+        // window.matchMedia over the engine's @media evaluator, MediaQueryList with
+        // change events after a resize (web_match_media.js); needs MediaQueryList and
+        // MediaQueryListEvent from web_interfaces.js.
+        web_match_media::install(&mut runtime)?;
+        // customElements and a constructible HTMLElement (web_components.js); wraps the
+        // tree and attribute mutators the DOM install just defined.
+        runtime.evaluate_with_host(include_str!("web_components.js"))?;
+        // attachShadow, ShadowRoot, slots, event retargeting (web_shadow.js).
+        runtime.evaluate_script(include_str!("web_shadow.js"))?;
+        // Reflected IDL attributes: link.href, script.type, img.alt, a.target, el.tabIndex, ... (web_reflect.js).
+        runtime.evaluate_script(include_str!("web_reflect.js"))?;
+        // NodeFilter, TreeWalker, NodeIterator, createTreeWalker/createNodeIterator (web_traversal.js).
+        runtime.evaluate_script(include_str!("web_traversal.js"))?;
+        // document.location/fonts/forms/visibilityState/..., FontFace (web_document.js) and
+        // DOMMatrix (web_dommatrix.js): members pages read without feature-testing.
+        runtime.evaluate_script(include_str!("web_document.js"))?;
+        runtime.evaluate_script(include_str!("web_dommatrix.js"))?;
+        // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
+        // insertRule writes into the <style>'s text, which the engine restyles from.
+        runtime.evaluate_script(include_str!("web_cssom.js"))?;
+        // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
+        runtime.evaluate_script(include_str!("web_forms.js"))?;
+        // history (pushState/replaceState/popstate) and the anchor URL parts;
+        // needs the interface objects and window's EventTarget (web_history.js).
+        runtime.evaluate_script(include_str!("web_history.js"))?;
+        // window.scrollTo/scrollBy/scrollX/scrollY, Element.scrollTop/scrollIntoView (web_scroll.js).
+        let scroll = web_scroll::SharedScroll::default();
+        dom_host.borrow_mut().scroll_state = scroll.clone();
+        web_scroll::install(&mut runtime, &scroll, &dom_host, &dirty)?;
+        // IntersectionObserver and ResizeObserver that report, over the geometry and
+        // scroll state (web_observers_live.js); replace the inert stubs.
+        runtime.evaluate_with_host(include_str!("web_observers_live.js"))?;
+        // MutationObserver that records every DOM write and delivers in a microtask; replaces
+        // the inert stub through the dom.rs write hook (web_mutation_observer.js).
+        runtime.evaluate_with_host(include_str!("web_mutation_observer.js"))?;
+        // postMessage, MessageChannel/MessagePort, MessageEvent, requestIdleCallback (web_messaging.js).
+        runtime.evaluate_with_host(include_str!("web_messaging.js"))?;
+        // Script elements script inserts are prepared and run (web_scripts.js).
+        runtime.evaluate_with_host(include_str!("web_scripts.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -477,19 +979,38 @@ impl DomBindings {
             dom_host,
             _ipc_queue: RefCell::new(Vec::new()),
             dirty,
+            mutations,
+            mutation_log,
+            scroll,
         })
     }
 
     /// Record that script invalidated `bucket`. Marks combine: the pending
     /// bucket only grows until `take_dirty`.
     pub fn mark_dirty(&self, bucket: DomDirty) {
-        self.dirty.set(self.dirty.get().max(bucket));
+        // The embedder's marks are for its own flush, not script writes:
+        // they do not make a geometry read lay the page out.
+        self.dirty.bucket.set(self.dirty.get().max(bucket));
     }
 
     /// The invalidation pending since the last call, which is reset to
     /// `Clean`. The engine calls this once when script settles.
     pub fn take_dirty(&self) -> DomDirty {
-        self.dirty.replace(DomDirty::Clean)
+        self.dirty.take()
+    }
+
+    /// The writes that dirtied the page since the last call (what, not how
+    /// much to redo: that is `take_dirty`), which are reset. Diagnostics
+    /// only. A `mark_dirty` from the embedder records nothing here.
+    pub fn take_script_mutations(&self) -> ScriptMutations {
+        self.mutations.take()
+    }
+
+    /// The writes since the last call, per node and in order (see
+    /// `MutationLog`), which are reset. Taken with `take_dirty`; a
+    /// `mark_dirty` from the embedder records nothing here.
+    pub fn take_mutation_log(&self) -> MutationLog {
+        self.mutation_log.take()
     }
 
     /// The `<input>`/`<textarea>` values script set since the last call, as
@@ -497,6 +1018,85 @@ impl DomBindings {
     /// edit state, which layout paints from, when it flushes `take_dirty`.
     pub fn take_value_writes(&self) -> Vec<(usize, String)> {
         self.dom_host.borrow_mut().take_value_writes()
+    }
+
+    /// The checkbox and radio checkedness changes since the last call, as
+    /// (raw NodeId, checkedness) in write order; `None` means the control
+    /// follows its `checked` attribute again. The engine styles and paints
+    /// a control from these, when it flushes `take_dirty`.
+    pub fn take_checked_writes(&self) -> Vec<(usize, Option<bool>)> {
+        self.dom_host.borrow_mut().take_checked_writes()
+    }
+
+    /// The forms whose `submit` event ran uncancelled since the last call,
+    /// as (the form's raw NodeId, the submitting button's). The engine
+    /// builds the submission; nothing navigates until it does.
+    pub fn take_submit_requests(&self) -> Vec<(usize, Option<usize>)> {
+        self.dom_host.borrow_mut().take_submit_requests()
+    }
+
+    /// Whether script has asked to navigate to a URL since the requests
+    /// were last taken. Takes nothing. A form submitted by script does not
+    /// count: the embedder may not follow it (only GET is wired).
+    pub fn navigation_requested(&self) -> bool {
+        self.dom_host.borrow().navigation_requested()
+    }
+
+    /// The absolute URLs script asked to navigate to since the last call
+    /// (`location.href = url`, `location.assign/replace`, `link.click()`),
+    /// oldest first. Nothing navigates until the embedder does.
+    pub fn take_navigation_requests(&self) -> Vec<String> {
+        self.take_navigation_requests_with_replace().into_iter().map(|(url, _)| url).collect()
+    }
+
+    /// [`Self::take_navigation_requests`], each with whether it replaces the
+    /// current history entry (`location.replace`, a reload, the document's
+    /// own URL again, a meta refresh) instead of adding one.
+    pub fn take_navigation_requests_with_replace(&self) -> Vec<(String, bool)> {
+        self.dom_host.borrow_mut().take_navigation_requests()
+    }
+
+    /// The external classic scripts script inserted since the last call,
+    /// oldest first. The engine fetches each and runs it as that element's
+    /// script ([`Self::set_current_script`], then [`Self::fire_script_event`]).
+    pub fn take_inserted_scripts(&self) -> Vec<InsertedScript> {
+        self.dom_host.borrow_mut().take_inserted_scripts()
+    }
+
+    /// Back `document.cookie` with the browser's jar: `get` answers the
+    /// cookies script may read for this document, `set` stores one
+    /// assignment. Without this, `document.cookie` is a string that keeps
+    /// nothing (a document with no URL has no cookies).
+    pub fn set_cookie_access(
+        &self,
+        get: Box<dyn Fn() -> String>,
+        set: Box<dyn Fn(&str)>,
+    ) -> Result<(), BindingError> {
+        let mut runtime = self.runtime.borrow_mut();
+        runtime.register_host_function("__rustkit_cookie_get", 0, Box::new(move |_| JsValue::String(get())))?;
+        runtime.register_host_function(
+            "__rustkit_cookie_set",
+            1,
+            Box::new(move |args| {
+                if let Some(JsValue::String(value)) = args.first() {
+                    set(value);
+                }
+                JsValue::Null
+            }),
+        )?;
+        runtime.evaluate_script(
+            r#"(function (g) {
+                var get = g.__rustkit_cookie_get, set = g.__rustkit_cookie_set;
+                delete g.__rustkit_cookie_get;
+                delete g.__rustkit_cookie_set;
+                Object.defineProperty(g.document, 'cookie', {
+                    get: function () { return get(); },
+                    set: function (v) { set(String(v)); },
+                    configurable: true, enumerable: true
+                });
+            })(globalThis);"#,
+        )?;
+        Ok(())
     }
 
     /// Tell script what the user typed into a control, so its `value`
@@ -572,9 +1172,7 @@ impl DomBindings {
                 requestAnimationFrame: function(callback) { return 0; },
                 cancelAnimationFrame: function(id) {},
                 getComputedStyle: function(element) { return {}; },
-                matchMedia: function(query) {
-                    return { matches: false, media: query, addEventListener: function() {} };
-                },
+                // matchMedia is web_match_media.rs's, over the engine's @media evaluator.
                 alert: function(msg) { console.log('[alert]', msg); },
                 confirm: function(msg) { console.log('[confirm]', msg); return false; },
                 prompt: function(msg, def) { console.log('[prompt]', msg); return def || null; }
@@ -585,6 +1183,31 @@ impl DomBindings {
         "#;
 
         runtime.evaluate_script(window_js)?;
+
+        // The screen, performance and navigator facts, and the window
+        // geometry, that pages read without feature-testing (web_platform.js).
+        runtime.evaluate_script(include_str!("web_platform.js"))?;
+
+        // Blob, File, FormData, AbortController/AbortSignal, structuredClone (web_blob.js).
+        runtime.evaluate_script(include_str!("web_blob.js"))?;
+
+        // The observer interfaces and requestIdleCallback (web_observers.js).
+        runtime.evaluate_script(include_str!("web_observers.js"))?;
+
+        // `URL` and `URLSearchParams` (parsing is the `url` crate's).
+        web_url::install(runtime)?;
+
+        // crypto.getRandomValues / randomUUID over the OS random source.
+        web_crypto::install(runtime)?;
+
+        // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
+        runtime.evaluate_script(include_str!("web_encoding.js"))?;
+
+        // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
+        runtime.evaluate_with_host(include_str!("web_streams.js"))?;
+
+        // Intl (en-US only) and the toLocale*String methods over it (web_intl.js).
+        runtime.evaluate_script(include_str!("web_intl.js"))?;
 
         // IPC bridge for communication with Rust
         let ipc_js = r#"
@@ -938,7 +1561,7 @@ impl DomBindings {
         "#;
 
         runtime.evaluate_script(input_element_js)?;
-        runtime.evaluate_script(PAGE_LIFECYCLE_JS)?;
+        runtime.evaluate_with_host(PAGE_LIFECYCLE_JS)?;
 
         debug!("Global objects injected");
         Ok(())
@@ -952,12 +1575,108 @@ impl DomBindings {
         self.dom_host.borrow_mut().matcher = Some(matcher);
     }
 
+    /// Publish where the layout put each element (by raw NodeId), for
+    /// `getBoundingClientRect`, `offsetWidth/Height/Top/Left`, `offsetParent`,
+    /// `clientWidth/Height` and `scrollWidth/Height`. The engine calls this
+    /// after a layout; script reads answer from the last one published.
+    pub fn set_geometry(&self, geometry: std::collections::HashMap<usize, BoxGeometry>) {
+        self.dirty.laid_out();
+        let mut host = self.dom_host.borrow_mut();
+        host.geometry_source = None;
+        host.set_hit_tester(None);
+        host.geometry = geometry;
+    }
+
+    /// The layout hit test `elementFromPoint` uses. `None` falls back to
+    /// the published boxes. A point answers null until a layout exists.
+    pub fn set_hit_tester(&self, tester: Option<HitTester>) {
+        self.dom_host.borrow_mut().set_hit_tester(tester);
+    }
+
+    /// Publish a new layout without measuring it: `source` builds the maps
+    /// `set_geometry` and `set_computed_styles` take, and runs on the first
+    /// script read of geometry or computed style after this call, once. The
+    /// maps of the previous layout are dropped here, so no read sees them.
+    pub fn set_geometry_source(&self, source: GeometrySource) {
+        // A layout is built from the live DOM, so it has every write so far.
+        self.dirty.laid_out();
+        let mut host = self.dom_host.borrow_mut();
+        host.geometry.clear();
+        host.computed.clear();
+        host.geometry_source = Some(source);
+        host.renew_forced_budget();
+    }
+
+    /// How a read of geometry after a script write in the same task lays
+    /// the page out (forced layout). The engine installs one with each
+    /// layout it publishes; a new document drops it. Without one, such a
+    /// read answers from the last layout.
+    pub fn set_forced_layout(&self, forced: Option<ForcedLayout>) {
+        self.dom_host.borrow_mut().forced_layout = forced;
+    }
+
+    /// Forced layouts since the last call, which resets the count and the
+    /// per-task budget (the engine calls this when a script task settles).
+    pub fn take_forced_layouts(&self) -> u64 {
+        self.dom_host.borrow_mut().take_forced_layouts()
+    }
+
+    /// How many times a source from `set_geometry_source` was built.
+    pub fn geometry_builds(&self) -> u64 {
+        self.dom_host.borrow().geometry_builds
+    }
+
+    /// Publish the view's scroll offset and the furthest it can scroll, for
+    /// `window.scrollX/scrollY` and the clamp on `scrollTo`. The engine calls
+    /// this after a layout and after the user scrolls.
+    pub fn set_scroll_state(&self, offset: (f32, f32), max: (f32, f32)) {
+        let mut s = self.scroll.borrow_mut();
+        s.x = offset.0;
+        s.y = offset.1;
+        s.max_x = max.0;
+        s.max_y = max.1;
+        drop(s);
+        self.dom_host.borrow_mut().note_scroll(offset);
+    }
+
+    /// Where script last scrolled the window to since the last call, if it
+    /// did. The engine applies it to the view when script settles.
+    pub fn take_scroll_request(&self) -> Option<(f32, f32)> {
+        self.scroll.borrow_mut().request.take()
+    }
+
+    /// Compute and deliver the IntersectionObserver and ResizeObserver
+    /// records from the geometry as it stands. The engine calls this after a
+    /// layout and after a scroll. Returns how many observers have targets.
+    pub fn tick_observers(&self) -> usize {
+        match self.evaluate("typeof __rkObserversTick === 'function' ? __rkObserversTick() : 0") {
+            Ok(JsValue::Number(n)) if n >= 0.0 => n as usize,
+            _ => 0,
+        }
+    }
+
+    /// Tell the page its window was scrolled by the user: fires `scroll`.
+    pub fn notify_scrolled(&self) {
+        let _ = self.evaluate("typeof __rkUserScrolled === 'function' && __rkUserScrolled()");
+    }
+
+    /// Publish the computed style of each laid-out element (raw NodeId to
+    /// `name\tvalue` lines joined by newlines), for `getComputedStyle`.
+    pub fn set_computed_styles(&self, styles: std::collections::HashMap<usize, String>) {
+        let mut host = self.dom_host.borrow_mut();
+        host.geometry_source = None;
+        host.computed = styles;
+    }
+
     /// Set the document.
     pub fn set_document(&self, document: Rc<Document>) -> Result<(), BindingError> {
         // Update state. Marks against the previous document are moot: the
         // new one gets a full layout of its own.
         self.window.borrow_mut().document = Some(document.clone());
-        self.dirty.set(DomDirty::Clean);
+        self.dirty.take();
+        self.dirty.laid_out();
+        self.mutations.take();
+        self.mutation_log.take();
 
         // Sync to JS
         let title = document.title().unwrap_or_default();
@@ -985,7 +1704,8 @@ impl DomBindings {
         let mut runtime = self.runtime.borrow_mut();
         runtime.evaluate_script(&format!(
             r#"
-            window.location.href = {:?};
+            if (window.__rustkit_location_sync) window.__rustkit_location_sync({:?});
+            else window.location.href = {:?};
             window.location.protocol = {:?};
             window.location.host = {:?};
             window.location.hostname = {:?};
@@ -995,7 +1715,9 @@ impl DomBindings {
             window.location.hash = {:?};
             window.location.origin = {:?};
             document.URL = {:?};
+            if (window.__rustkit_history_reset) window.__rustkit_history_reset();
             "#,
+            location.href,
             location.href,
             location.protocol,
             location.host,
@@ -1038,6 +1760,89 @@ impl DomBindings {
             .map_err(Into::into)
     }
 
+    /// Evaluate a page script as `path` (see
+    /// [`JsRuntime::evaluate_script_named`]).
+    pub fn evaluate_named(&self, script: &str, path: &str) -> Result<JsValue, BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_script_named(script, path)
+            .map_err(Into::into)
+    }
+
+    /// Hand the page's console calls to `handler`, with their positions
+    /// (see [`JsRuntime::set_console_handler`]).
+    pub fn set_console_handler(&self, handler: rustkit_js::ConsoleHandler) {
+        self.runtime.borrow_mut().set_console_handler(handler);
+    }
+
+    /// Also hand each console call to `handler` as types and lengths only
+    /// (see [`JsRuntime::set_console_shape_handler`]).
+    pub fn set_console_shape_handler(&self, handler: rustkit_js::ConsoleHandler) {
+        self.runtime.borrow_mut().set_console_shape_handler(handler);
+    }
+
+    /// Hand console calls over as they are made while `live` says so (see
+    /// [`JsRuntime::set_console_live`]).
+    pub fn set_console_live(&self, live: Option<rustkit_js::ConsoleLive>) {
+        self.runtime.borrow_mut().set_console_live(live);
+    }
+
+    /// Keep the number of console calls held for the next flush in
+    /// `counter` (see [`JsRuntime::set_console_held_counter`]).
+    pub fn set_console_held_counter(&self, counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>) {
+        self.runtime.borrow_mut().set_console_held_counter(counter);
+    }
+
+    /// Console arguments reach the handler as type and length only (see
+    /// [`JsRuntime::set_console_redaction`]).
+    pub fn set_console_redaction(&self, on: bool) {
+        self.runtime.borrow_mut().set_console_redaction(on);
+    }
+
+    /// Hand pending console calls to the console handler now.
+    pub fn flush_console(&self) {
+        self.runtime.borrow_mut().flush_console();
+    }
+
+    /// Diagnostics for an embedder that records them: describe each page
+    /// error ([`take_error_reports`](Self::take_error_reports)), with its
+    /// message text only when `keep_text` (see
+    /// [`JsRuntime::set_error_reports`]).
+    pub fn set_error_details(&self, on: bool, keep_text: bool) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().set_error_reports(on, keep_text);
+        Ok(())
+    }
+
+    /// Keep each named script's source so an error log can quote it. Off
+    /// drops what was kept. See [`JsRuntime::set_capture_script_sources`].
+    pub fn capture_script_sources(&self, on: bool) {
+        self.runtime.borrow_mut().set_capture_script_sources(on);
+    }
+
+    /// Source last evaluated as `path`, when capture is on.
+    pub fn script_source(&self, path: &str) -> Option<String> {
+        self.runtime.borrow().script_source(path)
+    }
+
+    /// Page errors since the last call (with
+    /// [`set_error_details`](Self::set_error_details) on): exceptions,
+    /// modules that threw after a top-level `await`, unhandled rejections.
+    pub fn take_error_reports(&self) -> Vec<rustkit_js::ErrorReport> {
+        self.runtime.borrow_mut().take_error_reports()
+    }
+
+    /// Unimplemented Web API members page script reached since the last
+    /// call: `(interface, member, times, first caller's position)`. Only
+    /// [`UNSUPPORTED_MEMBERS`] are ever returned.
+    pub fn take_unsupported_apis(&self) -> Vec<(String, String, u64, Option<rustkit_js::ScriptPosition>)> {
+        self.runtime
+            .borrow_mut()
+            .take_unsupported()
+            .into_iter()
+            .filter(|(i, m, _, _)| UNSUPPORTED_MEMBERS.contains(&(i.as_str(), m.as_str())))
+            .collect()
+    }
+
     /// Bound every loop a page script runs (see
     /// [`JsRuntime::set_loop_iteration_limit`]).
     pub fn set_loop_iteration_limit(&self, max_iterations: u64) {
@@ -1046,11 +1851,220 @@ impl DomBindings {
             .set_loop_iteration_limit(max_iterations);
     }
 
-    /// Set `document.readyState` (`loading` / `interactive` / `complete`).
-    pub fn set_ready_state(&self, state: &str) -> Result<(), BindingError> {
+    /// Stop script still running at `at` at its next host call (see
+    /// [`JsRuntime::set_execution_deadline`]); `None` lifts it.
+    pub fn set_execution_deadline(&self, at: Option<std::time::Instant>) {
+        self.runtime.borrow_mut().set_execution_deadline(at);
+    }
+
+    /// Whether the execution deadline has stopped script since it was
+    /// last set or asked about.
+    pub fn take_deadline_hit(&self) -> bool {
+        self.runtime.borrow_mut().take_deadline_hit()
+    }
+
+    /// How long past the deadline the stopped script ran before the host
+    /// call that ended it (see [`JsRuntime::take_deadline_overrun`]).
+    pub fn take_deadline_overrun(&self) -> Option<std::time::Duration> {
+        self.runtime.borrow_mut().take_deadline_overrun()
+    }
+
+    /// Let another thread stop this document's script through its view's
+    /// interrupt word (see [`JsRuntime::set_view_control`]).
+    pub fn set_view_control(&self, control: Option<std::sync::Arc<rustkit_js::ViewControl>>) {
+        self.runtime.borrow_mut().set_view_control(control);
+    }
+
+    /// Open a turn of script on `stamp`, stopped by the watchdog past
+    /// `budget` (see [`JsRuntime::begin_turn`]).
+    pub fn begin_turn(&self, stamp: &std::sync::Arc<rustkit_js::ThreadStamp>, budget: std::time::Duration) -> u64 {
+        self.runtime.borrow_mut().begin_turn(stamp, budget)
+    }
+
+    /// Close the turn [`DomBindings::begin_turn`] opened.
+    pub fn end_turn(&self, stamp: &rustkit_js::ThreadStamp) {
+        self.runtime.borrow_mut().end_turn(stamp);
+    }
+
+    /// Bound the number of microtask job iterations allowed per turn (see
+    /// [`JsRuntime::set_max_job_iterations`]).
+    pub fn set_max_job_iterations(&self, max_iterations: u64) {
         self.runtime
             .borrow_mut()
-            .evaluate_script(&format!("document.readyState = {:?};", state))?;
+            .set_max_job_iterations(max_iterations);
+    }
+
+    /// Run any pending jobs (microtasks and async completions).
+    pub fn run_jobs(&self) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .run_jobs()
+            .map_err(Into::into)
+    }
+
+    /// Name the `<script>` element being run, as `document.currentScript`
+    /// sees it; `None` between scripts. `node` is the element's raw NodeId.
+    pub fn set_current_script(&self, node: Option<usize>) -> Result<(), BindingError> {
+        let script = match node {
+            Some(id) => format!("document.__rkSetCurrentScript({id});"),
+            None => "document.__rkSetCurrentScript(null);".to_string(),
+        };
+        self.runtime.borrow_mut().evaluate_script(&script)?;
+        Ok(())
+    }
+
+    /// Fire `load` or `error` at a `<script>` element (by node id). Listener
+    /// exceptions are queued, see [`Self::take_reported_errors`].
+    pub fn fire_script_event(&self, node: usize, event_type: &str) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireOn({node}, {event_type:?});"
+        ))?;
+        Ok(())
+    }
+
+    /// Fire the user's mouse input at an element (by node id) as a trusted,
+    /// bubbling, cancelable `MouseEvent` (a `PointerEvent` for `pointer*`
+    /// and `click`; the enter and leave events neither bubble nor can be
+    /// cancelled). Returns false when a listener
+    /// called `preventDefault()`. Listener exceptions are queued, see
+    /// [`Self::take_reported_errors`].
+    pub fn fire_mouse_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        data: &MouseEventBindingData,
+    ) -> Result<bool, BindingError> {
+        let result = self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
+             screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
+             altKey: {}, shiftKey: {}, metaKey: {}, movementX: {}, movementY: {}, related: {} }})",
+            data.client_x,
+            data.client_y,
+            data.screen_x,
+            data.screen_y,
+            data.offset_x,
+            data.offset_y,
+            data.button,
+            data.buttons,
+            data.ctrl_key,
+            data.alt_key,
+            data.shift_key,
+            data.meta_key,
+            data.movement_x,
+            data.movement_y,
+            data.related_target.map_or("null".to_string(), |n| n.to_string()),
+        ))?;
+        Ok(!matches!(result, JsValue::Boolean(false)))
+    }
+
+    /// Fire the user's key press or release at an element (by node id) as
+    /// a trusted, bubbling, cancelable `KeyboardEvent`. `None` is the
+    /// page's active element (the body unless script focused something).
+    /// Returns false when a listener called `preventDefault()`. Listener
+    /// exceptions are queued, see [`Self::take_reported_errors`].
+    pub fn fire_key_event(
+        &self,
+        node: Option<usize>,
+        event_type: &str,
+        data: &KeyboardEventBindingData,
+    ) -> Result<bool, BindingError> {
+        let node = node.map_or("null".to_string(), |n| n.to_string());
+        let result = self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireKey({node}, {event_type:?}, {{ key: {:?}, code: {:?}, repeat: {}, \
+             ctrlKey: {}, altKey: {}, shiftKey: {}, metaKey: {} }})",
+            data.key, data.code, data.repeat, data.ctrl_key, data.alt_key, data.shift_key, data.meta_key,
+        ))?;
+        Ok(!matches!(result, JsValue::Boolean(false)))
+    }
+
+    /// The user's click focused an element (by node id), or landed on
+    /// nothing focusable (`None`): the page's focus follows, with `change`,
+    /// `blur`/`focusout` and `focus`/`focusin`. The page may refuse (a
+    /// disabled control); [`Self::take_focus_move`] has where it ended up.
+    pub fn set_focus(&self, node: Option<usize>) -> Result<(), BindingError> {
+        let node = node.map_or("null".to_string(), |n| n.to_string());
+        self.runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkSetFocus({node});"))?;
+        Ok(())
+    }
+
+    /// Where the page's focus is, when it moved since the last call (the
+    /// user's click, or script's `focus()`/`blur()`): `Some(Some(node))`,
+    /// `Some(None)` for nothing focused, `None` when it has not moved.
+    pub fn take_focus_move(&self) -> Option<Option<usize>> {
+        match self.evaluate("document.__rkTakeFocus()") {
+            Ok(JsValue::Number(n)) if n >= 0.0 => Some(Some(n as usize)),
+            Ok(JsValue::Number(_)) => Some(None),
+            _ => None,
+        }
+    }
+
+    /// Fire `input` at a control (by node id) whose value the user's typing
+    /// changed. `data` is the inserted text, `None` for a deletion.
+    pub fn fire_input_event(&self, node: usize, data: Option<&str>) -> Result<(), BindingError> {
+        let data = data.map_or("null".to_string(), |d| format!("{d:?}"));
+        self.runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkFireInput({node}, {data});"))?;
+        Ok(())
+    }
+
+    /// Enter in a field (by node id): implicit submission of its form. An
+    /// uncancelled `submit` is then in [`Self::take_submit_requests`].
+    pub fn implicit_submit(&self, node: usize) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkImplicitSubmit({node});"))?;
+        Ok(())
+    }
+
+    /// The document's URL: the base for a root module's imports.
+    pub fn set_module_base(&self, url: &str) {
+        self.runtime.borrow_mut().set_module_base(url);
+    }
+
+    /// Register a `<script type=importmap>` document (see
+    /// `JsRuntime::add_import_map`): per-entry warnings, or an error when the
+    /// document is unusable.
+    pub fn add_import_map(&self, text: &str) -> Result<Vec<String>, String> {
+        self.runtime.borrow_mut().add_import_map(text)
+    }
+
+    /// Parse and start a module (see `JsRuntime::begin_module`).
+    pub fn begin_module(&self, url: &str, source: &str) -> Result<rustkit_js::ModuleHandle, String> {
+        self.runtime.borrow_mut().begin_module(url, source)
+    }
+
+    /// The URLs a module graph has asked for since the last call.
+    pub fn take_module_requests(&self) -> Vec<String> {
+        self.runtime.borrow_mut().take_module_requests()
+    }
+
+    /// Dynamic `import()` calls that rejected since the last call.
+    pub fn take_dynamic_import_failures(&self) -> Vec<rustkit_js::DynamicImportFailure> {
+        self.runtime.borrow_mut().take_dynamic_import_failures()
+    }
+
+    /// Supply one requested module's source, or why there is none.
+    pub fn supply_module(&self, requested: &str, outcome: Result<rustkit_js::FetchedModule, String>) {
+        self.runtime.borrow_mut().supply_module(requested, outcome);
+    }
+
+    /// Advance a started module and say where it is.
+    pub fn poll_module(&self, handle: &rustkit_js::ModuleHandle) -> rustkit_js::ModuleState {
+        self.runtime.borrow_mut().poll_module(handle)
+    }
+
+    /// Set `document.readyState` (`loading` / `interactive` / `complete`)
+    /// and fire `readystatechange` on the document. That is the spec's
+    /// readiness update: the event comes before `DOMContentLoaded` and
+    /// before `window` `load`.
+    pub fn set_ready_state(&self, state: &str) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.readyState = {:?}; window.__rustkit_fire('document', 'readystatechange');",
+            state
+        ))?;
         Ok(())
     }
 
@@ -1073,6 +2087,25 @@ impl DomBindings {
         Ok(())
     }
 
+    /// Report media query changes: every `MediaQueryList` with a `change`
+    /// listener whose answer flipped since it was last reported hears
+    /// `change` (the "evaluate media queries and report changes" step of
+    /// update the rendering, HTML §8.1.7.3). Run after
+    /// [`Self::set_dimensions`] and the `resize` event, which is the order
+    /// a browser keeps. Listener exceptions are queued, not returned; see
+    /// [`Self::take_reported_errors`]. Returns how many lists in the
+    /// document's list of media query lists flipped (a list stays there
+    /// once it has listened, as in the spec, listeners or not).
+    pub fn fire_media_query_changes(&self) -> Result<u32, BindingError> {
+        let fired = self.runtime.borrow_mut().evaluate_script(
+            "typeof window.__rustkit_media_changes === 'function' ? window.__rustkit_media_changes() : 0",
+        )?;
+        Ok(match fired {
+            JsValue::Number(n) => n as u32,
+            _ => 0,
+        })
+    }
+
     /// Run the page's timers on the virtual clock up to `horizon_ms`, at
     /// most `max_callbacks` of them. Returns how many ran.
     pub fn run_timers(&self, horizon_ms: u64, max_callbacks: u32) -> Result<u32, BindingError> {
@@ -1086,17 +2119,88 @@ impl DomBindings {
         })
     }
 
-    /// Exceptions thrown in listeners and timer callbacks since the last
-    /// call, as `String(error)` (`TypeError: x is not a function`).
-    pub fn take_reported_errors(&self) -> Vec<String> {
-        let drained = self
+    /// [`Self::run_timers`], stopping between callbacks once `frame_ms` of
+    /// wall time has passed. `true` means the horizon still has timers due.
+    pub fn run_timers_for_frame(
+        &self,
+        horizon_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+    ) -> Result<(u32, bool), BindingError> {
+        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
+            "window.__rustkit_run_timers_framed({}, {}, {})",
+            horizon_ms, max_callbacks, frame_ms
+        ))?;
+        Ok(match ran {
+            JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
+            JsValue::Number(n) => (n as u32, false),
+            _ => (0, false),
+        })
+    }
+
+    /// Move the virtual clock on by `delta_ms` (the live loop's real elapsed
+    /// time) and run the timers that came due, at most `max_callbacks` of
+    /// them. Returns how many ran.
+    pub fn advance_timers(&self, delta_ms: u64, max_callbacks: u32) -> Result<u32, BindingError> {
+        self.advance_timers_for(delta_ms, max_callbacks, None)
+    }
+
+    /// [`Self::advance_timers`], and once a callback ends `slice` after the
+    /// call began, no more run: the rest wait for the next call, and
+    /// [`Self::next_timer_delay`] says they are due.
+    pub fn advance_timers_for(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        slice: Option<std::time::Duration>,
+    ) -> Result<u32, BindingError> {
+        let slice_ms = slice.map_or(0, |slice| slice.as_millis().max(1) as u64);
+        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
+            "window.__rustkit_advance_timers({}, {}, {})",
+            delta_ms, max_callbacks, slice_ms
+        ))?;
+        Ok(match ran {
+            JsValue::Number(n) => n as u32,
+            _ => 0,
+        })
+    }
+
+    /// [`Self::advance_timers`], stopping between callbacks once `frame_ms`
+    /// of wall time has passed. `true` means timers were still due.
+    pub fn advance_timers_for_frame(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+    ) -> Result<(u32, bool), BindingError> {
+        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
+            "window.__rustkit_advance_timers_framed({}, {}, {})",
+            delta_ms, max_callbacks, frame_ms
+        ))?;
+        Ok(match ran {
+            JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
+            JsValue::Number(n) => (n as u32, false),
+            _ => (0, false),
+        })
+    }
+
+    /// Milliseconds until the page's next timer is due on the virtual clock
+    /// (0 when one is overdue). `None` when no timer is set.
+    pub fn next_timer_delay(&self) -> Option<u64> {
+        match self
             .runtime
             .borrow_mut()
-            .evaluate_script("JSON.stringify(window.__rustkit_errors.splice(0))");
-        match drained {
-            Ok(JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
-            _ => Vec::new(),
+            .evaluate_bookkeeping("window.__rustkit_next_timer()")
+        {
+            Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
+            _ => None,
         }
+    }
+
+    /// Exceptions thrown in listeners and timer callbacks since the last
+    /// call, as text (`TypeError: x is not a function`, `[object Object]`).
+    pub fn take_reported_errors(&self) -> Vec<String> {
+        self.runtime.borrow_mut().take_reported_errors()
     }
 
     /// Drain the IPC message queue.
@@ -1525,11 +2629,267 @@ mod tests {
         assert!(matches!(method, JsValue::String(s) if s == "post"));
     }
 
+    /// Like `eval_string`, but renders a boolean or number result too, so
+    /// a test can compare `a === b` directly.
+    fn eval_any(bindings: &DomBindings, script: &str) -> String {
+        match bindings.evaluate(script).unwrap() {
+            JsValue::String(s) => s,
+            JsValue::Boolean(b) => b.to_string(),
+            JsValue::Number(n) => if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() },
+            other => panic!("{script} evaluated to {other:?}"),
+        }
+    }
+
     fn eval_string(bindings: &DomBindings, script: &str) -> String {
         match bindings.evaluate(script).unwrap() {
             JsValue::String(s) => s,
             other => panic!("{script} evaluated to {other:?}"),
         }
+    }
+
+    /// Pages read these without feature-testing; each used to throw a
+    /// ReferenceError or TypeError and end the rest of the script.
+    #[test]
+    fn the_screen_performance_window_and_navigator_baseline_exists() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let probe = |script: &str| eval_string(&bindings, script);
+        // screen is the viewport.
+        assert_eq!(probe("String(screen.width + 'x' + screen.height)"), "800x600");
+        assert_eq!(probe("String(screen.colorDepth)"), "24");
+        // performance: a monotonic clock and the Performance Timeline.
+        assert_eq!(
+            probe("var a = performance.now(); var b = performance.now(); String(typeof a + (b >= a))"),
+            "numbertrue"
+        );
+        assert_eq!(
+            probe("performance.mark('s'); performance.mark('e'); var m = performance.measure('m', 's', 'e');                    String(m.entryType + performance.getEntriesByType('mark').length + performance.getEntriesByName('m').length)"),
+            "measure21"
+        );
+        assert_eq!(probe("String(typeof performance.timing.navigationStart)"), "number");
+        // window geometry and frame tree.
+        assert_eq!(probe("String([scrollX, scrollY, pageXOffset, pageYOffset, screenX].join())"), "0,0,0,0,0");
+        assert_eq!(probe("String(window.top === window && window.parent === window && window.opener === null)"), "true");
+        assert_eq!(probe("String(typeof scrollTo + typeof focus + typeof getSelection().toString())"), "functionfunctionstring");
+        // navigator facts.
+        assert_eq!(probe("String(navigator.hardwareConcurrency > 0)"), "true");
+        assert_eq!(probe("String([navigator.maxTouchPoints, navigator.cookieEnabled, navigator.webdriver].join())"), "0,true,false");
+        // Something defined first wins: the shim never overwrites.
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        assert_eq!(eval_string(&bindings, "String(navigator.userAgent)"), "RustKit/1.0");
+    }
+
+    /// `URL` / `URLSearchParams` (lyft, weather and others died on
+    /// `ReferenceError: URL is not defined`). Parsing and setters are the
+    /// `url` crate's; these pin the object layer and the cases pages hit.
+    #[test]
+    fn url_parses_resolves_and_exposes_its_components() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_string(&bindings, s);
+        assert_eq!(
+            ev("var u = new URL('https://user:pw@Example.COM:8080/a/b/../c?x=1&y=2#frag'); \
+                [u.href, u.origin, u.protocol, u.username, u.password, u.host, u.hostname, u.port, u.pathname, u.search, u.hash].join('|')"),
+            "https://user:pw@example.com:8080/a/c?x=1&y=2#frag|https://example.com:8080|https:|user|pw|example.com:8080|example.com|8080|/a/c|?x=1&y=2|#frag"
+        );
+        // Default port is empty; empty query and fragment read as ''.
+        assert_eq!(ev("var d = new URL('https://example.com:443/?#'); [d.port, d.search, d.hash, d.pathname].join('|')"), "|||/");
+        // Relative resolution against a base, including a base with a path.
+        assert_eq!(ev("String(new URL('../x?q', 'https://a.test/dir/sub/page.html'))"), "https://a.test/dir/x?q");
+        assert_eq!(ev("String(new URL('//cdn.test/lib.js', 'https://a.test/'))"), "https://cdn.test/lib.js");
+        assert_eq!(ev("String(new URL('/abs', new URL('https://a.test/dir/')))"), "https://a.test/abs");
+        // Non-special schemes and an opaque origin.
+        assert_eq!(ev("var m = new URL('mailto:a@b.test'); [m.protocol, m.pathname, m.origin].join('|')"), "mailto:|a@b.test|null");
+        // toString / toJSON / JSON.stringify.
+        assert_eq!(ev("JSON.stringify({ u: new URL('https://a.test/p') })"), r#"{"u":"https://a.test/p"}"#);
+        // Invalid input throws TypeError, and canParse says so without throwing.
+        assert_eq!(ev("var r; try { new URL('not a url'); r = 'no throw'; } catch (e) { r = e.name; } r"), "TypeError");
+        assert_eq!(ev("var r2; try { new URL('/rel'); r2 = 'no throw'; } catch (e) { r2 = e.name; } r2"), "TypeError");
+        assert_eq!(ev("[URL.canParse('https://a.test'), URL.canParse('nope'), URL.canParse('/x', 'https://a.test')].join()"), "true,false,true");
+        assert_eq!(ev("String(URL.parse('nope'))"), "null");
+    }
+
+    #[test]
+    fn url_setters_rewrite_the_url() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_string(&bindings, s);
+        assert_eq!(
+            ev("var u = new URL('https://a.test/p?x=1#h'); \
+                u.pathname = '/new path'; u.hash = 'top'; u.port = '9000'; u.username = 'bob'; \
+                u.href"),
+            "https://bob@a.test:9000/new%20path?x=1#top"
+        );
+        assert_eq!(ev("var v = new URL('http://a.test:81/'); v.protocol = 'https'; v.port = ''; v.hostname = 'b.test'; v.search = '?k=v'; v.href"), "https://b.test/?k=v");
+        // host takes host:port together.
+        assert_eq!(ev("var w = new URL('https://a.test/'); w.host = 'c.test:444'; [w.hostname, w.port].join('|')"), "c.test|444");
+        // A value that does not parse is ignored, as the standard says.
+        assert_eq!(ev("var x = new URL('https://a.test:5/'); x.port = 'abc'; x.port"), "5");
+    }
+
+    #[test]
+    fn url_search_params_encode_decode_and_stay_in_step_with_the_url() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_string(&bindings, s);
+        // Parsing: '+' is space, percent-escapes decode, a lone key has ''.
+        assert_eq!(
+            ev("var p = new URLSearchParams('?a=1&b=x+y&c=%C3%A9&flag&a=2'); \
+                [p.get('a'), p.getAll('a').join('/'), p.get('b'), p.get('c'), String(p.get('flag') === ''), String(p.get('none') === null), p.has('flag'), p.size].join('|')"),
+            "1|1/2|x y|é|true|true|true|5"
+        );
+        // Serialising: application/x-www-form-urlencoded.
+        assert_eq!(
+            ev("var q = new URLSearchParams(); q.append('k', 'a b&c=d'); q.append('é', \"it's (ok)!~\"); q.toString()"),
+            "k=a+b%26c%3Dd&%C3%A9=it%27s+%28ok%29%21%7E"
+        );
+        // Every constructor form.
+        assert_eq!(ev("new URLSearchParams({ a: 1, b: 'two' }).toString()"), "a=1&b=two");
+        assert_eq!(ev("new URLSearchParams([['a', '1'], ['b', '2']]).toString()"), "a=1&b=2");
+        assert_eq!(ev("new URLSearchParams(new URLSearchParams('z=9')).toString()"), "z=9");
+        // set replaces the first and drops the rest; delete; sort is stable.
+        assert_eq!(ev("var s = new URLSearchParams('b=2&a=1&b=3&a=0'); s.set('b', 'X'); s.sort(); s.toString()"), "a=1&a=0&b=X");
+        assert_eq!(ev("var t = new URLSearchParams('a=1&b=2&a=3'); t.delete('a'); t.toString()"), "b=2");
+        // Iteration protocols.
+        assert_eq!(ev("var out = []; for (var kv of new URLSearchParams('a=1&b=2')) out.push(kv.join(':')); out.join()"), "a:1,b:2");
+        assert_eq!(ev("var o = []; new URLSearchParams('a=1&b=2').forEach(function (v, k) { o.push(k + v); }); o.join()"), "a1,b2");
+        assert_eq!(ev("Array.from(new URLSearchParams('a=1&b=2').keys()).join()"), "a,b");
+        // URL.searchParams is live in both directions.
+        assert_eq!(
+            ev("var u = new URL('https://a.test/p?x=1'); u.searchParams.append('y', 'a b'); u.searchParams.set('x', '9'); u.href"),
+            "https://a.test/p?x=9&y=a+b"
+        );
+        assert_eq!(ev("var v = new URL('https://a.test/'); v.search = '?k=1&k=2'; v.searchParams.getAll('k').join()"), "1,2");
+        assert_eq!(ev("var w = new URL('https://a.test/?only=1'); w.searchParams.delete('only'); w.href"), "https://a.test/");
+    }
+
+    /// The observer interfaces and requestIdleCallback: pages construct them
+    /// during start-up (walmart died on MutationObserver and
+    /// IntersectionObserver, microsoft on MutationObserver). They exist and
+    /// validate like the real ones.
+    #[test]
+    fn observers_exist_validate_their_arguments_and_report_nothing() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_string(&bindings, s);
+        assert_eq!(
+            ev("String([typeof MutationObserver, typeof IntersectionObserver, typeof ResizeObserver, typeof PerformanceObserver].join())"),
+            "function,function,function,function"
+        );
+        // A callback is required, and `new` is.
+        assert_eq!(ev("var a; try { new MutationObserver(); a = 'no throw'; } catch (e) { a = e.name; } a"), "TypeError");
+        assert_eq!(ev("var b; try { new IntersectionObserver(1); b = 'no throw'; } catch (e) { b = e.name; } b"), "TypeError");
+        assert_eq!(ev("var c; try { ResizeObserver(function () {}); c = 'no throw'; } catch (e) { c = e.name; } c"), "TypeError");
+        // MutationObserver.observe needs a target and at least one record type.
+        assert_eq!(ev("var el = {}; var m = new MutationObserver(function () {}); var d; try { m.observe(el, {}); d = 'no throw'; } catch (e) { d = e.name; } d"), "TypeError");
+        assert_eq!(ev("var e2; try { m.observe(null, { childList: true }); e2 = 'no throw'; } catch (e) { e2 = e.name; } e2"), "TypeError");
+        // A target that is not a Node throws (DOM §4.3.1); records are in mutation_observer_tests.
+        assert_eq!(ev("var e3; try { m.observe(el, { childList: true }); e3 = 'no throw'; } catch (e) { e3 = e.name; } e3"), "TypeError");
+        assert_eq!(ev("String(m.takeRecords().length)"), "0");
+        assert_eq!(ev("m.disconnect(); String(typeof WebKitMutationObserver)"), "function");
+        // IntersectionObserver reports its configuration.
+        assert_eq!(
+            ev("var io = new IntersectionObserver(function () {}); String([io.root, io.rootMargin, io.thresholds.join()].join('|'))"),
+            "|0px 0px 0px 0px|0"
+        );
+        assert_eq!(
+            ev("var io2 = new IntersectionObserver(function () {}, { rootMargin: '10px', threshold: [1, 0.5] }); String([io2.rootMargin, io2.thresholds.join()].join('|'))"),
+            "10px|0.5,1"
+        );
+        // Targets must be elements, as in the platform (web_observers_live.js).
+        assert_eq!(ev("var f; try { io.observe(el); f = 'no throw'; } catch (e) { f = e.name; } f"), "TypeError");
+        assert_eq!(ev("io.unobserve(el); io.disconnect(); String(io.takeRecords().length)"), "0");
+        assert_eq!(ev("var ro = new ResizeObserver(function () {}); var g2; try { ro.observe(el); g2 = 'no throw'; } catch (e) { g2 = e.name; } ro.unobserve(el); ro.disconnect(); g2"), "TypeError");
+        assert_eq!(ev("var po = new PerformanceObserver(function () {}); po.observe({ entryTypes: ['mark'] }); po.disconnect(); String(PerformanceObserver.supportedEntryTypes.length)"), "0");
+    }
+
+    #[test]
+    fn request_idle_callback_runs_once_on_the_timer_clock_and_can_be_cancelled() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                r#"
+                var log = [];
+                var id1 = requestIdleCallback(function (d) { log.push('ran:' + d.didTimeout + ':' + (d.timeRemaining() >= 0)); });
+                var id2 = requestIdleCallback(function () { log.push('cancelled-ran'); });
+                cancelIdleCallback(id2);
+                var thrown = 'none';
+                try { requestIdleCallback('nope'); } catch (e) { thrown = e.name; }
+                "#,
+            )
+            .unwrap();
+        assert_eq!(eval_string(&bindings, "String(typeof id1 + ':' + (id1 !== id2) + ':' + thrown)"), "number:true:TypeError");
+        assert_eq!(eval_string(&bindings, "log.join()"), "", "not run before the timers advance");
+        bindings.run_timers(1_000, 100).unwrap();
+        assert_eq!(eval_string(&bindings, "log.join()"), "ran:false:true");
+    }
+
+    /// btoa/atob, escape/unescape, TextEncoder/TextDecoder: netflix died on
+    /// `TextEncoder is not defined`, squarespace on `escape`, and base64 and
+    /// UTF-8 conversion sit in most bundles' first lines.
+    #[test]
+    fn btoa_and_atob_round_trip_latin1_and_reject_bad_input() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_any(&bindings, s);
+        assert_eq!(ev("[btoa(''), btoa('a'), btoa('ab'), btoa('abc'), btoa('hello')].join()"), ",YQ==,YWI=,YWJj,aGVsbG8=");
+        assert_eq!(ev("btoa(String.fromCharCode(0, 255, 128))"), "AP+A");
+        // atob: padding optional, ASCII whitespace ignored.
+        assert_eq!(ev("[atob(''), atob('YQ=='), atob('YQ'), atob('YW Jj\\n'), atob('aGVsbG8=')].join()"), ",a,a,abc,hello");
+        assert_eq!(ev("atob('AP+A').split('').map(function (c) { return c.charCodeAt(0); }).join()"), "0,255,128");
+        // Errors are InvalidCharacterError (DOMException) for both directions.
+        assert_eq!(ev("var n1; try { btoa('\\u20ac'); n1 = 'no throw'; } catch (e) { n1 = e.name; } n1"), "InvalidCharacterError");
+        assert_eq!(ev("var n2; try { atob('!!!!'); n2 = 'no throw'; } catch (e) { n2 = e.name; } n2"), "InvalidCharacterError");
+        assert_eq!(ev("var n3; try { atob('a'); n3 = 'no throw'; } catch (e) { n3 = e.name; } n3"), "InvalidCharacterError");
+    }
+
+    #[test]
+    fn escape_and_unescape_follow_annex_b() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_any(&bindings, s);
+        assert_eq!(ev("escape('\\u00e4 b+c\\u20ac@*_-./')"), "%E4%20b+c%u20AC@*_-./");
+        assert_eq!(ev("unescape('%E4%20b+c%u20AC')"), "\u{e4} b+c\u{20ac}");
+        // A malformed escape passes through.
+        assert_eq!(ev("unescape('%u0041%41%zz%u12')"), "AA%zz%u12");
+    }
+
+    #[test]
+    fn text_encoder_produces_utf8_and_encode_into_respects_the_buffer() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_any(&bindings, s);
+        assert_eq!(ev("String(new TextEncoder().encoding)"), "utf-8");
+        // h é l l o space € 😀 = 1+2+1+1+1+1+3+4 bytes.
+        assert_eq!(ev("var b = new TextEncoder().encode('h\\u00e9llo \\u20ac\\ud83d\\ude00'); b.length + ':' + Array.from(b).slice(0, 4).join()"), "14:104,195,169,108");
+        assert_eq!(ev("Array.from(new TextEncoder().encode('\\ud83d\\ude00')).join()"), "240,159,152,128");
+        // A lone surrogate is U+FFFD (EF BF BD), not an exception.
+        assert_eq!(ev("Array.from(new TextEncoder().encode('a\\ud800b')).join()"), "97,239,191,189,98");
+        assert_eq!(ev("String(new TextEncoder().encode().length) + ',' + new TextEncoder().encode('').length"), "0,0");
+        // encodeInto stops before a character that does not fit.
+        assert_eq!(ev("var d = new Uint8Array(4); var r = new TextEncoder().encodeInto('a\\u20acb', d); r.read + ',' + r.written + ',' + Array.from(d).join()"), "2,4,97,226,130,172");
+        assert_eq!(ev("var d2 = new Uint8Array(3); var r2 = new TextEncoder().encodeInto('a\\u20ac', d2); r2.read + ',' + r2.written"), "1,1");
+    }
+
+    #[test]
+    fn text_decoder_decodes_utf8_with_replacement_bom_fatal_and_streaming() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_any(&bindings, s);
+        // Round trip, from a Uint8Array, an ArrayBuffer and a sub-view.
+        assert_eq!(ev("var s = 'h\\u00e9llo \\u20ac\\ud83d\\ude00'; String(new TextDecoder().decode(new TextEncoder().encode(s)) === s)"), "true");
+        assert_eq!(ev("new TextDecoder().decode(new Uint8Array([104, 105]).buffer)"), "hi");
+        assert_eq!(ev("var big = new Uint8Array([0, 104, 105, 0]); new TextDecoder().decode(big.subarray(1, 3))"), "hi");
+        // Invalid bytes become U+FFFD; a truncated sequence at the end is one.
+        assert_eq!(ev("new TextDecoder().decode(new Uint8Array([0x61, 0xFF, 0x62])) === 'a\\ufffdb'"), "true");
+        assert_eq!(ev("new TextDecoder().decode(new Uint8Array([0x61, 0xE2, 0x82])) === 'a\\ufffd'"), "true");
+        // fatal throws TypeError.
+        assert_eq!(ev("var f; try { new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array([0xFF])); f = 'no throw'; } catch (e) { f = e.name; } f"), "TypeError");
+        // A leading BOM is dropped unless ignoreBOM.
+        assert_eq!(ev("String(new TextDecoder().decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x61])).length)"), "1");
+        assert_eq!(ev("String(new TextDecoder('utf-8', { ignoreBOM: true }).decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x61])).length)"), "2");
+        // stream: a character split across chunks decodes once whole.
+        assert_eq!(
+            ev("var sd = new TextDecoder(); var p1 = sd.decode(new Uint8Array([0xE2, 0x82]), { stream: true }); \
+                var p2 = sd.decode(new Uint8Array([0xAC, 0x21])); (p1 + '|' + p2) === '|\\u20ac!'"),
+            "true"
+        );
+        // Labels and the other supported encodings.
+        assert_eq!(ev("[new TextDecoder().encoding, new TextDecoder('UTF8').encoding, new TextDecoder('latin1').encoding, new TextDecoder('utf-16le').encoding].join()"), "utf-8,utf-8,windows-1252,utf-16le");
+        assert_eq!(ev("new TextDecoder('latin1').decode(new Uint8Array([0xE9]))"), "\u{e9}");
+        assert_eq!(ev("new TextDecoder('utf-16le').decode(new Uint8Array([0x61, 0x00, 0xAC, 0x20]))"), "a\u{20ac}");
+        assert_eq!(ev("var l; try { new TextDecoder('no-such-label'); l = 'no throw'; } catch (e) { l = e.name; } l"), "RangeError");
     }
 
     #[test]
@@ -1571,6 +2931,270 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("undefinedFn"), "{errors:?}");
         assert!(bindings.take_reported_errors().is_empty(), "drained");
+    }
+
+    /// Every member the bindings' scripts report is in
+    /// `UNSUPPORTED_MEMBERS`, and every listed member is reported somewhere.
+    #[test]
+    fn the_unsupported_list_matches_the_reporting_scripts() {
+        let sources = [
+            include_str!("web_xhr.js"),
+            include_str!("web_components.js"),
+            include_str!("web_streams.js"),
+            dom::WRAPPERS_JS_FOR_TESTS,
+        ]
+        .concat();
+        let mut reported: Vec<(String, String)> = sources
+            .split("__rk.unsupported('")
+            .skip(1)
+            .map(|rest| {
+                let (interface, rest) = rest.split_once("', '").unwrap();
+                (interface.to_string(), rest.split_once("')").unwrap().0.to_string())
+            })
+            .collect();
+        reported.sort();
+        reported.dedup();
+        let mut listed: Vec<(String, String)> =
+            UNSUPPORTED_MEMBERS.iter().map(|(i, m)| (i.to_string(), m.to_string())).collect();
+        listed.sort();
+        assert_eq!(reported, listed);
+    }
+
+    /// Page script reaches neither the reporter nor the table.
+    #[test]
+    fn page_script_cannot_report_or_read_unsupported_members() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let seen = bindings
+            .evaluate("[typeof __rustkit_unsupported, typeof __rustkit_take_unsupported, typeof __rustkit_errors_with_stacks].join()")
+            .unwrap();
+        assert!(matches!(seen, JsValue::String(ref s) if s == "undefined,undefined,undefined"), "{seen:?}");
+        bindings
+            .evaluate("try { new DOMParser().parseFromString('<a/>', 'text/xml'); } catch (e) {}")
+            .unwrap();
+        let apis = bindings.take_unsupported_apis();
+        assert_eq!(apis.len(), 1);
+        assert_eq!((apis[0].0.as_str(), apis[0].1.as_str(), apis[0].2), ("DOMParser", "parseFromString(XML)", 1));
+    }
+
+    #[test]
+    fn a_listener_error_is_reported_as_text_and_as_a_report_without_page_text() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings.set_error_details(true, false).unwrap();
+        bindings
+            .evaluate_named(
+                "window.addEventListener('load', function () { throw new Error('a\\u0000b'); });",
+                "inline#1",
+            )
+            .unwrap();
+        bindings.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(bindings.take_reported_errors(), vec!["Error: a\u{0}b".to_string()]);
+        let reports = bindings.take_error_reports();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let report = &reports[0];
+        assert_eq!((report.value, report.name, report.message.as_deref(), report.message_len), ("error", Some("Error"), None, Some(3)));
+        assert!(report.located);
+
+        bindings.set_error_details(false, false).unwrap();
+        bindings.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(bindings.take_reported_errors().len(), 1, "the script log keeps its text");
+        assert!(bindings.take_error_reports().is_empty(), "no reports while off");
+        assert_eq!(
+            report.frames,
+            vec![rustkit_js::ScriptPosition { path: "inline#1".into(), line: 1, column: 53 }]
+        );
+    }
+
+    /// Page script reaches none of the queues errors are reported through.
+    #[test]
+    fn page_script_cannot_reach_the_error_reporter() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings.set_error_details(true, false).unwrap();
+        let seen = bindings
+            .evaluate("[typeof __rk, typeof window.__rustkit_errors, typeof window.__rustkit_error_text].join()")
+            .unwrap();
+        assert!(matches!(seen, JsValue::String(ref s) if s == "undefined,undefined,undefined"), "{seen:?}");
+    }
+
+    #[test]
+    fn the_live_clock_advances_by_elapsed_time_and_reports_the_next_timer() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        assert_eq!(bindings.next_timer_delay(), None);
+        bindings
+            .evaluate("var log = []; setTimeout(function () { log.push('a'); }, 300);")
+            .unwrap();
+        assert_eq!(bindings.next_timer_delay(), Some(300));
+
+        // Not due: nothing runs, but the time has passed.
+        assert_eq!(bindings.advance_timers(100, 10).unwrap(), 0);
+        assert_eq!(bindings.next_timer_delay(), Some(200));
+
+        // A timer set now counts from now (100), not from 0.
+        bindings.evaluate("setTimeout(function () { log.push('b'); }, 50);").unwrap();
+        assert_eq!(bindings.advance_timers(60, 10).unwrap(), 1);
+        assert_eq!(bindings.advance_timers(140, 10).unwrap(), 1);
+        assert_eq!(bindings.next_timer_delay(), None);
+        assert!(matches!(
+            bindings.evaluate("log.join(',')").unwrap(),
+            JsValue::String(s) if s == "b,a"
+        ));
+
+        // The cap holds callbacks back; the clock moves on, so they are due.
+        bindings
+            .evaluate("var n = 0; var t = setInterval(function () { n++; }, 10);")
+            .unwrap();
+        // What the cap held back is due now: the loop must not sleep on it.
+        assert_eq!(bindings.advance_timers(100, 4).unwrap(), 4);
+        assert_eq!(bindings.next_timer_delay(), Some(0));
+        // The clock moved on to 100: the interval the cap held back runs once
+        // on the next turn, however little time it is given, and is not
+        // caught up (50 to 100 would be 6 runs): its next is 10 from now.
+        assert_eq!(bindings.advance_timers(0, 100).unwrap(), 1);
+        assert_eq!(bindings.next_timer_delay(), Some(10));
+        assert_eq!(bindings.advance_timers(60, 100).unwrap(), 6);
+    }
+
+    /// A callback that runs past the frame budget must not swallow the
+    /// elapsed time the turn was given. The next timer is due from the
+    /// clock the turn reached, so Stop is not followed by a full extra period.
+    #[test]
+    fn a_frame_yield_still_advances_the_virtual_clock() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "setTimeout(function () { var end = Date.now() + 30; while (Date.now() < end) {} }, 0);
+                 setTimeout(function () {}, 200);",
+            )
+            .unwrap();
+        let (ran, yielded) = bindings.advance_timers_for_frame(80, 10, 16).unwrap();
+        assert!(yielded, "the long callback did not yield the frame");
+        assert_eq!(ran, 1);
+        assert_eq!(bindings.next_timer_delay(), Some(120));
+}
+
+    /// A turn cut short by its slice still moves the clock and has its
+    /// frame, so a `setTimeout(0)` chain that outlasts every slice does not
+    /// hold back a later timer or an animation frame.
+    #[test]
+    fn a_zero_delay_chain_cut_by_the_slice_lets_later_timers_and_frames_run() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "var log = [], links = 0;
+                 function chain() { var t = Date.now(); while (Date.now() - t < 3) {} links++; setTimeout(chain, 0); }
+                 setTimeout(chain, 0);
+                 setTimeout(function () { log.push('later'); }, 30);
+                 requestAnimationFrame(function () { log.push('frame'); });",
+            )
+            .unwrap();
+        let slice = Some(std::time::Duration::from_millis(10));
+        for _ in 0..4 {
+            assert!(bindings.advance_timers_for(20, 1000, slice).unwrap() < 10);
+            // The chain is always owed.
+            assert_eq!(bindings.next_timer_delay(), Some(0));
+        }
+        assert!(matches!(
+            bindings.evaluate("log.join(',')").unwrap(),
+            JsValue::String(s) if s == "frame,later"
+        ));
+    }
+
+    /// The same chain through the live loop's frame-sliced turn
+    /// (`advance_timers_for_frame`, the path the app runs): a turn that
+    /// yields its frame still has its animation frame and moves the clock,
+    /// so the later timer and the frame run under a chain that yields every
+    /// turn.
+    #[test]
+    fn a_zero_delay_chain_that_yields_every_frame_lets_later_timers_and_frames_run() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "var log = [], links = 0;
+                 function chain() { var t = Date.now(); while (Date.now() - t < 3) {} links++; setTimeout(chain, 0); }
+                 setTimeout(chain, 0);
+                 setTimeout(function () { log.push('later'); }, 30);
+                 requestAnimationFrame(function () { log.push('frame'); });",
+            )
+            .unwrap();
+        for _ in 0..4 {
+            let (ran, yielded) = bindings.advance_timers_for_frame(20, 1000, 10).unwrap();
+            assert!(yielded, "the chain outlasts the frame");
+            assert!(ran < 10);
+            assert_eq!(bindings.next_timer_delay(), Some(0));
+        }
+        assert!(matches!(
+            bindings.evaluate("log.join(',')").unwrap(),
+            JsValue::String(s) if s == "frame,later"
+        ));
+    }
+
+    /// Chromium 143, a `requestAnimationFrame` loop across a task that holds
+    /// the thread 600 ms: no callback during it, then 9 and 8 in the next two
+    /// 100 ms (7 to 10 at rest). It owes one frame for the time, not 37.
+    #[test]
+    fn a_live_turn_runs_one_round_of_animation_frames_however_long_it_took() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let read = |js: &str| match bindings.evaluate(js).unwrap() {
+            JsValue::String(s) => s,
+            other => panic!("{other:?}"),
+        };
+        bindings
+            .evaluate(
+                "var stamps = [], log = [];
+                 function loop(ts) { stamps.push(ts); requestAnimationFrame(loop); }
+                 requestAnimationFrame(loop);",
+            )
+            .unwrap();
+        assert_eq!(bindings.advance_timers(600, 1000).unwrap(), 1);
+        // The callback is told the time of the frame it runs in.
+        assert_eq!(read("stamps.join(',')"), "600");
+        // The loop asked for the frame after this one.
+        assert_eq!(bindings.next_timer_delay(), Some(16));
+        assert_eq!(bindings.advance_timers(10, 1000).unwrap(), 0);
+        assert_eq!(bindings.advance_timers(6, 1000).unwrap(), 1);
+        assert_eq!(read("stamps.join(',')"), "600,616");
+
+        // The turn's timers all run, and before its frame; a frame one of
+        // them asks for is in the turn's round.
+        bindings
+            .evaluate(
+                "var every = setInterval(function () { log.push('t'); }, 100);
+                 setTimeout(function () { requestAnimationFrame(function () { log.push('f'); }); }, 50);",
+            )
+            .unwrap();
+        assert_eq!(bindings.advance_timers(300, 1000).unwrap(), 6);
+        assert_eq!(read("log.join(',')"), "t,t,t,f");
+        assert_eq!(read("String(stamps.length)"), "3");
+
+        // A callback cancelled by an earlier one of the same round does not
+        // run, and one asked for inside the round waits for the next.
+        bindings
+            .evaluate(
+                "clearInterval(every);
+                 log = [];
+                 var second;
+                 requestAnimationFrame(function () {
+                     log.push('a');
+                     cancelAnimationFrame(second);
+                     requestAnimationFrame(function () { log.push('c'); });
+                 });
+                 second = requestAnimationFrame(function () { log.push('b'); });",
+            )
+            .unwrap();
+        bindings.advance_timers(1000, 1000).unwrap();
+        assert_eq!(read("log.join(',')"), "a");
+        bindings.advance_timers(16, 1000).unwrap();
+        assert_eq!(read("log.join(',')"), "a,c");
+    }
+
+    /// The load's clock is virtual and has no frames of its own: a
+    /// `requestAnimationFrame` loop there is a 16 ms timer, as before.
+    #[test]
+    fn the_load_clock_still_runs_animation_frames_as_16ms_timers() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate("var n = 0; function loop() { n++; requestAnimationFrame(loop); } requestAnimationFrame(loop);")
+            .unwrap();
+        assert_eq!(bindings.run_timers(160, 1000).unwrap(), 10);
     }
 
     #[test]
@@ -1689,7 +3313,7 @@ mod tests {
     #[test]
     fn document_fragment_children_move_in_on_insert() {
         let b = bound(MIXED);
-        b.set_selector_matcher(Rc::new(|node, selector| {
+        b.set_selector_matcher(Rc::new(|node, selector, _| {
             (selector != "!").then(|| node.tag_name() == Some(selector))
         }));
         assert_eq!(
@@ -1751,7 +3375,7 @@ mod tests {
     #[test]
     fn an_injected_selector_matcher_answers_queries_matches_and_closest() {
         let b = bound(PAGE);
-        b.set_selector_matcher(Rc::new(|node, selector| {
+        b.set_selector_matcher(Rc::new(|node, selector, _| {
             (selector != "!").then(|| node.tag_name() == Some(selector))
         }));
         assert!(eval_bool(&b, "document.querySelectorAll('p').length === 3"));
@@ -1945,6 +3569,176 @@ mod tests {
              p.parentNode === null && document.querySelectorAll('.x').length === 2"
         ));
         assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
+    // DOM §4.2.3 for a Document parent: one element child, at most one
+    // doctype before it, no text. A page that removes `<html>` and appends a
+    // new one gets a document whose head and body are the new tree's (yahoo
+    // threw at `document.head.appendChild` after a root swap).
+    #[test]
+    fn a_document_takes_a_new_root_once_the_old_one_is_removed() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var h = document.createElement('html'), hd = document.createElement('head'), \
+                     bd = document.createElement('body'); \
+                 h.appendChild(hd); h.appendChild(bd); \
+                 document.removeChild(document.documentElement); \
+                 var none = [document.documentElement, document.head, document.body].join(); \
+                 document.appendChild(h); \
+                 var s = document.createElement('script'); document.head.appendChild(s); \
+                 [none, document.documentElement === h, document.head === hd, document.body === bd, \
+                  s.parentNode === hd, document.lastChild === h, document.firstChild.nodeType].join()"
+            ),
+            ",,,true,true,true,true,true,10"
+        );
+    }
+
+    #[test]
+    fn replace_child_swaps_the_document_root() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var old = document.documentElement, h = document.createElement('html'); \
+                 h.appendChild(document.createElement('body')); \
+                 var r = document.replaceChild(h, old); \
+                 [r === old, old.parentNode, document.documentElement === h, \
+                  document.body === h.firstChild, document.childNodes.length].join()"
+            ),
+            "true,,true,true,2"
+        );
+    }
+
+    #[test]
+    fn a_document_refuses_a_second_root_text_and_a_root_before_its_doctype() {
+        let b = bound(PAGE);
+        let threw = |script: &str| {
+            eval_string(
+                &b,
+                &format!(
+                    "(function () {{ try {{ {script}; return 'no throw'; }} \
+                          catch (e) {{ return e.name; }} }})()"
+                ),
+            )
+        };
+        // With a root: no second element, also not by replacing the doctype.
+        assert_eq!(threw("document.appendChild(document.createElement('html'))"), "HierarchyRequestError");
+        assert_eq!(
+            threw("document.replaceChild(document.createElement('html'), document.firstChild)"),
+            "HierarchyRequestError"
+        );
+        assert_eq!(threw("document.appendChild(document.createTextNode('x'))"), "HierarchyRequestError");
+        // A comment is fine anywhere in a document.
+        assert_eq!(threw("document.appendChild(document.createComment('c'))"), "no throw");
+        // replaceWith of a node that is one of its own arguments: it leaves
+        // first, so nothing is replaced and the root still counts (#804 R1).
+        assert_eq!(
+            threw(
+                "var c = document.createComment('r'); document.insertBefore(c, document.documentElement); \
+                 c.replaceWith(c, document.createElement('html'))"
+            ),
+            "HierarchyRequestError"
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "String(Array.prototype.filter.call(document.childNodes, function (n) { return n.nodeType === 1; }).length)"
+            ),
+            "1"
+        );
+        // Without a root: no element before the doctype, no two elements
+        // from one fragment.
+        assert_eq!(
+            threw(
+                "document.removeChild(document.documentElement); \
+                 document.insertBefore(document.createElement('html'), document.firstChild)"
+            ),
+            "HierarchyRequestError"
+        );
+        assert_eq!(
+            threw(
+                "var f = document.createDocumentFragment(); \
+                 f.appendChild(document.createElement('html')); f.appendChild(document.createElement('html')); \
+                 document.appendChild(f)"
+            ),
+            "HierarchyRequestError"
+        );
+        assert_eq!(
+            eval_string(&b, "[document.documentElement, document.childNodes.length].join()"),
+            ",3"
+        );
+    }
+
+    // DOM §4.2.3 DocumentType half: at most one doctype, and only before the
+    // element. The real `document.doctype` is the only path that reaches
+    // `document_child_check`'s DocumentType arm — `createDocumentType` is a
+    // fake JS object and never exercises it (#804).
+    #[test]
+    fn a_document_refuses_a_doctype_after_its_root_and_takes_it_back_before() {
+        let b = bound(PAGE);
+        let threw = |script: &str| {
+            eval_string(
+                &b,
+                &format!(
+                    "(function () {{ try {{ {script}; return 'no throw'; }} \
+                          catch (e) {{ return e.name; }} }})()"
+                ),
+            )
+        };
+        // With a root: append puts the doctype after the element. DocumentType
+        // has no ChildNode.remove (only Element/CharacterData), so use
+        // removeChild. replaceChild onto a trailing comment is the same
+        // refusal; the comment is cleaned up so later asserts stay local.
+        assert_eq!(threw("document.appendChild(document.doctype)"), "HierarchyRequestError");
+        assert_eq!(
+            threw(
+                "var c = document.createComment('x'); document.appendChild(c); \
+                 try { document.replaceChild(document.doctype, c); } \
+                 finally { if (c.parentNode) document.removeChild(c); }"
+            ),
+            "HierarchyRequestError"
+        );
+        // Remove, then re-insert before the root: success, and the doctype is
+        // once again the first child.
+        assert_eq!(
+            eval_string(
+                &b,
+                "var dt = document.doctype, root = document.documentElement; \
+                 document.removeChild(dt); \
+                 var gone = [document.doctype, document.firstChild === root].join(); \
+                 document.insertBefore(dt, root); \
+                 [gone, document.doctype === dt, document.firstChild === dt, \
+                  document.lastChild === root, document.childNodes.length].join()"
+            ),
+            ",true,true,true,true,2"
+        );
+        // Without a root: append of the lone doctype succeeds once; a second
+        // doctype (via replaceChild onto a comment) is refused.
+        assert_eq!(
+            threw(
+                "var dt = document.doctype; document.removeChild(document.documentElement); \
+                 document.removeChild(dt); document.appendChild(dt)"
+            ),
+            "no throw"
+        );
+        assert_eq!(
+            threw(
+                "var c = document.createComment('d'); document.appendChild(c); \
+                 try { document.replaceChild(document.doctype, c); } \
+                 finally { if (c.parentNode) document.removeChild(c); }"
+            ),
+            "HierarchyRequestError"
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "[document.doctype !== null, document.documentElement, \
+                  document.firstChild === document.doctype, document.childNodes.length].join()"
+            ),
+            "true,,true,1"
+        );
     }
 
     // DOM §4.2.3 validity: the DOMException named, and the tree untouched.
@@ -2305,15 +4099,193 @@ mod tests {
                  i.addEventListener('click', { handleEvent: function (e) { log.push(e.type, e.bubbles); } }); \
                  document.body.addEventListener('click', function (e) { log.push(e.target === i); }); \
                  i.click(); \
-                 log.push(window.__rustkit_errors.length, /missingFunction/.test(window.__rustkit_errors[0])); \
                  try { i.dispatchEvent('click'); } catch (e) { log.push(e instanceof TypeError); } \
                  try { Event('x'); } catch (e) { log.push(e instanceof TypeError); } \
                  log.push(i instanceof EventTarget, document instanceof EventTarget, \
                           Object.prototype.toString.call(new Event('x'))); \
                  log.join(',')"
             ),
-            "click,true,true,1,true,true,true,true,true,[object Event]"
+            "click,true,true,true,true,true,true,[object Event]"
         );
+        let errors = b.take_reported_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("missingFunction"), "{errors:?}");
+    }
+
+    // An `on<type>` content attribute is an event handler (HTML §8.1.8.1):
+    // its text is the body of `function (event)`, called with the element as
+    // `this`, with the element and its document in scope.
+    const INLINE: &str = "<html><body><div id='o'><a id='i' href='https://example.com/' \
+         onclick=\"window.seen = [this.id, event.type, id, typeof getElementById].join(':'); return false\">x</a>\
+         <b id='bad' onclick='this is not script'>y</b></div></body></html>";
+
+    #[test]
+    fn an_on_attribute_is_the_elements_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 var c = new Event('click', { bubbles: true, cancelable: true }); \
+                 log.push(i.dispatchEvent(c), c.defaultPrevented, window.seen); \
+                 i.setAttribute('onclick', 'window.seen = 2'); \
+                 var d = new Event('click', { bubbles: true, cancelable: true }); \
+                 log.push(i.dispatchEvent(d), window.seen); \
+                 log.join(',')"
+            ),
+            "false,true,i:click:i:function,true,2"
+        );
+    }
+
+    #[test]
+    fn an_assigned_handler_replaces_the_attributes_and_null_turns_it_off() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 i.onclick = function () { window.seen = 'property'; }; i.click(); log.push(window.seen); \
+                 i.onclick = null; window.seen = 'off'; i.click(); log.push(window.seen); \
+                 i.removeAttribute('onclick'); i.click(); log.push(window.seen); \
+                 log.join(',')"
+            ),
+            "property,off,off"
+        );
+    }
+
+    #[test]
+    fn an_on_attribute_that_does_not_compile_is_logged_once_and_not_thrown() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var bad = document.getElementById('bad'), log = []; \
+                 document.body.addEventListener('click', function () { log.push('bubbled'); }); \
+                 bad.click(); bad.click(); \
+                 log.join(',')"
+            ),
+            "bubbled,bubbled"
+        );
+        let errors = b.take_reported_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("SyntaxError"), "{errors:?}");
+    }
+
+    // HTML §8.1.8.2 (GlobalEventHandlers): `on<type>` is an accessor on
+    // HTMLElement.prototype, not a data property of each element. The getter
+    // answers the assigned value, else the compiled content attribute, else
+    // null; a non-object assigned is null; setting the content attribute
+    // again makes the attribute the handler.
+    #[test]
+    fn on_handlers_are_accessors_on_the_element_prototype() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 var has = function (o, k) { return Object.prototype.hasOwnProperty.call(o, k); }; \
+                 var o = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror'); \
+                 log.push(typeof o, o && typeof o.get, o && typeof o.set, o && o.enumerable, o && o.configurable); \
+                 log.push(has(HTMLElement.prototype, 'onload'), has(HTMLElement.prototype, 'onclick'), \
+                          has(SVGElement.prototype, 'onclick'), has(Element.prototype, 'onclick')); \
+                 var s = document.createElement('script'); \
+                 log.push(String(s.onerror), String(s.onload)); \
+                 function h() {} \
+                 s.onerror = h; log.push(s.onerror === h, has(s, 'onerror')); \
+                 s.onerror = 'nope'; log.push(String(s.onerror)); \
+                 log.push(typeof i.onclick, i.onclick === i.onclick); \
+                 i.onclick = null; log.push(String(i.onclick)); \
+                 i.setAttribute('onclick', 'window.seen = 3'); i.click(); log.push(window.seen); \
+                 log.join(',')"
+            ),
+            "object,function,function,true,true,true,true,true,false,null,null,true,false,null,function,true,null,3"
+        );
+    }
+
+    // R1 L1: the native setAttr lowercases the name for HTML elements, so a
+    // mixed-case `OnClick` is the `onclick` content attribute and must drop
+    // the assigned handler just as the lowercase spelling does.
+    #[test]
+    fn a_mixed_case_on_attribute_drops_the_assigned_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 window.__hit = 0; window.__f = 0; \
+                 function f() { window.__f++; } \
+                 i.onclick = f; \
+                 i.setAttribute('OnClick', 'window.__hit=(window.__hit||0)+1'); \
+                 i.click(); \
+                 log.push(window.__f, window.__hit, i.onclick === f, typeof i.onclick, \
+                          i.getAttribute('onclick') === 'window.__hit=(window.__hit||0)+1'); \
+                 log.join(',')"
+            ),
+            "0,1,false,function,true"
+        );
+    }
+
+    // R1 B1: removing an absent attribute runs no attribute-change steps
+    // (DOM "remove an attribute by name" on a missing attribute is a no-op),
+    // so `removeAttribute('onclick')` with no such attribute keeps the
+    // IDL-assigned handler, as Chrome does. Removing one that IS present
+    // still deactivates it.
+    #[test]
+    fn removing_an_absent_on_attribute_keeps_the_assigned_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var o = document.getElementById('o'), log = []; \
+                 var b = document.createElement('button'); o.appendChild(b); \
+                 window.__f = 0; function f() { window.__f++; } \
+                 b.onclick = f; \
+                 b.removeAttribute('onclick'); log.push(b.onclick === f); \
+                 b.removeAttribute('OnClick'); log.push(b.onclick === f); \
+                 b.removeAttributeNS(null, 'onclick'); log.push(b.onclick === f); \
+                 b.click(); log.push(window.__f); \
+                 b.setAttribute('onclick', ''); b.removeAttribute('onclick'); \
+                 log.push(String(b.onclick)); b.click(); log.push(window.__f); \
+                 log.join(',')"
+            ),
+            "true,true,true,1,null,1"
+        );
+    }
+
+    // A page's script-retry shim wraps the native accessor: it takes
+    // `Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror')` and
+    // calls `o.get.call(this)` / `o.set.call(this, fn)` from its own. The
+    // handler it stores through the original setter is the one dispatched.
+    #[test]
+    fn a_wrapped_on_handler_accessor_still_dispatches() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var o = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror'), log = []; \
+                 Object.defineProperty(HTMLElement.prototype, 'onerror', { configurable: true, enumerable: true, \
+                     get: function () { var e = o.get.call(this); return (e && e.__origin) || e; }, \
+                     set: function (t) { \
+                         var i = this; \
+                         if (typeof t !== 'function') return o.set.call(this, t); \
+                         var s = function () { log.push('wrapped'); return t.apply(i, arguments); }; \
+                         s.__origin = t; o.set.call(this, s); \
+                     } }); \
+                 var s = document.createElement('script'); \
+                 s.src = 'https://example.invalid/x.js'; \
+                 s.onload = function () {}; \
+                 var n = function (e) { log.push('error:' + (this === s) + ':' + e.type); }; \
+                 s.onerror = n; \
+                 log.push(s.onerror === n); \
+                 document.body.appendChild(s); \
+                 s.dispatchEvent(new Event('error')); \
+                 s.onerror = null; log.push(String(s.onerror)); \
+                 s.dispatchEvent(new Event('error')); \
+                 log.join(',')"
+            ),
+            "true,wrapped,error:true:error,null"
+        );
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
     }
 
     const ROW: &str =

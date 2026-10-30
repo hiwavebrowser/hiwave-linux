@@ -462,6 +462,27 @@ pub enum Length {
     Calc(Box<CalcSum>),
 }
 
+/// One corner of `border-radius`: the two radii of its quarter ellipse
+/// (CSS Backgrounds 3 §5.1). A percentage in `horizontal` refers to the
+/// border box's width and one in `vertical` to its height, so the pair
+/// cannot be folded into one length before layout.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CornerRadius {
+    pub horizontal: Length,
+    pub vertical: Length,
+}
+
+impl CornerRadius {
+    /// Both radii the same length: the one-value form, a quarter circle
+    /// unless the length is a percentage of a non-square box.
+    pub fn circular(radius: Length) -> Self {
+        Self {
+            horizontal: radius.clone(),
+            vertical: radius,
+        }
+    }
+}
+
 impl Length {
     /// Compute the absolute pixel value.
     ///
@@ -901,9 +922,10 @@ pub enum Gradient {
 // ==================== Background Layer Types ====================
 
 /// The image source for a background layer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum BackgroundImage {
     /// No image (transparent).
+    #[default]
     None,
     /// A gradient.
     Gradient(Gradient),
@@ -911,14 +933,8 @@ pub enum BackgroundImage {
     Url(String),
 }
 
-impl Default for BackgroundImage {
-    fn default() -> Self {
-        BackgroundImage::None
-    }
-}
-
 /// Background size specification.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum BackgroundSize {
     /// Stretch to cover the entire area.
     Cover,
@@ -930,19 +946,15 @@ pub enum BackgroundSize {
         height: Option<f32>,
     },
     /// Auto sizing (use intrinsic dimensions).
+    #[default]
     Auto,
 }
 
-impl Default for BackgroundSize {
-    fn default() -> Self {
-        BackgroundSize::Auto
-    }
-}
-
 /// Background repeat specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackgroundRepeat {
     /// Repeat in both directions.
+    #[default]
     Repeat,
     /// Repeat horizontally only.
     RepeatX,
@@ -954,12 +966,6 @@ pub enum BackgroundRepeat {
     Space,
     /// Round to fill without clipping.
     Round,
-}
-
-impl Default for BackgroundRepeat {
-    fn default() -> Self {
-        BackgroundRepeat::Repeat
-    }
 }
 
 /// Background position specification.
@@ -987,6 +993,9 @@ pub enum BackgroundPositionValue {
     Percent(f32),
     /// Pixel offset from the start.
     Px(f32),
+    /// A percentage (0.0 = start, 1.0 = end) plus a pixel offset:
+    /// `right 10px` is 100% - 10px, and `calc(50% + 4px)` is itself.
+    Calc { percent: f32, px: f32 },
 }
 
 impl Default for BackgroundPositionValue {
@@ -1005,6 +1014,9 @@ impl BackgroundPositionValue {
                 (container_size - image_size) * pct
             }
             BackgroundPositionValue::Px(px) => *px,
+            BackgroundPositionValue::Calc { percent, px } => {
+                (container_size - image_size) * percent + px
+            }
         }
     }
 }
@@ -1086,6 +1098,23 @@ pub enum Display {
     Grid,
     InlineGrid,
     None,
+    /// `table`: a block-level table wrapper (CSS 2.1 §17.2).
+    Table,
+    /// `inline-table`: an atomic inline-level table.
+    InlineTable,
+    TableRowGroup,
+    TableHeaderGroup,
+    TableFooterGroup,
+    TableRow,
+    TableCell,
+    TableCaption,
+    /// Columns and column groups are never rendered; they only carry widths.
+    TableColumn,
+    TableColumnGroup,
+    /// `contents`: the element generates no box; its children take its
+    /// place (CSS Display 3). Author `display: contents` and the UA style
+    /// of `<slot>` both set it, and the box-tree build removes such boxes.
+    Contents,
 }
 
 impl Display {
@@ -1103,7 +1132,11 @@ impl Display {
     pub fn is_inline_level(self) -> bool {
         matches!(
             self,
-            Display::Inline | Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+            Display::Inline
+                | Display::InlineBlock
+                | Display::InlineFlex
+                | Display::InlineGrid
+                | Display::InlineTable
         )
     }
 
@@ -1119,8 +1152,59 @@ impl Display {
     pub fn is_atomic_inline(self) -> bool {
         matches!(
             self,
-            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid | Display::InlineTable
         )
+    }
+
+    /// CSS Display 3 §2.7: the block-level equivalent of this display.
+    ///
+    /// `inline` / `inline-block` become `block`, the inline-level inner
+    /// displays become their block-level forms, and a table-internal
+    /// display becomes `block`. `none` and `contents` generate no box, so
+    /// they are left alone (there is nothing to blockify).
+    pub fn blockified(self) -> Self {
+        match self {
+            Display::Inline | Display::InlineBlock => Display::Block,
+            Display::InlineFlex => Display::Flex,
+            Display::InlineGrid => Display::Grid,
+            Display::InlineTable => Display::Table,
+            Display::TableRow
+            | Display::TableRowGroup
+            | Display::TableHeaderGroup
+            | Display::TableFooterGroup
+            | Display::TableCell
+            | Display::TableCaption
+            | Display::TableColumn
+            | Display::TableColumnGroup => Display::Block,
+            other => other,
+        }
+    }
+
+    /// `table` or `inline-table`: the box that runs table layout.
+    pub fn is_table(self) -> bool {
+        matches!(self, Display::Table | Display::InlineTable)
+    }
+
+    /// `table-row-group`, `table-header-group` or `table-footer-group`.
+    pub fn is_table_row_group(self) -> bool {
+        matches!(
+            self,
+            Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup
+        )
+    }
+
+    /// Any table-internal display (row group, row, cell, caption, column,
+    /// column group): a box that only makes sense inside a table.
+    pub fn is_table_internal(self) -> bool {
+        self.is_table_row_group()
+            || matches!(
+                self,
+                Display::TableRow
+                    | Display::TableCell
+                    | Display::TableCaption
+                    | Display::TableColumn
+                    | Display::TableColumnGroup
+            )
     }
 }
 
@@ -1230,7 +1314,7 @@ pub enum FlexBasis {
 // ==================== Grid Types ====================
 
 /// A grid track size.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum TrackSize {
     /// Fixed length in pixels.
     Px(f32),
@@ -1243,17 +1327,12 @@ pub enum TrackSize {
     /// Size based on content maximum.
     MaxContent,
     /// Auto sizing.
+    #[default]
     Auto,
     /// Minimum/maximum constraint.
     MinMax(Box<TrackSize>, Box<TrackSize>),
     /// Fit content with maximum.
     FitContent(f32),
-}
-
-impl Default for TrackSize {
-    fn default() -> Self {
-        TrackSize::Auto
-    }
 }
 
 impl TrackSize {
@@ -1592,9 +1671,10 @@ impl GridAutoFlow {
 }
 
 /// Grid line reference (for grid-column-start, etc.).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum GridLine {
     /// Auto placement.
+    #[default]
     Auto,
     /// Specific line number (1-based, can be negative).
     Number(i32),
@@ -1604,12 +1684,6 @@ pub enum GridLine {
     Span(u32),
     /// Span to a named line.
     SpanName(String),
-}
-
-impl Default for GridLine {
-    fn default() -> Self {
-        GridLine::Auto
-    }
 }
 
 /// Grid placement for an item.
@@ -1729,20 +1803,15 @@ pub enum FontStyle {
 /// - a number (unitless multiplier of font-size)
 /// - a length (absolute value like `24px`)
 /// - a percentage (of font-size)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LineHeight {
     /// Normal line height (use font metrics, typically ~1.2).
+    #[default]
     Normal,
     /// Unitless number (multiplier of font-size).
     Number(f32),
     /// Absolute length in pixels.
     Px(f32),
-}
-
-impl Default for LineHeight {
-    fn default() -> Self {
-        LineHeight::Normal
-    }
 }
 
 /// Fallback ratio for `line-height: normal` when no font metrics are available.
@@ -1814,6 +1883,16 @@ pub enum Visibility {
     Visible,
     Hidden,
     Collapse,
+}
+
+/// `pointer-events` (CSS UI 4 §8.1; the SVG-only values count as `auto`).
+/// Inherited. A `none` box is no target of a hit test: the point goes to
+/// what is under it, and a descendant can set `auto` again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointerEvents {
+    #[default]
+    Auto,
+    None,
 }
 
 /// Overflow behavior.
@@ -2018,6 +2097,14 @@ pub enum LineBreak {
     Normal,
     Strict,
     Anywhere,
+}
+
+/// `border-collapse` (CSS 2.1 §17.6). Inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderCollapse {
+    #[default]
+    Separate,
+    Collapse,
 }
 
 /// Vertical alignment.
@@ -2299,8 +2386,8 @@ impl BorderStyle {
 /// Primer declares hundreds of `--*` on `:root`, and an element that
 /// overrode one of them used to copy every one of them (~11% of github's
 /// cascade). A lookup walks the chain, first layer that names the property
-/// wins; past `MAX_DEPTH` layers everything above the bottom layer is
-/// collapsed into one, so lookups stay bounded.
+/// wins; past `MAX_DEPTH` layers the small layers on top are collapsed into
+/// one, so lookups stay bounded (`MAX_LAYERS` at most).
 #[derive(Clone, Default)]
 pub struct CustomProperties {
     /// `None` hides an inherited value (`initial`, or a reference cycle).
@@ -2311,6 +2398,11 @@ pub struct CustomProperties {
 
 impl CustomProperties {
     const MAX_DEPTH: u32 = 6;
+    /// A layer with at least this many entries is shared by a collapse, not
+    /// copied into it.
+    const LARGE_LAYER: usize = 64;
+    /// The longest chain large layers can build before they are copied too.
+    const MAX_LAYERS: u32 = 32;
 
     /// One flat layer.
     pub fn from_map(map: std::collections::HashMap<String, String>) -> Self {
@@ -2333,16 +2425,25 @@ impl CustomProperties {
                 depth: parent.depth + 1,
             };
         }
-        // Collapse the layers above the bottom one and keep the bottom shared.
-        // The bottom is usually `:root` with hundreds of entries (Primer);
-        // copying it at every sixth layer was ~15% of github's cascade. The
-        // upper layers are small, and a `None` in them still has to mask the
-        // bottom, so masks are kept.
+        // Collapse the small layers on top into one and keep sharing from the
+        // nearest large layer down, or from the bottom. The bottom is usually
+        // `:root` with hundreds of entries (Primer); copying it at every
+        // sixth layer was ~15% of github's cascade. A page can declare
+        // another large set above the bottom (a theme scope on `<html>` or a
+        // container), and a collapse below that layer shares it the same
+        // way. A `None` in a collapsed layer still has to mask the layers
+        // under it, so masks are kept.
         let mut above = vec![parent];
-        while let Some(p) = above.last().and_then(|l| l.parent.as_ref()) {
-            above.push(p);
+        loop {
+            let top = *above.last().expect("starts with the parent");
+            let shared =
+                top.own.len() >= Self::LARGE_LAYER && top.depth + 1 < Self::MAX_LAYERS;
+            match top.parent.as_ref() {
+                Some(p) if !shared => above.push(p),
+                _ => break,
+            }
         }
-        let bottom = above.pop().expect("chain has a parent").clone();
+        let base = above.pop().expect("starts with the parent").clone();
         let mut merged: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         for layer in above.into_iter().rev() {
@@ -2353,8 +2454,8 @@ impl CustomProperties {
         merged.extend(own);
         Self {
             own: merged,
-            depth: bottom.depth + 1,
-            parent: Some(bottom),
+            depth: base.depth + 1,
+            parent: Some(base),
         }
     }
 
@@ -2412,8 +2513,71 @@ impl std::fmt::Debug for CustomProperties {
     }
 }
 
+impl ComputedStyle {
+    /// Take from `from` the properties that change what is painted and
+    /// nothing else: no box is sized, placed, created or dropped by them,
+    /// and no stacking context comes or goes. The list is deliberately
+    /// short (`opacity`, `transform`, `visibility` and background images
+    /// are not on it); a property left off costs a layout, never a wrong
+    /// frame.
+    pub fn copy_paint_only(&mut self, from: &ComputedStyle) {
+        self.color = from.color;
+        self.background_color = from.background_color;
+        self.border_top_color = from.border_top_color;
+        self.border_right_color = from.border_right_color;
+        self.border_bottom_color = from.border_bottom_color;
+        self.border_left_color = from.border_left_color;
+        self.text_decoration_line = from.text_decoration_line;
+        self.text_decoration_color = from.text_decoration_color;
+        self.text_decoration_style = from.text_decoration_style;
+        self.text_decoration_thickness = from.text_decoration_thickness.clone();
+        self.webkit_text_fill_color = from.webkit_text_fill_color;
+        self.box_shadows = from.box_shadows.clone();
+        self.transition_property = from.transition_property.clone();
+        self.transition_duration = from.transition_duration;
+        self.transition_timing_function = from.transition_timing_function.clone();
+        self.transition_delay = from.transition_delay;
+        // Custom properties are substituted into the values above and
+        // below at the cascade; nothing later reads them but script.
+        self.custom_properties = from.custom_properties.clone();
+    }
+
+    /// Whether the properties [`Self::copy_paint_only`] lists are the same
+    /// in both, custom properties aside (comparing those flattens both
+    /// sets, hundreds of entries on a themed page).
+    pub fn same_paint(&self, other: &ComputedStyle) -> bool {
+        self.color == other.color
+            && self.background_color == other.background_color
+            && self.border_top_color == other.border_top_color
+            && self.border_right_color == other.border_right_color
+            && self.border_bottom_color == other.border_bottom_color
+            && self.border_left_color == other.border_left_color
+            && self.text_decoration_line == other.text_decoration_line
+            && self.text_decoration_color == other.text_decoration_color
+            && self.text_decoration_style == other.text_decoration_style
+            && self.text_decoration_thickness == other.text_decoration_thickness
+            && self.webkit_text_fill_color == other.webkit_text_fill_color
+            && self.box_shadows == other.box_shadows
+            && self.transition_property == other.transition_property
+            && self.transition_duration == other.transition_duration
+            && self.transition_timing_function == other.transition_timing_function
+            && self.transition_delay == other.transition_delay
+    }
+
+    /// Whether `self` and `other` differ, if at all, only in the
+    /// properties [`Self::copy_paint_only`] lists.
+    pub fn differs_only_in_paint(&self, other: &ComputedStyle) -> bool {
+        // With `self`'s paint properties and its custom property set (the
+        // same `Arc`, so that comparison is a pointer check) the rest
+        // must be equal.
+        let mut masked = other.clone();
+        masked.copy_paint_only(self);
+        masked == *self
+    }
+}
+
 /// Computed style for an element.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ComputedStyle {
     // Box model
     pub display: Display,
@@ -2454,11 +2618,12 @@ pub struct ComputedStyle {
     pub border_bottom_style: BorderStyle,
     pub border_left_style: BorderStyle,
 
-    // Border radius (for rounded corners)
-    pub border_top_left_radius: Length,
-    pub border_top_right_radius: Length,
-    pub border_bottom_right_radius: Length,
-    pub border_bottom_left_radius: Length,
+    // Border radius (for rounded corners): a horizontal and a vertical
+    // radius per corner (CSS Backgrounds 3 §5.1)
+    pub border_top_left_radius: CornerRadius,
+    pub border_top_right_radius: CornerRadius,
+    pub border_bottom_right_radius: CornerRadius,
+    pub border_bottom_left_radius: CornerRadius,
 
     // Colors
     pub color: Color,
@@ -2469,6 +2634,8 @@ pub struct ComputedStyle {
     /// Legacy single gradient field - prefer using background_layers.
     /// This is kept for backwards compatibility during migration.
     pub background_gradient: Option<Gradient>,
+    /// `mask-*` layers (CSS Masking 1 §6). Not inherited.
+    pub mask: Mask,
 
     // Typography - Basic
     pub font_size: Length,
@@ -2494,6 +2661,12 @@ pub struct ComputedStyle {
     pub line_break: LineBreak,
     pub vertical_align: VerticalAlign,
     pub writing_mode: WritingMode,
+
+    // Tables (CSS 2.1 §17). Both inherit.
+    /// `border-spacing` as (horizontal, vertical) px. Lengths are absolute
+    /// at computed-value time, so they are stored resolved.
+    pub border_spacing: (f32, f32),
+    pub border_collapse: BorderCollapse,
     pub direction: Direction,
 
     // Positioning offsets
@@ -2534,22 +2707,63 @@ pub struct ComputedStyle {
 
     // Visual
     pub opacity: f32,
+    /// `clip-path` as authored (empty for `none`); layout resolves the
+    /// basic shape against the box it clips. Not inherited.
+    pub clip_path: String,
     pub visibility: Visibility,
+    pub pointer_events: PointerEvents,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
     pub text_overflow: TextOverflow,
+    /// The cascaded `display` was `-webkit-box` (`Some(false)`) or
+    /// `-webkit-inline-box` (`Some(true)`). `display` keeps its previous
+    /// value: the legacy flexbox is not laid out, except in the line-clamp
+    /// form, see [`ComputedStyle::line_clamp`]. Not inherited.
+    pub webkit_box: Option<bool>,
+    /// `-webkit-box-orient: vertical` (or `block-axis`). Not inherited.
+    pub webkit_box_orient_vertical: bool,
+    /// `-webkit-line-clamp: <integer>`; `None` is `none`. Not inherited.
+    pub webkit_line_clamp: Option<u32>,
+    /// css-contain-3 §6.1 `container-type`. Not inherited.
+    pub container_type: ContainerType,
+    /// css-contain-3 §6.2 `container-name`; empty is `none`. Not inherited.
+    pub container_name: Vec<String>,
+    /// A `width` (bit 1), `min-width` (2) or `max-width` (4) value that
+    /// `Length` cannot carry (`min-content`, `-webkit-max-content`,
+    /// `MAX-CONTENT`, ...); layout keeps the previous value. `@container`
+    /// treats the box's width as unknown. Not inherited.
+    pub width_keywords: u8,
+    /// A `writing-mode` other than `horizontal-tb` was declared. Layout
+    /// does not honour it yet, but `@container` treats the box's width as
+    /// unknown (its inline size is the physical height). Not inherited.
+    pub writing_mode_declared: bool,
+    /// `columns` or `column-width` other than `auto` was declared. Layout
+    /// does not split into columns for them yet, but `@container` treats a
+    /// child's width as unknown. Not inherited.
+    pub columns_declared: bool,
+    /// An author `display: contents` (with `display` set to
+    /// `Display::Contents`): the element generates no box, and `@container`
+    /// treats it as having no size. Not inherited.
+    pub display_contents_declared: bool,
 
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,
 
     // Backdrop filter (blur, grayscale, etc.)
     pub backdrop_filter: BackdropFilter,
+    /// `filter` (Filter Effects 1 §5) as declared, lowercased; empty is
+    /// `none`. Paint reads the colour-matrix functions from it
+    /// (`rustkit_layout::filter_color_matrix`). Not inherited.
+    pub filter: String,
 
     // Image/replaced element
     pub image_url: Option<String>,
     pub object_fit: String, // "fill", "contain", "cover", "none", "scale-down"
+    /// `object-position` as a fraction of the free space per axis…
     pub object_position: (f32, f32),
+    /// …plus a pixel offset per axis (`right 10px` is 100% and -10px).
+    pub object_position_offset: (f32, f32),
 
     // Flexbox Container
     pub flex_direction: FlexDirection,
@@ -2616,6 +2830,17 @@ pub struct ComputedStyle {
     pub custom_properties: std::sync::Arc<CustomProperties>,
 }
 
+/// The initial value of `font-family`, which CSS leaves to the UA. Chrome's
+/// default font on macOS is Times (`getComputedStyle` of an unstyled element
+/// reports it). `sans-serif` stood here, so every page that sets no font was
+/// laid out in a sans face: a 28-character line at 16px was 220.78px wide
+/// where Chrome 148 has 199.52.
+#[cfg(target_os = "macos")]
+pub const INITIAL_FONT_FAMILY: &str = "Times";
+/// The initial value of `font-family`, which CSS leaves to the UA.
+#[cfg(not(target_os = "macos"))]
+pub const INITIAL_FONT_FAMILY: &str = "sans-serif";
+
 impl ComputedStyle {
     /// The transform actually applied: `translate`, then `rotate`, then
     /// `scale`, then `transform` (css-transforms-2 §6, "the transformation
@@ -2633,6 +2858,35 @@ impl ComputedStyle {
         std::borrow::Cow::Owned(TransformList { ops })
     }
 
+    /// css-overflow-4 §4.2, the legacy form: a `display: -webkit-box` (or
+    /// `-webkit-inline-box`) with `-webkit-box-orient: vertical` and
+    /// `-webkit-line-clamp: N` shows only its first N line boxes. `Some(N)`
+    /// when all three are set; any of them alone does nothing, as in Chrome.
+    pub fn line_clamp(&self) -> Option<u32> {
+        match (
+            self.webkit_box,
+            self.webkit_box_orient_vertical,
+            self.webkit_line_clamp,
+        ) {
+            (Some(_), true, Some(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Run once the cascade is done: a line-clamped `-webkit-box` is laid
+    /// out as a block container (Chrome computes its display to
+    /// `flow-root`), so the clamp has line boxes to count. Every other
+    /// `-webkit-box` is left alone.
+    pub fn apply_line_clamp_display(&mut self) {
+        if let (Some(inline), Some(_)) = (self.webkit_box, self.line_clamp()) {
+            self.display = if inline {
+                Display::InlineBlock
+            } else {
+                Display::Block
+            };
+        }
+    }
+
     /// Create default style.
     pub fn new() -> Self {
         Self {
@@ -2641,7 +2895,7 @@ impl ComputedStyle {
             opacity: 1.0,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
-            font_family: "sans-serif".to_string(),
+            font_family: INITIAL_FONT_FAMILY.to_string(),
             text_decoration_line: TextDecorationLine::NONE,
             text_decoration_color: None,
             text_decoration_thickness: Length::Auto,
@@ -2672,6 +2926,7 @@ impl ComputedStyle {
             // gaps (Wikipedia globe, live session 2026-08-07).
             object_fit: "fill".to_string(),
             object_position: (0.5, 0.5), // center center
+            object_position_offset: (0.0, 0.0),
             ..Default::default()
         }
     }
@@ -2702,6 +2957,9 @@ impl ComputedStyle {
             // Restored on Linux; the macOS copy drops it (declared divergence).
             webkit_text_fill_color: parent.webkit_text_fill_color,
             visibility: parent.visibility,
+            pointer_events: parent.pointer_events,
+            border_spacing: parent.border_spacing,
+            border_collapse: parent.border_collapse,
 
             // Text decoration is NOT inherited (each element sets its own)
             text_decoration_line: TextDecorationLine::NONE,
@@ -2774,6 +3032,10 @@ pub struct Rule {
     /// Media query lists of the enclosing `@media` blocks, outermost first;
     /// the rule applies only where all of them match (`Rule::applies_at`).
     pub media: Vec<String>,
+    /// Preludes of the enclosing `@container` blocks, outermost first; the
+    /// rule applies to an element only where each holds for its query
+    /// container.
+    pub container: Vec<String>,
     /// Full dotted name of the rule's cascade layer; `None` when unlayered.
     pub layer: Option<String>,
     /// The layer's rank in the document's layer order (`assign_layer_order`):
@@ -2917,6 +3179,7 @@ impl Stylesheet {
             .into_iter()
             .map(|r| Rule {
                 media: r.media,
+                container: r.container,
                 layer: r.layer,
                 layer_order: UNLAYERED,
                 selector: match encode_selector_escapes(&r.selector) {
@@ -2958,12 +3221,18 @@ impl Stylesheet {
     }
 }
 
+pub mod background;
+mod color_mix;
+pub mod mask;
+pub use mask::Mask;
+
 pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
 pub mod media;
-pub use media::media_query_list_matches;
+pub use media::{media_query_list_matches, media_query_list_serialize};
 
+pub mod content;
 pub mod selector_escape;
 pub use selector_escape::{css_ident, encode_selector_escapes};
 
@@ -3117,12 +3386,26 @@ pub fn parse_color(value: &str) -> Option<Color> {
 
     // Hex colors
     if let Some(hex) = value.strip_prefix('#') {
+        // Only hex digits: `from_str_radix` also takes a sign, and the slices
+        // below are by byte.
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
         let (r, g, b, a) = match hex.len() {
             3 => {
                 let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
                 let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
                 let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
                 (r, g, b, 1.0)
+            }
+            // #rgba: each digit doubled, like #rgb (minifiers write
+            // `transparent` as `#0000`)
+            4 => {
+                let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+                let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+                let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+                let a = (u8::from_str_radix(&hex[3..4], 16).ok()? * 17) as f32 / 255.0;
+                (r, g, b, a)
             }
             6 => {
                 let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
@@ -3140,6 +3423,10 @@ pub fn parse_color(value: &str) -> Option<Color> {
             _ => return None,
         };
         return Some(Color::new(r, g, b, a));
+    }
+
+    if value.starts_with("color-mix(") {
+        return color_mix::parse_color_mix(&value.to_lowercase());
     }
 
     // rgb() / rgba()
@@ -3557,6 +3844,104 @@ fn split_css_function_args(args: &str) -> Vec<&str> {
     result
 }
 
+/// Parse `border-spacing`: one length for both axes, or horizontal then
+/// vertical (CSS 2.1 §17.6.1). Negative lengths and percentages are invalid.
+pub fn parse_border_spacing(value: &str) -> Option<(Length, Length)> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    let one = |v: &str| -> Option<Length> {
+        match parse_length(v)? {
+            Length::Zero => Some(Length::Zero),
+            Length::Px(n) | Length::Em(n) | Length::Rem(n) if n < 0.0 => None,
+            l @ (Length::Px(_) | Length::Em(_) | Length::Rem(_)) => Some(l),
+            l @ (Length::Vw(_) | Length::Vh(_) | Length::Vmin(_) | Length::Vmax(_)) => Some(l),
+            _ => None,
+        }
+    };
+    match parts.as_slice() {
+        [h] => {
+            let h = one(h)?;
+            Some((h.clone(), h))
+        }
+        [h, v] => Some((one(h)?, one(v)?)),
+        _ => None,
+    }
+}
+
+/// `display: -webkit-box` / `-webkit-inline-box`: `Some(inline)`, else
+/// `None` (see [`ComputedStyle::webkit_box`]).
+pub fn parse_webkit_box_display(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "-webkit-box" => Some(false),
+        "-webkit-inline-box" => Some(true),
+        _ => None,
+    }
+}
+
+/// css-contain-3 §6.1 `container-type`: what an `@container` query may ask
+/// of the element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContainerType {
+    /// `normal`: a container for style queries only, not for size queries.
+    #[default]
+    Normal,
+    /// `inline-size`: its inline size can be queried.
+    InlineSize,
+    /// `size`: its inline and block sizes can be queried.
+    Size,
+}
+
+/// `container-type: normal | size | inline-size`; `None` when invalid.
+pub fn parse_container_type(value: &str) -> Option<ContainerType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some(ContainerType::Normal),
+        "inline-size" => Some(ContainerType::InlineSize),
+        "size" => Some(ContainerType::Size),
+        _ => None,
+    }
+}
+
+/// `container-name: none | <custom-ident>+`; `None` when invalid.
+pub fn parse_container_name(value: &str) -> Option<Vec<String>> {
+    let names: Vec<&str> = value.split_whitespace().collect();
+    if names.len() == 1 && names[0].eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    let reserved = |n: &str| {
+        ["none", "and", "or", "not", "initial", "inherit", "unset", "default"]
+            .iter()
+            .any(|r| n.eq_ignore_ascii_case(r))
+    };
+    let ident = |n: &str| {
+        let body = n.strip_prefix('-').unwrap_or(n);
+        body.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '-' || !c.is_ascii())
+            && n.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii())
+    };
+    (!names.is_empty() && names.iter().all(|n| ident(n) && !reserved(n)))
+        .then(|| names.iter().map(|n| n.to_string()).collect())
+}
+
+/// The `container` shorthand: `<container-name> [ / <container-type> ]?`.
+pub fn parse_container(value: &str) -> Option<(Vec<String>, ContainerType)> {
+    let (name, kind) = match value.split_once('/') {
+        Some((n, t)) => (n, parse_container_type(t)?),
+        None => (value, ContainerType::Normal),
+    };
+    Some((parse_container_name(name)?, kind))
+}
+
+/// `-webkit-line-clamp: none | <integer [1,∞]>`. `Some(None)` is `none`;
+/// `None` is an invalid value (the declaration is dropped).
+pub fn parse_webkit_line_clamp(value: &str) -> Option<Option<u32>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    match value.parse::<u32>() {
+        Ok(n) if n >= 1 => Some(Some(n)),
+        _ => None,
+    }
+}
+
 /// Parse display value.
 ///
 /// Besides the legacy single keywords, this takes css-display-3's
@@ -3564,8 +3949,9 @@ fn split_css_function_args(args: &str) -> Vec<&str> {
 /// `inline flex`, `block flow list-item`, ...), which were dropped before, so
 /// the element kept its previous display. `flow-root` lays out as a block
 /// (its new formatting context only matters for floats and margin collapse);
-/// `list-item` lays out as its outer display, with no marker. `contents`,
-/// `table*` and `ruby` stay unsupported (`None`).
+/// `list-item` lays out as its outer display, with no marker. The CSS 2.1
+/// table keywords (and `block table` / `inline table`) map to the table
+/// variants. `ruby` stays unsupported (`None`).
 pub fn parse_display(value: &str) -> Option<Display> {
     let value = value.trim().to_lowercase();
     match value.as_str() {
@@ -3577,13 +3963,24 @@ pub fn parse_display(value: &str) -> Option<Display> {
         "grid" => return Some(Display::Grid),
         "inline-grid" => return Some(Display::InlineGrid),
         "none" => return Some(Display::None),
+        "contents" => return Some(Display::Contents),
+        "table" => return Some(Display::Table),
+        "inline-table" => return Some(Display::InlineTable),
+        "table-row-group" => return Some(Display::TableRowGroup),
+        "table-header-group" => return Some(Display::TableHeaderGroup),
+        "table-footer-group" => return Some(Display::TableFooterGroup),
+        "table-row" => return Some(Display::TableRow),
+        "table-cell" => return Some(Display::TableCell),
+        "table-caption" => return Some(Display::TableCaption),
+        "table-column" => return Some(Display::TableColumn),
+        "table-column-group" => return Some(Display::TableColumnGroup),
         _ => {}
     }
     let (mut outer, mut inner, mut list_item) = (None, None, false);
     for token in value.split_whitespace() {
         match token {
             "block" | "inline" if outer.is_none() => outer = Some(token),
-            "flow" | "flow-root" | "flex" | "grid" if inner.is_none() => inner = Some(token),
+            "flow" | "flow-root" | "flex" | "grid" | "table" if inner.is_none() => inner = Some(token),
             "list-item" if !list_item => list_item = true,
             _ => return None,
         }
@@ -3601,6 +3998,8 @@ pub fn parse_display(value: &str) -> Option<Display> {
         (true, "flex") => Display::InlineFlex,
         (false, "grid") => Display::Grid,
         (true, "grid") => Display::InlineGrid,
+        (false, "table") => Display::Table,
+        (true, "table") => Display::InlineTable,
         (true, "flow-root") => Display::InlineBlock,
         (true, _) => Display::Inline,
         (false, _) => Display::Block,
@@ -3660,9 +4059,8 @@ mod tests {
             // Legacy keywords are unchanged.
             ("inline-block", Some(Display::InlineBlock)),
             ("none", Some(Display::None)),
-            // Unsupported or invalid: still ignored.
-            ("contents", None),
-            ("table", None),
+            ("contents", Some(Display::Contents)),
+            // Invalid: still ignored.
             ("block block", None),
             ("flex list-item", None),
             ("block wobble", None),
@@ -3674,10 +4072,177 @@ mod tests {
     }
 
     #[test]
+    fn webkit_line_clamp_needs_webkit_box_vertical_orient_and_a_count() {
+        assert_eq!(parse_webkit_box_display("-webkit-box"), Some(false));
+        assert_eq!(parse_webkit_box_display(" -WEBKIT-INLINE-BOX "), Some(true));
+        assert_eq!(parse_webkit_box_display("flex"), None);
+        assert_eq!(parse_webkit_line_clamp("2"), Some(Some(2)));
+        assert_eq!(parse_webkit_line_clamp("none"), Some(None));
+        for bad in ["0", "-1", "1.5", "2px", ""] {
+            assert_eq!(parse_webkit_line_clamp(bad), None, "{bad:?}");
+        }
+
+        let mut s = ComputedStyle::new();
+        s.webkit_box = Some(false);
+        s.webkit_box_orient_vertical = true;
+        s.webkit_line_clamp = Some(2);
+        assert_eq!(s.line_clamp(), Some(2));
+        s.display = Display::Flex;
+        s.apply_line_clamp_display();
+        assert_eq!(
+            s.display,
+            Display::Block,
+            "a clamped -webkit-box is a block container"
+        );
+        s.webkit_box = Some(true);
+        s.apply_line_clamp_display();
+        assert_eq!(s.display, Display::InlineBlock);
+
+        // Any one of the three missing: no clamp, display untouched.
+        for (webkit_box, vertical, count) in [
+            (None, true, Some(2)),
+            (Some(false), false, Some(2)),
+            (Some(false), true, None),
+        ] {
+            let mut s = ComputedStyle::new();
+            s.display = Display::Inline;
+            (
+                s.webkit_box,
+                s.webkit_box_orient_vertical,
+                s.webkit_line_clamp,
+            ) = (webkit_box, vertical, count);
+            assert_eq!(s.line_clamp(), None);
+            s.apply_line_clamp_display();
+            assert_eq!(s.display, Display::Inline);
+        }
+    }
+
+    #[test]
+    fn display_blockifies_inline_level_and_table_internal_values() {
+        assert_eq!(Display::Inline.blockified(), Display::Block);
+        assert_eq!(Display::InlineBlock.blockified(), Display::Block);
+        assert_eq!(Display::InlineFlex.blockified(), Display::Flex);
+        assert_eq!(Display::InlineGrid.blockified(), Display::Grid);
+        assert_eq!(Display::InlineTable.blockified(), Display::Table);
+        assert_eq!(Display::TableCell.blockified(), Display::Block);
+        assert_eq!(Display::TableRow.blockified(), Display::Block);
+        assert_eq!(Display::TableCaption.blockified(), Display::Block);
+        assert_eq!(Display::Contents.blockified(), Display::Contents);
+        assert_eq!(Display::None.blockified(), Display::None);
+        assert_eq!(Display::Block.blockified(), Display::Block);
+        assert_eq!(Display::Flex.blockified(), Display::Flex);
+    }
+
+    #[test]
+    fn display_takes_the_table_keywords() {
+        let cases: &[(&str, Display)] = &[
+            ("table", Display::Table),
+            ("inline-table", Display::InlineTable),
+            ("table-row-group", Display::TableRowGroup),
+            ("table-header-group", Display::TableHeaderGroup),
+            ("table-footer-group", Display::TableFooterGroup),
+            ("table-row", Display::TableRow),
+            ("table-cell", Display::TableCell),
+            ("table-caption", Display::TableCaption),
+            ("table-column", Display::TableColumn),
+            ("table-column-group", Display::TableColumnGroup),
+            ("TABLE-CELL", Display::TableCell),
+            // css-display-3 two-value forms.
+            ("block table", Display::Table),
+            ("inline table", Display::InlineTable),
+            ("table inline", Display::InlineTable),
+        ];
+        for (value, want) in cases {
+            assert_eq!(parse_display(value), Some(*want), "display: {value:?}");
+        }
+        for bad in ["table-cell inline", "table table", "table list-item", "table-rows"] {
+            assert_eq!(parse_display(bad), None, "display: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn table_display_predicates() {
+        assert!(Display::Table.is_table() && Display::InlineTable.is_table());
+        assert!(!Display::TableCell.is_table());
+        assert!(Display::InlineTable.is_inline_level());
+        assert!(Display::InlineTable.is_atomic_inline());
+        assert!(!Display::Table.is_inline_level());
+        for d in [
+            Display::TableRowGroup,
+            Display::TableHeaderGroup,
+            Display::TableFooterGroup,
+        ] {
+            assert!(d.is_table_row_group(), "{d:?}");
+        }
+        assert!(!Display::TableRow.is_table_row_group());
+        for d in [
+            Display::TableRowGroup,
+            Display::TableRow,
+            Display::TableCell,
+            Display::TableCaption,
+            Display::TableColumn,
+            Display::TableColumnGroup,
+        ] {
+            assert!(d.is_table_internal(), "{d:?}");
+            assert!(!d.is_inline_level(), "{d:?}");
+        }
+        assert!(!Display::Table.is_table_internal());
+        assert!(!Display::Block.is_table_internal());
+    }
+
+    #[test]
+    fn border_spacing_takes_one_or_two_lengths() {
+        assert_eq!(
+            parse_border_spacing("2px"),
+            Some((Length::Px(2.0), Length::Px(2.0)))
+        );
+        assert_eq!(
+            parse_border_spacing("10px 4px"),
+            Some((Length::Px(10.0), Length::Px(4.0)))
+        );
+        assert_eq!(parse_border_spacing("0"), Some((Length::Zero, Length::Zero)));
+        assert_eq!(
+            parse_border_spacing(" 0.2em 0 "),
+            Some((Length::Em(0.2), Length::Zero))
+        );
+        // Negative lengths, percentages, keywords and three values are invalid.
+        for bad in ["-1px", "10%", "auto", "1px 2px 3px", "", "red"] {
+            assert_eq!(parse_border_spacing(bad), None, "border-spacing: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn border_spacing_and_collapse_inherit() {
+        let mut parent = ComputedStyle::new();
+        parent.border_spacing = (3.0, 4.0);
+        parent.border_collapse = BorderCollapse::Collapse;
+        let child = ComputedStyle::inherit_from(&parent);
+        assert_eq!(child.border_spacing, (3.0, 4.0));
+        assert_eq!(child.border_collapse, BorderCollapse::Collapse);
+        assert_eq!(ComputedStyle::new().border_spacing, (0.0, 0.0));
+    }
+
+    #[test]
     fn test_parse_color_hex() {
         assert_eq!(parse_color("#fff"), Some(Color::from_rgb(255, 255, 255)));
         assert_eq!(parse_color("#000000"), Some(Color::BLACK));
         assert_eq!(parse_color("#ff0000"), Some(Color::from_rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn a_four_digit_hex_colour_carries_its_alpha() {
+        // What minifiers write for `transparent`.
+        assert_eq!(parse_color("#0000"), Some(Color::new(0, 0, 0, 0.0)));
+        assert_eq!(parse_color("#f00f"), Some(Color::from_rgb(255, 0, 0)));
+        assert_eq!(parse_color("#0f08"), parse_color("#00ff0088"));
+        assert_eq!(parse_color("#FFFA"), parse_color("#ffffffaa"));
+    }
+
+    #[test]
+    fn a_hex_colour_is_hex_digits_only() {
+        for bad in ["#+f+f+f", "#-ff", "#ggg", "#12345", "#", "#\u{e9}1", "#\u{e9}\u{e9}\u{e9}"] {
+            assert_eq!(parse_color(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
@@ -3998,7 +4563,7 @@ mod tests {
             final_line_names: vec![],
         };
 
-        let (expanded, auto_repeat) = template.expand_tracks();
+        let (expanded, _auto_repeat) = template.expand_tracks();
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].size, TrackSize::Px(100.0));
         assert_eq!(expanded[1].size, TrackSize::Fr(1.0));
@@ -4021,7 +4586,7 @@ mod tests {
             final_line_names: vec![],
         };
 
-        let (expanded, auto_repeat) = template.expand_tracks();
+        let (expanded, _auto_repeat) = template.expand_tracks();
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].size, TrackSize::Px(100.0));
         assert_eq!(expanded[1].size, TrackSize::Fr(1.0));
@@ -4472,6 +5037,10 @@ mod computed_style_field_guards {
             // it — a child of a fill-colored element fell back to plain color.
             // Declared divergence from the reference, flagged upstream.
             webkit_text_fill_color,
+            // 2026-10-15 macOS adoption (develop 73ae13cb): pointer-events,
+            // border-spacing and border-collapse inherit (css-ui-4 / css-tables-3)
+            // and the adopted inherit_from copies them.
+            pointer_events, border_spacing, border_collapse,
             // ---- NOT INHERITED: reset to an initial by inherit_from, or
             //      deliberately left to Default because Default IS the CSS
             //      initial. NOTE min_width/min_height are NOT in that group any
@@ -4505,6 +5074,9 @@ mod computed_style_field_guards {
             aspect_ratio, background_layers, background_gradient, box_sizing,
             backdrop_filter, image_url, object_fit, object_position, content,
             background_clip,
+            // 2026-10-15 adoption: mask (css-masking-1) and the resolved
+            // object-position offset are NOT inherited.
+            mask, object_position_offset,
             // Offsets and z-index: NOT inherited. A child does not adopt its
             // parent's `top: 20px` - that would cascade a positioned parent's
             // displacement onto every descendant.
@@ -4522,6 +5094,12 @@ mod computed_style_field_guards {
             float, clear, border_top_style, border_right_style,
             border_bottom_style, border_left_style, translate, rotate, scale,
             text_overflow, column_count, custom_properties,
+            // 2026-10-29 S1 sync additions (73ae13cb..d16d0f89), all NOT
+            // inherited in inherit_from (note: writing_mode_declared non-inheritance
+            // while writing-mode is inherited in CSS is flagged in audit-castor.md).
+            clip_path, webkit_box, webkit_box_orient_vertical, webkit_line_clamp,
+            container_type, container_name, width_keywords, writing_mode_declared,
+            columns_declared, display_contents_declared, filter,
         } = ComputedStyle::new();
 
         // THE PARTITION IS CHECKED, NOT MERELY DOCUMENTED - and every
@@ -4564,6 +5142,9 @@ mod computed_style_field_guards {
         parent.overflow_wrap = OverflowWrap::Anywhere;
         parent.line_break = LineBreak::Strict;
         parent.visibility = Visibility::Hidden;
+        parent.pointer_events = PointerEvents::None;
+        parent.border_spacing = (3.0, 4.0);
+        parent.border_collapse = BorderCollapse::Collapse;
         // Non-inherited fields, given non-default values so that "was reset"
         // is distinguishable from "happened to already be the initial".
         parent.width = Length::Px(500.0);
@@ -4573,7 +5154,7 @@ mod computed_style_field_guards {
 
         let child = ComputedStyle::inherit_from(&parent);
 
-        // ---- all 19 inherited fields ----
+        // ---- all 22 inherited fields ----
         assert_eq!(child.overflow_wrap, OverflowWrap::Anywhere, "overflow-wrap must inherit");
         assert_eq!(child.line_break, LineBreak::Strict, "line-break must inherit");
         assert_eq!(child.visibility, Visibility::Hidden, "visibility must inherit");
@@ -4593,6 +5174,9 @@ mod computed_style_field_guards {
         assert_eq!(child.word_break, WordBreak::BreakAll, "word-break must inherit");
         assert_eq!(child.word_spacing, Length::Px(6.25), "word-spacing must inherit");
         assert_eq!(child.writing_mode, WritingMode::VerticalRl, "writing-mode must inherit");
+        assert_eq!(child.pointer_events, PointerEvents::None, "pointer-events must inherit");
+        assert_eq!(child.border_spacing, (3.0, 4.0), "border-spacing must inherit");
+        assert_eq!(child.border_collapse, BorderCollapse::Collapse, "border-collapse must inherit");
 
         // ---- the four non-inherited fields whose DERIVED default is wrong,
         //      i.e. the exact ones that produced the blank-page near-miss ----
@@ -4620,6 +5204,7 @@ mod computed_style_field_guards {
     #[test]
     fn every_field_has_a_deliberate_initial_value() {
         let ComputedStyle {
+            mask, border_spacing, border_collapse, pointer_events, object_position_offset,
             align_content, align_items, align_self, animation_delay,
             animation_direction, animation_duration, animation_fill_mode, animation_iteration_count,
             animation_name, animation_play_state, animation_timing_function, background_color,
@@ -4657,7 +5242,24 @@ mod computed_style_field_guards {
             border_top_style, border_right_style, border_bottom_style,
             border_left_style, translate, rotate, scale, text_overflow,
             column_count, custom_properties,
+            // 2026-10-29 S1 sync additions.
+            clip_path, webkit_box, webkit_box_orient_vertical, webkit_line_clamp,
+            container_type, container_name, width_keywords, writing_mode_declared,
+            columns_declared, display_contents_declared, filter,
         } = ComputedStyle::new();
+
+        // 2026-10-29 S1 sync additions: verify initial values.
+        assert!(clip_path.is_empty(), "clip-path initial is none (empty)");
+        assert_eq!(webkit_box, None, "webkit_box initial is None");
+        assert!(!webkit_box_orient_vertical, "webkit_box_orient_vertical initial is false");
+        assert_eq!(webkit_line_clamp, None, "webkit-line-clamp initial is none (None)");
+        assert_eq!(container_type, ContainerType::Normal, "container-type initial is normal");
+        assert!(container_name.is_empty(), "container-name initial is none (empty)");
+        assert_eq!(width_keywords, 0, "width_keywords initial is 0");
+        assert!(!writing_mode_declared, "writing_mode_declared initial is false");
+        assert!(!columns_declared, "columns_declared initial is false");
+        assert!(!display_contents_declared, "display_contents_declared initial is false");
+        assert!(filter.is_empty(), "filter initial is none (empty)");
 
         // Wave-6 additions: each derived default is the CSS initial.
         assert_eq!(float, Float::None, "float initial is none");
@@ -4733,10 +5335,18 @@ mod computed_style_field_guards {
         // and blanked the page. Same shape as min_width: right by virtue of a
         // good default, asserted so it is visibly true rather than accidentally
         // true.
-        assert_eq!(border_top_left_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
-        assert_eq!(border_top_right_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
-        assert_eq!(border_bottom_right_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
-        assert_eq!(border_bottom_left_radius, Length::Zero, "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_top_left_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_top_right_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_bottom_right_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
+        assert_eq!(border_bottom_left_radius, CornerRadius::circular(Length::Zero), "border-radius initial IS 0 - deliberate");
+
+        // 2026-10-15 adoption (develop 73ae13cb). Each derived Default IS the
+        // CSS initial here, asserted so that stays a decision.
+        assert_eq!(mask, crate::mask::Mask::default(), "mask initial is none");
+        assert_eq!(border_spacing, (0.0, 0.0), "border-spacing initial is 0 0");
+        assert_eq!(border_collapse, BorderCollapse::Separate, "border-collapse initial is separate");
+        assert_eq!(pointer_events, PointerEvents::Auto, "pointer-events initial is auto");
+        assert_eq!(object_position_offset, (0.0, 0.0), "object-position offset starts at 0 0");
     }
 }
 
@@ -4845,6 +5455,63 @@ mod custom_properties_collapse_tests {
         assert_eq!(collapsed.get("--r3"), Some("3"));
         assert_eq!(collapsed.to_map(), expected);
         assert!(collapsed.own.len() < 10, "only the upper layers were copied");
+    }
+
+    /// A theme scope puts a large layer above the bottom. Collapses below it
+    /// copy the small layers only: the large one stays shared and still
+    /// answers, masked where a small layer says so.
+    #[test]
+    fn collapse_shares_a_large_layer_above_the_bottom() {
+        let bottom = Arc::new(CustomProperties::from_map(
+            [("--root".to_string(), "r".to_string())].into(),
+        ));
+        let theme: HashMap<String, Option<String>> =
+            (0..500).map(|i| (format!("--t{i}"), Some(format!("{i}")))).collect();
+        let theme = Arc::new(CustomProperties::over(&bottom, theme));
+        let mut cur = theme.clone();
+        let mut flat = cur.to_map();
+        for i in 0..40 {
+            let name = format!("--s{}", i % 7);
+            let value = format!("v{i}");
+            let mut own = layer(&[(name.as_str(), Some(value.as_str()))]);
+            flat.insert(name, value);
+            if i % 5 == 0 {
+                own.insert(format!("--t{i}"), None);
+                flat.remove(&format!("--t{i}"));
+            }
+            cur = Arc::new(CustomProperties::over(&cur, own));
+
+            assert_eq!(cur.to_map(), flat, "layer {i}");
+            assert!(cur.depth < CustomProperties::MAX_DEPTH, "layer {i}");
+            let mut l = &cur;
+            let mut copied = 0;
+            while !Arc::ptr_eq(l, &theme) {
+                copied += l.own.len();
+                l = l.parent.as_ref().expect("the theme layer is still in the chain");
+            }
+            assert!(copied < 64, "layer {i} holds {copied} entries above the theme");
+        }
+    }
+
+    /// Large layers are shared by a collapse, so nesting them deepens the
+    /// chain. Past `MAX_LAYERS` they are copied after all, and the chain
+    /// stays bounded.
+    #[test]
+    fn a_stack_of_large_layers_stays_bounded() {
+        let mut cur = Arc::new(CustomProperties::from_map(HashMap::new()));
+        let mut flat = cur.to_map();
+        for i in 0..100 {
+            let own: HashMap<String, Option<String>> = (0..CustomProperties::LARGE_LAYER)
+                .map(|j| (format!("--v{}", (i * 31 + j) % 400), Some(format!("{i}.{j}"))))
+                .collect();
+            for (k, v) in &own {
+                flat.insert(k.clone(), v.clone().expect("set"));
+            }
+            cur = Arc::new(CustomProperties::over(&cur, own));
+
+            assert!(cur.depth < CustomProperties::MAX_LAYERS, "layer {i}: depth {}", cur.depth);
+            assert_eq!(cur.to_map(), flat, "layer {i}");
+        }
     }
 }
 

@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,11 +27,12 @@ use url::Url;
 pub mod cache;
 pub mod download;
 pub mod intercept;
+pub mod policy;
 pub mod security;
 
 pub use cache::{cache_eligibility, CacheConfig, CacheKey, CacheStats, CachedResponse, Ineligible, MemoryCache, parse_cache_control};
 pub use download::{Download, DownloadEvent, DownloadId, DownloadManager, DownloadState};
-pub use intercept::{InterceptAction, InterceptHandler, RequestInterceptor};
+pub use intercept::{BlockReason, InterceptAction, InterceptHandler, RequestInterceptor};
 pub use security::{
     check_mixed_content, ContentSecurityPolicy, CookieAttributes, CorsChecker, CorsResult,
     CspDirective, CspSource, HashAlgorithm, MixedContentResult, MixedContentType, Origin,
@@ -53,8 +54,10 @@ pub enum NetError {
     #[error("Request cancelled")]
     Cancelled,
 
+    /// Refused by the interceptor (the shield), with its list and rule
+    /// when the handler gave them.
     #[error("Request blocked")]
-    Blocked,
+    Blocked(Option<BlockReason>),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -102,8 +105,12 @@ pub enum RequestDestination {
     Image,
     /// Web font.
     Font,
-    /// Anything else (API fetches, unknown).
+    /// Anything else (unknown).
     Other,
+    /// A script's `fetch()` call (governed by [`policy::FetchPolicy`]).
+    Fetch,
+    /// A script's `XMLHttpRequest` (governed by [`policy::FetchPolicy`]).
+    Xhr,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +131,8 @@ pub struct Request {
     /// never sent as-is.
     pub referrer: Option<Url>,
     pub referrer_policy: ReferrerPolicy,
+    /// Whether this request has already been rewritten to a replay proxy.
+    pub is_replay_proxied: bool,
 }
 
 impl Request {
@@ -140,6 +149,7 @@ impl Request {
             referrer: None,
             referrer_policy: ReferrerPolicy::default(),
             destination: RequestDestination::Other,
+            is_replay_proxied: false,
         }
     }
 
@@ -156,6 +166,7 @@ impl Request {
             referrer: None,
             referrer_policy: ReferrerPolicy::default(),
             destination: RequestDestination::Other,
+            is_replay_proxied: false,
         }
     }
 
@@ -187,6 +198,23 @@ impl Request {
     pub fn referrer_policy(mut self, policy: ReferrerPolicy) -> Self {
         self.referrer_policy = policy;
         self
+    }
+}
+
+/// Whether `request` sends and keeps cookies: a navigation always; any
+/// other request as its credentials mode says, `SameOrigin` judged against
+/// the document that made it (one with no document is its own origin).
+fn sends_cookies(request: &Request) -> bool {
+    match request.credentials {
+        CredentialsMode::Omit => false,
+        CredentialsMode::Include => true,
+        CredentialsMode::SameOrigin => {
+            request.destination == RequestDestination::Document
+                || request
+                    .referrer
+                    .as_ref()
+                    .is_none_or(|page| page.origin() == request.url.origin())
+        }
     }
 }
 
@@ -357,6 +385,14 @@ pub struct Response {
     pub headers: HeaderMap,
     pub content_type: Option<Mime>,
     pub content_length: Option<u64>,
+    /// Answered from the loader's memory cache, without a request.
+    pub from_cache: bool,
+    /// Body bytes as transferred, before `Content-Encoding` was undone;
+    /// `None` when nothing was transferred (cache, `data:`).
+    pub encoded_body_size: Option<u64>,
+    /// Redirects followed to get here: each URL that redirected, and its
+    /// status.
+    pub redirect_chain: Vec<(Url, StatusCode)>,
     body: ResponseBody,
 }
 
@@ -444,6 +480,8 @@ pub struct LoaderConfig {
     pub max_redirects: usize,
     /// Enable cookies.
     pub cookies_enabled: bool,
+    /// Optional replay proxy URL (test-only, for deterministic HAR replay).
+    pub replay_proxy: Option<Url>,
 }
 
 impl Default for LoaderConfig {
@@ -454,6 +492,7 @@ impl Default for LoaderConfig {
             default_timeout: Duration::from_secs(30),
             max_redirects: 10,
             cookies_enabled: true,
+            replay_proxy: None,
         }
     }
 }
@@ -516,6 +555,13 @@ impl ResourceLoader {
         self.interceptor = Some(Arc::new(RwLock::new(interceptor)));
     }
 
+    /// Test seam: resolve names through `resolver` instead of the system.
+    #[cfg(test)]
+    pub(crate) fn with_resolver(mut self, resolver: Arc<dyn rustkit_http::Resolve>) -> Self {
+        self.client = self.client.with_resolver(resolver);
+        self
+    }
+
     /// Get the download manager.
     pub fn download_manager(&self) -> Arc<DownloadManager> {
         Arc::clone(&self.download_manager)
@@ -526,35 +572,106 @@ impl ResourceLoader {
         &self.client
     }
 
+    /// Returns the restricted loopback address policy when a replay proxy is configured.
+    pub fn replay_proxy_address_policy(&self) -> Option<rustkit_http::AddressPolicy> {
+        self.config.replay_proxy.as_ref().map(|proxy| {
+            let port = proxy.port_or_known_default().unwrap_or(80);
+            rustkit_http::AddressPolicy::Custom(Arc::new(move |a| {
+                a.ip().is_loopback() && a.port() == port
+            }))
+        })
+    }
+
     /// Fetch a URL.
     pub async fn fetch(&self, request: Request) -> Result<Response, NetError> {
+        // A subresource (anything with a document referrer that is not itself
+        // the navigation) may not reach private addresses on behalf of a
+        // public page, on any redirect hop. Navigations and referrer-less
+        // loads are unchanged.
+        let policy = match self.replay_proxy_address_policy() {
+            Some(proxy_policy) => proxy_policy,
+            None => match (&request.referrer, request.destination) {
+                (Some(page), dest) if dest != RequestDestination::Document => {
+                    policy::page_address_policy(page, &request.url)
+                }
+                _ => rustkit_http::AddressPolicy::Any,
+            },
+        };
+        let cookies = sends_cookies(&request);
+        if matches!(policy, rustkit_http::AddressPolicy::Any) && cookies {
+            return self.fetch_with(request, &self.client, true).await;
+        }
+        // The shared cache is keyed by URL alone and would answer a private
+        // URL without connecting.
+        let use_cache = !policy::url_host_is_private(&request.url);
+        let mut client = self.client.clone().with_address_policy(policy);
+        if !cookies {
+            client = client.with_cookies(None);
+        }
+        self.fetch_with(request, &client, use_cache).await
+    }
+
+    /// The jar every request with credentials sends and keeps cookies
+    /// with (`None` with cookies disabled). `document.cookie` reads and
+    /// writes it too.
+    pub fn cookie_jar(&self) -> Option<Arc<rustkit_http::CookieJar>> {
+        self.client.cookie_jar().cloned()
+    }
+
+    /// One hop of a governed (script-initiated) request: the same pipeline as
+    /// [`fetch`](Self::fetch) (interceptor/shield, `data:`, cache, headers),
+    /// over a client that refuses addresses outside `address_policy`, does
+    /// not follow redirects (the policy vets and follows each hop itself) and
+    /// refuses bodies over `max_body`. `use_cache` is false for requests whose
+    /// response depends on the `Origin` header.
+    pub(crate) async fn fetch_governed_hop(
+        &self,
+        request: Request,
+        address_policy: rustkit_http::AddressPolicy,
+        max_body: usize,
+        use_cache: bool,
+    ) -> Result<Response, NetError> {
+        let policy = self.replay_proxy_address_policy().unwrap_or(address_policy);
+        let mut client = self
+            .client
+            .clone()
+            .with_address_policy(policy)
+            .with_follow_redirects(false)
+            .with_max_body(max_body);
+        // The policy says which hops carry cookies (`credentials`).
+        if !sends_cookies(&request) {
+            client = client.with_cookies(None);
+        }
+        self.fetch_with(request, &client, use_cache).await
+    }
+
+    async fn fetch_with(
+        &self,
+        request: Request,
+        client: &HttpClient,
+        use_cache: bool,
+    ) -> Result<Response, NetError> {
+        let mut trace = FetchTrace::begin(&request);
+        let result = self.fetch_with_inner(request, client, use_cache).await;
+        trace.finish(&result);
+        result
+    }
+
+    async fn fetch_with_inner(
+        &self,
+        request: Request,
+        client: &HttpClient,
+        use_cache: bool,
+    ) -> Result<Response, NetError> {
         debug!(url = %request.url, method = %request.method, "Fetching resource");
 
-        // Apply interception
-        if let Some(interceptor) = &self.interceptor {
-            let action = interceptor.read().await.intercept(&request).await;
-            match action {
-                InterceptAction::Allow => {}
-                InterceptAction::Block => {
-                    warn!(url = %request.url, "Request blocked by interceptor");
-                    return Err(NetError::Blocked);
-                }
-                InterceptAction::Redirect(new_url) => {
-                    debug!(url = %request.url, new_url = %new_url, "Request redirected");
-                    let mut new_request = request.clone();
-                    new_request.url = new_url;
-                    return Box::pin(self.fetch(new_request)).await;
-                }
-                InterceptAction::Modify(modified) => {
-                    return Box::pin(self.fetch(*modified)).await;
-                }
-            }
-        }
-        
         // data: URLs (RFC 2397) carry their own body — answer them here instead
         // of sending them to the HTTP client, which rejects them for having no
         // host. Sites inline small stylesheets, fonts, images and scripts this
-        // way (facebook ships a base64 `data:text/css` sheet).
+        // way (facebook ships a base64 `data:text/css` sheet). First, before
+        // the replay proxy and the interceptor: a `data:` URL is not a
+        // request, so the shield never sees one (it logged "Failed to create
+        // request" for each of reddit's `data:` scripts) and cannot block it.
         if request.url.scheme() == "data" {
             let (content_type, body) = decode_data_url(request.url.as_str())?;
             let mut headers = HeaderMap::new();
@@ -568,12 +685,62 @@ impl ResourceLoader {
                 headers,
                 content_type: content_type.parse::<Mime>().ok(),
                 content_length: Some(body.len() as u64),
+                from_cache: false,
+                encoded_body_size: None,
+                redirect_chain: Vec::new(),
                 body: ResponseBody::Full(Bytes::from(body)),
             });
         }
 
+        // If replay_proxy is configured, rewrite outbound socket request to proxy on first entry
+        if let Some(ref proxy) = self.config.replay_proxy {
+            if !request.is_replay_proxied {
+                let mut req = request.clone();
+                req.is_replay_proxied = true;
+                let orig_url_str = req.url.to_string();
+                if let Ok(val) = HeaderValue::try_from(orig_url_str.as_str()) {
+                    req.headers.insert(HeaderName::from_static("x-original-url"), val);
+                }
+                if let Some(host) = req.url.host_str() {
+                    if let Ok(val) = HeaderValue::try_from(host) {
+                        req.headers.insert(HeaderName::from_static("host"), val);
+                    }
+                }
+                let mut proxy_target = proxy.clone();
+                proxy_target.set_path(req.url.path());
+                proxy_target.set_query(req.url.query());
+                req.url = proxy_target;
+                return Box::pin(self.fetch_with(req, client, false)).await;
+            }
+        }
+
+        // Apply interception
+        if let Some(interceptor) = &self.interceptor {
+            let action = interceptor.read().await.intercept(&request).await;
+            match action {
+                InterceptAction::Allow => {}
+                InterceptAction::Block => {
+                    warn!(url = %request.url, "Request blocked by interceptor");
+                    return Err(NetError::Blocked(None));
+                }
+                InterceptAction::BlockedBy(reason) => {
+                    warn!(url = %request.url, list = %reason.list, "Request blocked by interceptor");
+                    return Err(NetError::Blocked(Some(reason)));
+                }
+                InterceptAction::Redirect(new_url) => {
+                    debug!(url = %request.url, new_url = %new_url, "Request redirected");
+                    let mut new_request = request.clone();
+                    new_request.url = new_url;
+                    return Box::pin(self.fetch_with(new_request, client, use_cache)).await;
+                }
+                InterceptAction::Modify(modified) => {
+                    return Box::pin(self.fetch_with(*modified, client, use_cache)).await;
+                }
+            }
+        }
+        
         // Check cache for GET requests
-        let cache_key = if request.method == Method::GET && self.cache.enabled() {
+        let cache_key = if use_cache && request.method == Method::GET && self.cache.enabled() {
             let key = CacheKey::new(&request.url);
             if let Some(cached) = self.cache.get(&key) {
                 debug!(url = %request.url, "Serving from cache");
@@ -591,6 +758,9 @@ impl ResourceLoader {
                     headers: cached.headers,
                     content_type,
                     content_length: Some(cached.body.len() as u64),
+                    from_cache: true,
+                    encoded_body_size: None,
+                    redirect_chain: Vec::new(),
                     body: ResponseBody::Full(cached.body),
                 });
             }
@@ -623,8 +793,7 @@ impl ResourceLoader {
         }
 
         // Execute request using rustkit-http
-        let http_response = self
-            .client
+        let http_response = client
             .request(
                 request.method.clone(),
                 request.url.as_str(),
@@ -724,6 +893,9 @@ impl ResourceLoader {
             headers: http_response.headers,
             content_type,
             content_length,
+            from_cache: false,
+            encoded_body_size: Some(http_response.encoded_body_size),
+            redirect_chain: http_response.redirect_chain,
             body: ResponseBody::Full(http_response.body),
         })
     }
@@ -805,6 +977,89 @@ pub struct FetchOptions {
     pub redirect: Option<String>,
 }
 
+/// `method`, `url`, `status` (`-` when unknown), `disposition`
+/// (`issued`, `response`, `blocked`, `timeout`, `error`, `cancelled`).
+pub type FetchDiag = fn(&str, &str, &str, &str);
+
+static FETCH_HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static FETCH_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// The engine installs this once. A null hook, or [`set_fetch_diag_armed`]
+/// left false, means [`ResourceLoader::fetch`] does no extra work.
+pub fn set_fetch_diag(hook: Option<FetchDiag>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    FETCH_HOOK.store(ptr, Ordering::Relaxed);
+}
+
+/// Arm the fetch log. Off by default, so a fetch allocates nothing for it.
+pub fn set_fetch_diag_armed(on: bool) {
+    FETCH_ARMED.store(on, Ordering::Relaxed);
+}
+
+fn note_fetch(method: &str, url: &str, status: &str, disposition: &str) {
+    let ptr = FETCH_HOOK.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: stored from a `FetchDiag` function pointer, or null (returned
+    // above). The engine installs one static function for the process.
+    let hook: FetchDiag = unsafe { std::mem::transmute(ptr) };
+    hook(method, url, status, disposition);
+}
+
+struct FetchTrace {
+    method: String,
+    url: String,
+    finished: bool,
+}
+
+impl FetchTrace {
+    fn begin(request: &Request) -> Self {
+        if !FETCH_ARMED.load(Ordering::Relaxed) || FETCH_HOOK.load(Ordering::Relaxed).is_null() {
+            return Self {
+                method: String::new(),
+                url: String::new(),
+                finished: true,
+            };
+        }
+        let method = request.method.as_str().to_string();
+        let url = request.url.to_string();
+        note_fetch(&method, &url, "-", "issued");
+        Self {
+            method,
+            url,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, result: &Result<Response, NetError>) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let (status, disposition) = match result {
+            Ok(response) => (response.status.as_u16().to_string(), "response"),
+            Err(NetError::Blocked(_)) => ("-".to_string(), "blocked"),
+            Err(NetError::Timeout(_)) => ("-".to_string(), "timeout"),
+            Err(NetError::Cancelled) => ("-".to_string(), "cancelled"),
+            Err(_) => ("-".to_string(), "error"),
+        };
+        note_fetch(&self.method, &self.url, &status, disposition);
+    }
+}
+
+impl Drop for FetchTrace {
+    fn drop(&mut self) {
+        if self.finished || self.method.is_empty() {
+            return;
+        }
+        note_fetch(&self.method, &self.url, "-", "cancelled");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,6 +1078,24 @@ mod tests {
         assert_eq!(request.method, Method::GET);
         assert!(request.headers.contains_key("accept"));
         assert_eq!(request.timeout, Some(Duration::from_secs(10)));
+        assert_eq!(
+            request.destination,
+            RequestDestination::Other,
+            "untagged fetches still hit the shield without a type-specific option"
+        );
+    }
+
+    #[test]
+    fn request_destination_tags_carry_through_the_builder() {
+        // Privacy pin #364: every engine call site tags destination so
+        // EasyList `$script`/`$image`/… options classify correctly.
+        let url = Url::parse("https://cdn.example/a.js").unwrap();
+        let referrer = Url::parse("https://news.example/").unwrap();
+        let request = Request::get(url)
+            .destination(RequestDestination::Script)
+            .referrer(referrer.clone());
+        assert_eq!(request.destination, RequestDestination::Script);
+        assert_eq!(request.referrer, Some(referrer));
     }
 
     #[test]
@@ -848,6 +1121,60 @@ mod tests {
         assert!(!config.user_agent.contains("Chrome"), "never Chrome's UA");
         assert!(config.cookies_enabled);
     }
+
+    /// #707: wrong gate either leaks cookies cross-origin or drops them on
+    /// navigations / same-origin challenge hops.
+    #[test]
+    fn sends_cookies_follows_credentials_mode_and_origin() {
+        let page = Url::parse("https://news.example/story").unwrap();
+        let same = Url::parse("https://news.example/api").unwrap();
+        let cross = Url::parse("https://tracker.example/pixel").unwrap();
+
+        let mut omit = Request::get(same.clone());
+        omit.credentials = CredentialsMode::Omit;
+        omit.destination = RequestDestination::Document;
+        omit.referrer = Some(page.clone());
+        assert!(!sends_cookies(&omit), "Omit never sends, even for a navigation");
+
+        let mut include = Request::get(cross.clone());
+        include.credentials = CredentialsMode::Include;
+        include.destination = RequestDestination::Image;
+        include.referrer = Some(page.clone());
+        assert!(sends_cookies(&include), "Include always sends");
+
+        let mut nav = Request::get(cross.clone());
+        nav.credentials = CredentialsMode::SameOrigin;
+        nav.destination = RequestDestination::Document;
+        nav.referrer = Some(page.clone());
+        assert!(
+            sends_cookies(&nav),
+            "a Document navigation sends cookies even when the next hop is cross-origin"
+        );
+
+        let mut same_origin = Request::get(same.clone());
+        same_origin.credentials = CredentialsMode::SameOrigin;
+        same_origin.destination = RequestDestination::Script;
+        same_origin.referrer = Some(page.clone());
+        assert!(sends_cookies(&same_origin), "SameOrigin + matching referrer");
+
+        let mut cross_sub = Request::get(cross);
+        cross_sub.credentials = CredentialsMode::SameOrigin;
+        cross_sub.destination = RequestDestination::Script;
+        cross_sub.referrer = Some(page);
+        assert!(
+            !sends_cookies(&cross_sub),
+            "SameOrigin must not leak cookies to a foreign origin"
+        );
+
+        let mut no_referrer = Request::get(same);
+        no_referrer.credentials = CredentialsMode::SameOrigin;
+        no_referrer.destination = RequestDestination::Other;
+        no_referrer.referrer = None;
+        assert!(
+            sends_cookies(&no_referrer),
+            "no document referrer is treated as the request's own origin"
+        );
+    }
 }
 
 /// Largest `data:` payload the loader will decode (bytes, after decoding).
@@ -861,6 +1188,9 @@ pub fn decode_data_url(url: &str) -> Result<(String, Vec<u8>), NetError> {
         .filter(|s| s.eq_ignore_ascii_case("data:"))
         .map(|_| &url[5..])
         .ok_or_else(|| NetError::InvalidUrl("not a data: URL".into()))?;
+    // Fetch's data: URL processor serializes the URL without its fragment:
+    // `data:text/javascript,f()#x` is the script `f()`.
+    let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
     let (meta, payload) = rest
         .split_once(',')
         .ok_or_else(|| NetError::InvalidUrl("data: URL has no ','".into()))?;
@@ -937,6 +1267,11 @@ mod data_url_tests {
         // Unpadded base64 and whitespace inside the payload are accepted.
         assert_eq!(decode_data_url("data:;base64,aGk").unwrap().1, b"hi");
         assert_eq!(decode_data_url("data:;base64,aG k=").unwrap().1, b"hi");
+        // The fragment is not the payload (Fetch: serialize, exclude fragment).
+        let url = Url::parse("data:text/javascript,log.push('frag')#ignored").unwrap();
+        assert_eq!(decode_data_url(url.as_str()).unwrap().1, b"log.push('frag')");
+        assert_eq!(decode_data_url("data:;base64,aGk=#x").unwrap().1, b"hi");
+        assert_eq!(decode_data_url("data:text/plain,a%23b#c").unwrap().1, b"a#b");
     }
 
     #[test]
@@ -957,4 +1292,62 @@ mod data_url_tests {
         assert_eq!(resp.content_type.as_ref().map(|m| m.essence_str().to_string()), Some("text/css".into()));
         assert_eq!(rt.block_on(resp.text()).unwrap(), "body{color:red}");
     }
+
+    /// A `data:` URL is not a request: it never reaches the interceptor (the
+    /// shield), so a rule cannot block it and the shield has nothing to log.
+    #[test]
+    fn a_data_url_never_reaches_the_interceptor() {
+        struct Refuse(Arc<std::sync::atomic::AtomicUsize>);
+        impl InterceptHandler for Refuse {
+            fn intercept(&self, _: &Request) -> InterceptAction {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                InterceptAction::Block
+            }
+        }
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut interceptor = RequestInterceptor::new();
+        interceptor.add_handler(Arc::new(Refuse(asked.clone())));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let loader = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(interceptor)).unwrap();
+        for (url, want) in [
+            ("data:text/javascript,window.STICKY_CANARY=%22on%22", "window.STICKY_CANARY=\"on\""),
+            ("data:text/javascript;base64,bGV0IGE9MTs=", "let a=1;"),
+        ] {
+            let mut request = Request::get(Url::parse(url).unwrap());
+            request.destination = RequestDestination::Script;
+            let resp = rt.block_on(loader.fetch(request)).expect("data: is answered, not blocked");
+            assert_eq!(rt.block_on(resp.text()).unwrap(), want);
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 }
+
+#[cfg(test)]
+mod replay_proxy_tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn test_shipped_default_replay_proxy_is_none_and_leaves_address_policy_untouched() {
+        let config = LoaderConfig::default();
+        assert!(config.replay_proxy.is_none(), "shipped LoaderConfig default must have replay_proxy == None");
+
+        let loader = ResourceLoader::new(config).unwrap();
+        assert!(loader.replay_proxy_address_policy().is_none(), "default loader must yield None for replay_proxy_address_policy");
+
+        // When replay_proxy is configured, it must restrict to loopback on the proxy port
+        let mut custom_config = LoaderConfig::default();
+        custom_config.replay_proxy = Some(Url::parse("http://127.0.0.1:8765").unwrap());
+        let proxy_loader = ResourceLoader::new(custom_config).unwrap();
+        let policy = proxy_loader.replay_proxy_address_policy().expect("proxy policy must be present");
+
+        let loopback_match: SocketAddr = "127.0.0.1:8765".parse().unwrap();
+        let loopback_wrong_port: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let non_loopback: SocketAddr = "93.184.216.34:8765".parse().unwrap();
+
+        assert!(policy.permits(&loopback_match), "loopback with proxy port must be allowed");
+        assert!(!policy.permits(&loopback_wrong_port), "loopback with different port must be denied");
+        assert!(!policy.permits(&non_loopback), "non-loopback address must be denied");
+    }
+}
+

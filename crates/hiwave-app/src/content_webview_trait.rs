@@ -108,4 +108,3 @@ impl ContentWebViewOps for Arc<super::content_webview_enum::ContentWebView> {
         (**self).set_bounds(rect)
     }
 }
-

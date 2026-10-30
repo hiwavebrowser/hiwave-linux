@@ -16,19 +16,63 @@
 
 pub mod flex;
 pub mod forms;
+pub mod fragment;
 pub mod grid;
 pub mod images;
 pub mod intrinsic_cache;
 pub mod margin_collapse;
 pub mod multicol;
 pub mod scroll;
+pub mod table;
 pub mod text;
+
+mod filter;
+pub use filter::{filter_color_matrix, ColorMatrix as FilterColorMatrix};
+#[cfg(test)]
+mod box_opacity_tests;
+
+#[cfg(test)]
+mod flex_container_height_unit_tests;
 
 #[cfg(test)]
 mod flex_item_relayout_tests;
 
 #[cfg(test)]
 mod flex_resolve_tests;
+
+#[cfg(test)]
+mod float_line_wrap_tests;
+
+#[cfg(test)]
+mod flex_auto_margin_relayout_tests;
+
+#[cfg(test)]
+mod flex_item_min_height_tests;
+
+#[cfg(test)]
+mod fit_content_width_tests;
+#[cfg(test)]
+mod min_max_height_unit_tests;
+#[cfg(test)]
+mod abspos_image_reanchor_tests;
+
+#[cfg(test)]
+mod percent_height_definite_tests;
+
+#[cfg(test)]
+mod replaced_size_unit_tests;
+
+#[cfg(test)]
+mod replaced_transferred_width_tests;
+
+#[cfg(test)]
+mod shaped_run_tests;
+
+#[cfg(test)]
+mod sizing_equivalence_tests;
+
+#[cfg(test)]
+mod table_layout_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
@@ -57,8 +101,10 @@ pub use scroll::{
 pub use text::{
     apply_text_transform, collapse_whitespace, FontCache, FontCacheKey, FontDisplay, FontFaceRule,
     FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
-    TextMetrics, TextShaper, TopLevelSite,
+    TextMetrics, TextShaper, TopLevelSite, TARGET_FONT_BACKEND, TEXT_METRICS_ARE_FONT_DERIVED,
+    TEXT_SHAPER_BACKEND,
 };
+pub use text::{FaceIdentity, FaceSynthesis, GlyphRun, RunGlyph};
 
 use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
 use std::cmp::Ordering;
@@ -123,10 +169,18 @@ thread_local! {
 /// Falls back to the flat ratio only when shaping yields no usable metrics
 /// (missing font) -- same behaviour as before this existed.
 pub fn normal_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
+    // `font-size: 0` (the usual way to remove the spaces between
+    // inline-blocks): a face has no extents at size 0, so the line is as
+    // tall as its inline-blocks and no more. The shaper is not asked: it
+    // answers for a default size, and the line was 18px tall around a 10px
+    // inline-block where Chromium 143 has 10.
+    if font_size <= 0.0 {
+        return 0.0;
+    }
     let key = (
         style.font_family.clone(),
         font_size.to_bits(),
-        style.font_weight.0 as u16,
+        style.font_weight.0,
         style.font_style as u8,
     );
     if let Some(px) = NORMAL_LINE_HEIGHT_CACHE.with(|c| c.borrow().get(&key).copied()) {
@@ -224,10 +278,10 @@ pub(crate) fn button_border_box_width(
 /// Intrinsic BORDER-box size of a form control: the bare-control calibration,
 /// or the control's content line composed with author padding/border. Block
 /// flow (`layout_form_control`) and flex items (`flex::get_intrinsic_*`) both
-/// size from here — the flex path carried its own older blobs (button = label
-/// + 24 wide, 1.5em + 12 tall, author padding ignored), so flex-positioning's
-/// `.btn { padding: 8px 16px }` row built 55.9x33 for Chrome's 63.9x34 and
-/// everything below it sat a pixel high.
+/// size from here — the flex path carried its own older blobs (button =
+/// label + 24 wide, 1.5em + 12 tall, author padding ignored), so
+/// flex-positioning's `.btn { padding: 8px 16px }` row built 55.9x33 for
+/// Chrome's 63.9x34 and everything below it sat a pixel high.
 pub(crate) fn form_control_intrinsic_size(
     style: &ComputedStyle,
     control: &FormControlType,
@@ -353,7 +407,7 @@ pub(crate) fn form_control_intrinsic_size(
                 // Inline listbox: 16px per visible row + 2px border.
                 (
                     widest + 2.0 * ua_scale,
-                    (16.0 * *size as f32 + 2.0) * ua_scale,
+                    list_box_row_height(font_size) * *size as f32 + 2.0 * ua_scale,
                 )
             } else {
                 // Dropdown: widest option plus the arrow well.
@@ -986,6 +1040,35 @@ impl FloatContext {
     pub fn float_count(&self) -> usize {
         self.left_floats.len() + self.right_floats.len()
     }
+
+    /// The same floats with every rect moved by `(dx, dy)`: how a context
+    /// changes coordinate space between a block and a descendant block
+    /// that shares its formatting context.
+    pub fn translated(&self, dx: f32, dy: f32) -> Self {
+        let mv = |v: &Vec<FloatExclusion>| {
+            v.iter()
+                .map(|f| FloatExclusion {
+                    rect: Rect::new(f.rect.x + dx, f.rect.y + dy, f.rect.width, f.rect.height),
+                    float_type: f.float_type,
+                })
+                .collect()
+        };
+        Self {
+            left_floats: mv(&self.left_floats),
+            right_floats: mv(&self.right_floats),
+        }
+    }
+
+    /// CSS 2.1 §9.5: the band `(left, width)` a line box of height `height`
+    /// whose top is at `y` gets beside these floats, in the coordinates of
+    /// a container `container_width` wide. The whole container when there
+    /// are no floats.
+    pub fn line_band(&self, y: f32, height: f32, container_width: f32) -> (f32, f32) {
+        if self.is_empty() || y >= self.clear_all() {
+            return (0.0, container_width);
+        }
+        self.available_rect(y, height.max(1.0), container_width)
+    }
 }
 
 /// Check if two rectangles overlap.
@@ -1263,7 +1346,41 @@ pub enum FormControlType {
         /// size > 1 (or `multiple`) renders as an inline listbox, not a
         /// dropdown — Chrome CfT-148 builds 16px per visible row + 2px.
         size: u32,
+        /// Every selected option, ascending. A list box paints each one:
+        /// `multiple` can carry several, and a list box whose options have
+        /// no `selected` carries none (HTML §4.10.7 — only a drop-down
+        /// falls back to its first option).
+        selected: Vec<usize>,
     },
+}
+
+/// What a `DisplayCommand::TextInput` is, beyond a line of text in a frame.
+/// The control's type used to stop at layout: every text-like control
+/// reached paint as the same command, so a password painted its value and a
+/// `<select>` painted as an input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextControlKind {
+    /// `<input>` of a text-like type.
+    #[default]
+    Text,
+    /// `<input type=password>`. `value` holds one bullet per character;
+    /// the characters themselves never enter the display list.
+    Password,
+    /// `<textarea>`.
+    TextArea,
+    /// A drop-down `<select>`: `value` is the selected option's label and
+    /// the painter adds the arrow.
+    MenuList,
+}
+
+/// The glyph a password field paints for each character of its value
+/// (Chrome's `-webkit-text-security: disc`).
+pub const PASSWORD_MASK: char = '\u{2022}';
+
+/// Height of one option row in a list box at `font_size` (Chrome CfT-148:
+/// 16px at the 13.333px UA control font).
+fn list_box_row_height(font_size: f32) -> f32 {
+    16.0 * font_size / (40.0 / 3.0)
 }
 
 /// Stacking context for z-index ordering.
@@ -1434,7 +1551,7 @@ fn is_zero_length(l: &Length) -> bool {
 }
 
 /// A layout box in the layout tree.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LayoutBox {
     /// Box type.
     pub box_type: BoxType,
@@ -1514,6 +1631,22 @@ pub struct LayoutBox {
     /// block (the viewport), so `html, body { height: 100% }` keeps body at
     /// the viewport's height while an `auto` html makes body's `100%` auto.
     pub root_element_height: Option<Length>,
+    /// `colspan` / `rowspan` of a table cell (and `span` of a column or
+    /// column group), from the HTML attributes. 1×1 for every other box.
+    pub table_span: table::TableSpan,
+    /// On a table box: the caption height table.rs moved the border box
+    /// down by, and the top margin it wrote, so a pass that re-lays out the
+    /// contents without recomputing the box (flex relayout) does not shift
+    /// it twice.
+    pub(crate) table_caption_shift: Option<(f32, f32)>,
+    /// CSS 2.1 §9.5: the floats of the block formatting context this box's
+    /// content shares with its parent, in PAGE coordinates. Set by the
+    /// parent's child loop before it lays out an in-flow block that does
+    /// not establish a formatting context (`None` for every other box);
+    /// this box's own child loop takes them so its line boxes are shortened
+    /// beside them, and hands back the context — its own descendant floats
+    /// added — for the parent to carry on to the following siblings.
+    pub(crate) context_floats: Option<FloatContext>,
 }
 
 impl LayoutBox {
@@ -1542,6 +1675,9 @@ impl LayoutBox {
             text_flow_first_offset: None,
             percent_height_is_auto: false,
             root_element_height: None,
+            table_span: table::TableSpan::default(),
+            table_caption_shift: None,
+            context_floats: None,
         }
     }
 
@@ -1924,7 +2060,7 @@ impl LayoutBox {
             }
             BoxType::FormControl(ref control) => {
                 // Form controls are replaced elements with intrinsic sizing
-                self.layout_form_control(control.clone(), containing_block);
+                self.layout_form_control(control.clone(), containing_block, definite_height);
             }
             BoxType::LineBreak => {
                 // Zero-size marker; the parent's inline flow closes the line.
@@ -2044,9 +2180,7 @@ impl LayoutBox {
         } else {
             // Inline box with no children and no explicit width:
             // Use horizontal padding + border as minimum (inline-block behavior)
-            let horizontal_box =
-                self.dimensions.padding.horizontal() + self.dimensions.border.horizontal();
-            horizontal_box
+            self.dimensions.padding.horizontal() + self.dimensions.border.horizontal()
         };
         self.dimensions.content.width = computed_width;
 
@@ -2192,7 +2326,7 @@ impl LayoutBox {
                 | rustkit_css::WhiteSpace::PreWrap
                 | rustkit_css::WhiteSpace::PreLine
                 | rustkit_css::WhiteSpace::BreakSpaces
-        ) && text.contains(|c| c == '\n' || c == '\r');
+        ) && text.contains(['\n', '\r']);
         if overflows || has_segment_breaks {
             // Soft wrapping off (`pre`) or no resolved width: each segment
             // is one line however wide it is — only the forced breaks split.
@@ -2391,18 +2525,29 @@ impl LayoutBox {
     /// `(line_count, last_line_width)` so the block child loop can continue
     /// the last line after this run. Only called for `BoxType::Text`
     /// children whose single-line width exceeds the remaining line space.
+    ///
+    /// `floats` are the floats of the container's formatting context, in
+    /// its content coordinates, and `first_band` the `(left, width)` band
+    /// the current line box has beside them (`FloatContext::line_band`).
+    /// Every line beside a float is broken at its own shortened width and
+    /// starts at the band's left edge (CSS 2.1 §9.5); a line too narrow for
+    /// any content stays empty and the text moves down a line. With no
+    /// floats this is the plain wrap at the container width.
     fn layout_text_in_flow(
         &mut self,
         containing_block: &Dimensions,
         line_top_y: f32,
         first_line_offset: f32,
+        floats: &FloatContext,
+        first_band: (f32, f32),
     ) -> (usize, f32) {
         let BoxType::Text(ref text) = self.box_type else {
             return (0, 0.0);
         };
         let text = text.clone();
         let container_width = containing_block.content.width;
-        let first_line_width = (container_width - first_line_offset).max(0.0);
+        let (first_left, first_band_width) = first_band;
+        let first_line_width = (first_band_width - first_line_offset).max(0.0);
         let font_size = match self.style.font_size {
             Length::Px(px) => px,
             _ => 16.0,
@@ -2467,16 +2612,55 @@ impl LayoutBox {
         }
         let line_height = run_line_height(&self.style, font_size, &run_metrics);
 
-        let text_lines: Vec<TextLine> = lines
-            .iter()
-            .enumerate()
-            .map(|(i, l)| TextLine {
-                text: l.text(),
-                width: l.width,
-                x_offset: if i == 0 { first_line_offset } else { 0.0 },
-                justify_space: 0.0,
-            })
-            .collect();
+        // Lines beside floats: re-broken one line at a time, each at its
+        // own band. Only collapsible white space (`normal`) takes this path;
+        // preserved spaces and forced breaks keep the plain wrap.
+        let rel_top = line_top_y - containing_block.content.y;
+        let beside_floats = !floats.is_empty()
+            && rel_top < floats.clear_all()
+            && self.style.white_space == rustkit_css::WhiteSpace::Normal
+            && !text.contains(['\n', '\r']);
+        let banded = if beside_floats {
+            self.wrap_beside_floats(
+                &text,
+                &shaper,
+                &chain,
+                font_size,
+                line_height,
+                rel_top,
+                first_line_offset,
+                first_band,
+                floats,
+                container_width,
+            )
+        } else {
+            None
+        };
+        let text_lines: Vec<TextLine> = match banded {
+            Some(banded) => banded
+                .into_iter()
+                .map(|(text, width, x_offset)| TextLine {
+                    text,
+                    width,
+                    x_offset,
+                    justify_space: 0.0,
+                })
+                .collect(),
+            None => lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| TextLine {
+                    text: l.text(),
+                    width: l.width,
+                    x_offset: if i == 0 {
+                        first_left + first_line_offset
+                    } else {
+                        0.0
+                    },
+                    justify_space: 0.0,
+                })
+                .collect(),
+        };
         let line_count = text_lines.len();
         let last_width = text_lines.last().map(|l| l.width).unwrap_or(0.0);
         self.text_lines = Some(text_lines);
@@ -2488,8 +2672,112 @@ impl LayoutBox {
         (line_count, last_width)
     }
 
+    /// `layout_text_in_flow` beside floats: break `text` one line at a time,
+    /// each line at the width its band leaves (CSS 2.1 §9.5), until the
+    /// lines pass the last float; the rest wraps at the full width in one
+    /// go. Returns `(text, width, x_offset)` per line, `x_offset` from the
+    /// container's content left. A line where the band is narrowed and not
+    /// even one word fits is left empty and the text moves down one line
+    /// (§9.5.1: a shortened line box too narrow for its content moves
+    /// down; Blink moves it to the next float edge, this moves it by line
+    /// heights). `None` if shaping fails (the caller keeps the plain wrap).
+    #[allow(clippy::too_many_arguments)]
+    fn wrap_beside_floats(
+        &self,
+        text: &str,
+        shaper: &TextShaper,
+        chain: &FontFamilyChain,
+        font_size: f32,
+        line_height: f32,
+        rel_top: f32,
+        first_line_offset: f32,
+        first_band: (f32, f32),
+        floats: &FloatContext,
+        container_width: f32,
+    ) -> Option<Vec<(String, f32, f32)>> {
+        let s = &self.style;
+        let wrap = |rest: &str, first: f32, max: f32, mid_line: bool| {
+            if mid_line {
+                shaper.wrap_text_mid_line_white_space(
+                    rest,
+                    chain,
+                    s.font_weight,
+                    s.font_style,
+                    s.font_stretch,
+                    font_size,
+                    first,
+                    max,
+                    effective_word_break(s),
+                    s.overflow_wrap,
+                    s.white_space,
+                )
+            } else {
+                shaper.wrap_text_white_space(
+                    rest,
+                    chain,
+                    s.font_weight,
+                    s.font_style,
+                    s.font_stretch,
+                    font_size,
+                    max,
+                    effective_word_break(s),
+                    s.overflow_wrap,
+                    s.white_space,
+                )
+            }
+        };
+        let clear_y = floats.clear_all();
+        let mut out: Vec<(String, f32, f32)> = Vec::new();
+        let mut pos = 0usize;
+        let mut k = 0usize;
+        loop {
+            if k > 0 {
+                // Collapsible spaces at a soft break are consumed by it.
+                let skip = text[pos..].len() - text[pos..].trim_start_matches(' ').len();
+                pos += skip;
+            }
+            if pos >= text.len() || k > 10_000 {
+                break;
+            }
+            let rest = &text[pos..];
+            let y = rel_top + k as f32 * line_height;
+            let first = k == 0;
+            let offset = if first { first_line_offset } else { 0.0 };
+            let mid_line = first && first_line_offset > 0.0;
+            let (left, band_width) = if first {
+                first_band
+            } else {
+                floats.line_band(y, line_height, container_width)
+            };
+            let width = (band_width - offset).max(0.0);
+            if y >= clear_y {
+                // Past every float: the rest wraps at the full width.
+                let lines = wrap(rest, width, container_width, mid_line).ok()?;
+                for (i, l) in lines.iter().enumerate() {
+                    let x = if i == 0 { left + offset } else { 0.0 };
+                    out.push((l.text(), l.width, x));
+                }
+                break;
+            }
+            let lines = wrap(rest, width, width, mid_line).ok()?;
+            let Some(l0) = lines.first() else { break };
+            let narrowed = band_width < container_width - 0.5;
+            let empty = l0.end_offset <= l0.start_offset;
+            if empty || (narrowed && l0.width > width + 0.5) {
+                out.push((String::new(), 0.0, left + offset));
+                k += 1;
+                continue;
+            }
+            out.push((l0.text(), l0.width, left + offset));
+            pos += l0.end_offset;
+            k += 1;
+        }
+        Some(out)
+    }
+
     /// Layout a replaced element (image), resolving percentage heights
     /// against `containing_block.content.height`.
+    #[cfg(test)]
     fn layout_image(
         &mut self,
         natural_width: f32,
@@ -2529,19 +2817,38 @@ impl LayoutBox {
         // on every box except the `auto` one.
         let cb_width = containing_block.content.width;
         {
+            // Through `length_to_px`, which knows the box's font size and the
+            // viewport: `to_px(16.0, 16.0, ..)` took `2vw` padding for 0.
+            let px = |l: &Length| self.length_to_px(l, cb_width);
+            let edges = |t, r, b, l| EdgeSizes {
+                top: px(t),
+                right: px(r),
+                bottom: px(b),
+                left: px(l),
+            };
+            let st = &self.style;
+            let margin = edges(
+                &st.margin_top,
+                &st.margin_right,
+                &st.margin_bottom,
+                &st.margin_left,
+            );
+            let border = edges(
+                &st.border_top_width,
+                &st.border_right_width,
+                &st.border_bottom_width,
+                &st.border_left_width,
+            );
+            let padding = edges(
+                &st.padding_top,
+                &st.padding_right,
+                &st.padding_bottom,
+                &st.padding_left,
+            );
             let d = &mut self.dimensions;
-            d.margin.left = self.style.margin_left.to_px(16.0, 16.0, cb_width);
-            d.margin.right = self.style.margin_right.to_px(16.0, 16.0, cb_width);
-            d.margin.top = self.style.margin_top.to_px(16.0, 16.0, cb_width);
-            d.margin.bottom = self.style.margin_bottom.to_px(16.0, 16.0, cb_width);
-            d.border.left = self.style.border_left_width.to_px(16.0, 16.0, cb_width);
-            d.border.right = self.style.border_right_width.to_px(16.0, 16.0, cb_width);
-            d.border.top = self.style.border_top_width.to_px(16.0, 16.0, cb_width);
-            d.border.bottom = self.style.border_bottom_width.to_px(16.0, 16.0, cb_width);
-            d.padding.left = self.style.padding_left.to_px(16.0, 16.0, cb_width);
-            d.padding.right = self.style.padding_right.to_px(16.0, 16.0, cb_width);
-            d.padding.top = self.style.padding_top.to_px(16.0, 16.0, cb_width);
-            d.padding.bottom = self.style.padding_bottom.to_px(16.0, 16.0, cb_width);
+            d.margin = margin;
+            d.border = border;
+            d.padding = padding;
         }
         let horizontal_decoration = self.dimensions.border.left
             + self.dimensions.border.right
@@ -2558,24 +2865,19 @@ impl LayoutBox {
         // that is what the intrinsic-sizing rules and `dimensions.content` are
         // expressed in; `auto` stays absent and takes the natural size.
         let explicit_width = replaced_content_size(
-            match self.style.width {
-                Length::Px(px) => Some(px),
-                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
-                _ => None,
-            },
+            self.replaced_length(&self.style.width, Some(cb_width)),
             horizontal_decoration,
             border_box_sizing,
         );
 
         let explicit_height = replaced_content_size(
-            match self.style.height {
-                Length::Px(px) => Some(px),
-                Length::Percent(pct) => percent_height_base.map(|base| pct / 100.0 * base),
-                _ => None,
-            },
+            self.replaced_length(&self.style.height, percent_height_base),
             vertical_decoration,
             border_box_sizing,
         );
+        // Which axes the page left to the ratio: a minimum that grows the
+        // other axis takes these along and leaves a specified size alone.
+        let (width_is_auto, height_is_auto) = (explicit_width.is_none(), explicit_height.is_none());
 
         // A specified `aspect-ratio` replaces the natural ratio before the
         // intrinsic-sizing rules run, so a missing axis is derived from the
@@ -2615,20 +2917,12 @@ impl LayoutBox {
         // preserving the aspect ratio (max-width applied first, then max-height,
         // matching the constraint-violation table for the common cases).
         let max_width = replaced_content_size(
-            match self.style.max_width {
-                Length::Px(px) => Some(px),
-                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
-                _ => None,
-            },
+            self.replaced_length(&self.style.max_width, Some(cb_width)),
             horizontal_decoration,
             border_box_sizing,
         );
         let max_height = replaced_content_size(
-            match self.style.max_height {
-                Length::Px(px) => Some(px),
-                Length::Percent(pct) => percent_height_base.map(|base| pct / 100.0 * base),
-                _ => None,
-            },
+            self.replaced_length(&self.style.max_height, percent_height_base),
             vertical_decoration,
             border_box_sizing,
         );
@@ -2653,6 +2947,38 @@ impl LayoutBox {
             }
         }
 
+        // `min-width` and `min-height` (CSS 2.1 §10.4, §10.7), which were not
+        // read here at all. A minimum wins over a maximum, and an axis the
+        // page left `auto` follows the grown one across the ratio; a
+        // specified axis stays (measured: `width: 16px; min-width: 2em` at a
+        // 14px font is 28x28, `16px x 16px; min-height: 32px` is 16x32).
+        let min_width = replaced_content_size(
+            self.replaced_length(&self.style.min_width, Some(cb_width)),
+            horizontal_decoration,
+            border_box_sizing,
+        );
+        let min_height = replaced_content_size(
+            self.replaced_length(&self.style.min_height, percent_height_base),
+            vertical_decoration,
+            border_box_sizing,
+        );
+        if let Some(mw) = min_width {
+            if width < mw {
+                if height_is_auto && width > 0.0 {
+                    height = mw * height / width;
+                }
+                width = mw;
+            }
+        }
+        if let Some(mh) = min_height {
+            if height < mh {
+                if width_is_auto && height > 0.0 {
+                    width = mh * width / height;
+                }
+                height = mh;
+            }
+        }
+
         // Position within containing block. The CONTENT box sits inside this
         // element's own margin/border/padding, so the BORDER box starts at the
         // containing block's content edge — the same offsets
@@ -2670,8 +2996,114 @@ impl LayoutBox {
         self.dimensions.content.height = height;
     }
 
+    /// The content width of a replaced box whose `width` is `auto`, where no
+    /// containing block works it out (`layout_image_in` does that for a box
+    /// in flow): a flex base size and a min/max-content contribution. The
+    /// USED height crosses the natural ratio (css-sizing-4 "transferred
+    /// size"): `height` bounded by `max-height` and then `min-height`, or
+    /// the natural height bounded the same way (CSS 2.1 §10.4, §10.7). A
+    /// box whose height nothing changes is its natural width. `None` for a
+    /// box that is not replaced, has no natural width, or whose width the
+    /// page gave.
+    ///
+    /// `percent_height_base` is what a percentage `height`, `min-height` or
+    /// `max-height` refers to, when the caller knows it: a flex container's
+    /// definite cross size. With `None` a percentage counts as `auto`.
+    ///
+    /// The flex pass and the width estimators each read `natural_width`
+    /// alone, or nothing: reddit's wordmark (`<svg viewBox="0 0 514 149"
+    /// style="height: 22px">`) was 514 wide as a row item and 0 wide to the
+    /// flex link around it, for Chrome's 75.89.
+    pub(crate) fn replaced_auto_content_width(&self, percent_height_base: Option<f32>) -> Option<f32> {
+        let BoxType::Image {
+            natural_width,
+            natural_height,
+            ..
+        } = &self.box_type
+        else {
+            return None;
+        };
+        if !matches!(self.style.width, Length::Auto) || *natural_width <= 0.0 {
+            return None;
+        }
+        let s = &self.style;
+        let vertical_decoration = [&s.padding_top, &s.padding_bottom, &s.border_top_width, &s.border_bottom_width]
+            .iter()
+            .map(|l| self.length_to_px(l, 0.0))
+            .sum();
+        if *natural_height <= 0.0 {
+            return Some(*natural_width);
+        }
+        let content_height = |length: &Length| {
+            replaced_content_size(
+                self.replaced_length(length, percent_height_base),
+                vertical_decoration,
+                s.box_sizing == BoxSizing::BorderBox,
+            )
+        };
+        // §10.7: the maximum first, then the minimum, so the minimum wins.
+        let bounded = |h: f32| {
+            let h = content_height(&s.max_height).map_or(h, |max| h.min(max));
+            content_height(&s.min_height).map_or(h, |min| h.max(min))
+        };
+        let used_height = bounded(content_height(&s.height).unwrap_or(*natural_height));
+        Some(if (used_height - natural_height).abs() < 0.005 {
+            *natural_width
+        } else {
+            used_height * natural_width / natural_height
+        })
+    }
+
+    /// Whether `height`, `min-height` or `max-height` is a percentage that
+    /// `replaced_auto_content_width` could not resolve. Its answer is then
+    /// the natural width, which is right for a size the box may still be
+    /// given and wrong as a minimum: `header { display: flex; height: 60px }
+    /// img { height: 100% }` could not shrink below its natural 514.
+    pub(crate) fn replaced_height_percentage_is_unresolved(&self, percent_height_base: Option<f32>) -> bool {
+        let s = &self.style;
+        percent_height_base.is_none()
+            && [&s.height, &s.min_height, &s.max_height]
+                .iter()
+                .any(|l| matches!(l, Length::Percent(_)))
+    }
+
+    /// A specified size on a replaced element in pixels, or `None` for
+    /// `auto`. `percent_base` is what a percentage refers to; `None` means
+    /// that base is indefinite, and a percentage of it is `auto` (`none` for a
+    /// maximum). Until 2026-10-07 only `px` and percentages were read here,
+    /// so `svg { width: 1em; height: 1em }`, the usual way to size an icon to
+    /// its text, came out at the viewBox size.
+    fn replaced_length(&self, length: &Length, percent_base: Option<f32>) -> Option<f32> {
+        match length {
+            Length::Auto | Length::FitContent => None,
+            Length::Px(px) => Some(*px),
+            Length::Percent(pct) => percent_base.map(|base| pct / 100.0 * base),
+            Length::Em(_)
+            | Length::Rem(_)
+            | Length::Vw(_)
+            | Length::Vh(_)
+            | Length::Vmin(_)
+            | Length::Vmax(_) => Some(self.length_to_px(length, 0.0)),
+            // These may hold a percentage. Against an indefinite base it
+            // counts as zero, and a result that is not positive is `auto`.
+            Length::Min(_) | Length::Max(_) | Length::Clamp(_) | Length::Calc(_) => {
+                let px = self.length_to_px(length, percent_base.unwrap_or(0.0));
+                (percent_base.is_some() || px > 0.0).then_some(px)
+            }
+            _ => None,
+        }
+    }
+
     /// Layout a form control (input, button, textarea, etc.)
-    fn layout_form_control(&mut self, control: FormControlType, containing_block: &Dimensions) {
+    /// Layout a form control. `percent_height_base` is the containing block's
+    /// definite content height, as for `layout_image_in`: the height of
+    /// `containing_block` itself is the parent's flow cursor on the flow path.
+    fn layout_form_control(
+        &mut self,
+        control: FormControlType,
+        containing_block: &Dimensions,
+        percent_height_base: Option<f32>,
+    ) {
         let font_size = match self.style.font_size {
             Length::Px(px) => px,
             _ => 16.0,
@@ -2697,8 +3129,16 @@ impl LayoutBox {
 
         let height = match self.style.height {
             Length::Px(px) if px > 0.0 => px,
+            // CSS 2.1 §10.5: `auto` under a content-sized parent.
+            Length::Percent(_) if self.percent_height_computes_to_auto() => intrinsic_height,
             Length::Percent(pct) => {
-                let resolved = pct / 100.0 * containing_block.content.height;
+                // The parent's definite height where the caller knows one. The
+                // containing block's own height is the flow cursor (zero on a
+                // line), so until 2026-10-07 `height: 100%` on a control was
+                // its intrinsic height: ebay's search input sat 22.8px tall in
+                // a 40px slot.
+                let base = percent_height_base.unwrap_or(containing_block.content.height);
+                let resolved = pct / 100.0 * base;
                 // CRITICAL: Fall back to intrinsic height if percent resolves to 0
                 // This fixes form controls in flex containers before flex layout runs
                 if resolved > 0.0 {
@@ -2982,19 +3422,6 @@ impl LayoutBox {
         }
     }
 
-    /// Above/below-baseline extents of a line of text in `s`, half-leading
-    /// included — the strut when `s` is the container's style (CSS2 §10.8.1).
-    fn text_baseline_extents(s: &ComputedStyle) -> (f32, f32) {
-        let fs = match s.font_size {
-            Length::Px(px) => px,
-            _ => 16.0,
-        };
-        let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
-        let line_h = resolve_line_height(s, fs);
-        let half_leading = half_leading(line_h, m.ascent, m.descent);
-        (half_leading + m.ascent, half_leading + m.descent)
-    }
-
     /// The same split for sizing a line box: the two parts sum to the
     /// line-height EXACTLY. Where a face's ascent + descent exceeds its
     /// `normal` line-height by a rounding sliver, the clamped half-leading
@@ -3045,8 +3472,44 @@ impl LayoutBox {
         // A non-atomic inline sits on the baseline as a line of text in its
         // own font (its rect is only the content area; the line sees the
         // line-height split).
-        if matches!(self.box_type, BoxType::Text(_) | BoxType::Inline) {
+        if matches!(self.box_type, BoxType::Text(_)) {
             return Some(Self::text_line_box_extents(&self.style));
+        }
+        // The atomic inlines inside it are on the same line, at any depth
+        // of inline boxes (CSS2 10.8: the line box holds every inline-level
+        // box on the line, not only the container's own children). Left
+        // out, `<a><img></a>` gave the line only the link's font: a linked
+        // 30px image under `font-size: 0` made a line 0 tall and the next
+        // block was laid over the image (16 at the default size).
+        if matches!(self.box_type, BoxType::Inline) {
+            let (mut above, mut below) = Self::text_line_box_extents(&self.style);
+            self.for_each_atomic_in_inline(&mut |atomic| {
+                if let Some((a, b)) = atomic.line_member_baseline_extents() {
+                    above = above.max(a);
+                    below = below.max(b);
+                }
+            });
+            // The inline boxes inside it are on the line too, each as a
+            // line of text in its own font (CSS2 10.8.1 counts every
+            // inline box on the line). Left out, `<span><b style="font-
+            // size:16px">Hi</b></span>` under `font-size: 0` gave the line
+            // only the span's 0px font and the next block was laid over
+            // the text (develop's 16px strut hid it); the same for nav
+            // links whose font is restored inside a `font-size: 0` row.
+            for c in &self.children {
+                if c.style.display == rustkit_css::Display::None
+                    || c.float != Float::None
+                    || matches!(c.position, Position::Absolute | Position::Fixed)
+                    || !matches!(c.box_type, BoxType::Inline)
+                {
+                    continue;
+                }
+                if let Some((a, b)) = c.line_member_baseline_extents() {
+                    above = above.max(a);
+                    below = below.max(b);
+                }
+            }
+            return Some((above, below));
         }
         let h = self.dimensions.margin_box().height;
         let above = if matches!(self.box_type, BoxType::FormControl(_))
@@ -3067,6 +3530,74 @@ impl LayoutBox {
             return None;
         };
         Some((above, (h - above).max(0.0)))
+    }
+
+    /// Calls `f` with each atomic inline-level box (inline-block, image,
+    /// control) inside this inline box, through any depth of inline boxes.
+    fn for_each_atomic_in_inline(&self, f: &mut dyn FnMut(&LayoutBox)) {
+        for c in &self.children {
+            if c.style.display == rustkit_css::Display::None
+                || c.float != Float::None
+                || matches!(c.position, Position::Absolute | Position::Fixed)
+            {
+                continue;
+            }
+            if c.is_atomic_line_member() {
+                f(c);
+            } else if matches!(c.box_type, BoxType::Inline) {
+                c.for_each_atomic_in_inline(f);
+            }
+        }
+    }
+
+    /// An inline-block, inline-flex or inline-grid box, an image or a form
+    /// control: a box that sits on a line as one unit.
+    fn is_atomic_line_member(&self) -> bool {
+        self.style.display.is_atomic_inline()
+            || matches!(self.box_type, BoxType::Image { .. } | BoxType::FormControl(_))
+    }
+
+    /// The tallest margin box among the atomic inlines inside this inline
+    /// box (0 with none): the floor the block loops keep for a line's
+    /// height, as for an atomic inline that is their own child.
+    fn tallest_atomic_in_inline(&self) -> f32 {
+        let mut tallest = 0.0f32;
+        self.for_each_atomic_in_inline(&mut |atomic| {
+            tallest = tallest.max(atomic.dimensions.margin_box().height);
+        });
+        tallest
+    }
+
+    /// Seats the atomic inlines inside this inline box on the line's
+    /// baseline. An inline box lays its children out at its own top; once
+    /// the box is on the baseline, a box inside it whose baseline is its
+    /// bottom edge (or its last line) would hang below the line. One the
+    /// align pass does not seat (`vertical-align: top|bottom|middle`) goes
+    /// back to the line top, where it is left when it is the block's own
+    /// child.
+    fn seat_atomics_in_inline(&mut self, baseline_y: f32, line_top: f32) {
+        for c in &mut self.children {
+            if c.style.display == rustkit_css::Display::None
+                || c.float != Float::None
+                || matches!(c.position, Position::Absolute | Position::Fixed)
+            {
+                continue;
+            }
+            if c.is_atomic_line_member() {
+                let target = match c.line_member_baseline_extents() {
+                    Some((above, _)) => baseline_y - above,
+                    None => line_top,
+                };
+                let d = &c.dimensions;
+                let top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+                let dy = target - top;
+                if dy.abs() > 0.01 {
+                    crate::flex::translate_subtree(c, 0.0, dy);
+                }
+            } else if matches!(c.box_type, BoxType::Inline) {
+                c.seat_atomics_in_inline(baseline_y, line_top);
+            }
+        }
     }
 
     fn inline_strut_descent(&self) -> f32 {
@@ -3158,7 +3689,7 @@ impl LayoutBox {
                 );
             }
             BoxType::FormControl(ref control) => {
-                self.layout_form_control(control.clone(), containing_block);
+                self.layout_form_control(control.clone(), containing_block, percent_height_base);
             }
             BoxType::LineBreak => {
                 self.dimensions.content = Rect::new(
@@ -3310,8 +3841,14 @@ impl LayoutBox {
             );
             // Then apply flex layout algorithm. See the sibling call in
             // `layout_with_definite_height` for why no containing block goes
-            // over from here.
-            flex::layout_flex_container(self, &self.dimensions.clone());
+            // over from here. A percentage height resolved above is the
+            // column's definite main size; style alone cannot say so.
+            match definite_for_children {
+                Some(h) if flex::has_percentage(&self.style.height) => {
+                    flex::layout_flex_container_at_resolved_percent_height(self, h)
+                }
+                _ => flex::layout_flex_container(self, &self.dimensions.clone()),
+            }
         } else if self.style.display.is_grid() {
             // For grid containers, layout children normally first
             self.layout_block_children_with_collapse(
@@ -3476,25 +4013,19 @@ impl LayoutBox {
     /// (e.g. `left: -100%` off-canvas shimmer overlays) need the containing
     /// block, so they resolve here at apply time from the computed style.
     ///
-    /// Viewport units and math functions resolve here too: the transfer
-    /// drops them, so `top: -100vh` read as `auto` and linkedin's skip link
+    /// Viewport units and math functions resolve here too (and any length
+    /// the transfer did not pre-resolve): the transfer drops them, so `top: -100vh` read as `auto` and linkedin's skip link
     /// (`.-top-[100vh]`, parked a viewport above the page until focused)
     /// sat at its static position over the header.
     pub(crate) fn resolved_offsets(&self, containing_block: &Dimensions) -> PositionOffsets {
         let resolve = |pre: Option<f32>, st: &Option<Length>, basis: f32| {
             pre.or(match st {
                 Some(Length::Percent(p)) => Some(p / 100.0 * basis),
-                Some(
-                    l @ (Length::Vw(_)
-                    | Length::Vh(_)
-                    | Length::Vmin(_)
-                    | Length::Vmax(_)
-                    | Length::Calc(_)
-                    | Length::Min(_)
-                    | Length::Max(_)
-                    | Length::Clamp(_)),
-                ) => Some(self.length_to_px(l, basis)),
-                _ => None,
+                Some(Length::Auto | Length::FitContent) | None => None,
+                // Every other length, `px`/`em`/`rem` included: a box the
+                // transfer did not pre-resolve (one built by layout's own
+                // callers) took `top: 20px` for `auto` and `top: 2vw` for 20.
+                Some(l) => Some(self.length_to_px(l, basis)),
             })
         };
         PositionOffsets {
@@ -3614,34 +4145,6 @@ impl LayoutBox {
         }
     }
 
-    /// This box's content height when it is definite BEFORE its children
-    /// lay out (an absolute `height`), else `None`. Percentages are left
-    /// out: they need the grandparent's definite height, which this box
-    /// does not hold. Mirrors the absolute arms of calculate_block_height.
-    fn definite_content_height(&self) -> Option<f32> {
-        let padding_border = self.dimensions.padding.top
-            + self.dimensions.padding.bottom
-            + self.dimensions.border.top
-            + self.dimensions.border.bottom;
-        let specified = match self.style.height {
-            Length::Px(h) => h,
-            Length::Em(em) => {
-                em * match self.style.font_size {
-                    Length::Px(px) => px,
-                    _ => 16.0,
-                }
-            }
-            Length::Rem(rem) => rem * 16.0,
-            Length::Vh(vh) if self.viewport.1 > 0.0 => vh / 100.0 * self.viewport.1,
-            _ => return None,
-        };
-        Some(if self.style.box_sizing == BoxSizing::BorderBox {
-            (specified - padding_border).max(0.0)
-        } else {
-            specified
-        })
-    }
-
     /// This box's inner (content-box) height when `height: auto` is made
     /// DEFINITE by opposite insets on an out-of-flow box, else `None`.
     ///
@@ -3653,7 +4156,7 @@ impl LayoutBox {
     /// asks *style* whether the main size is definite answers "no" and falls
     /// back to sizing by content.
     ///
-    /// It lives here, beside `definite_content_height`, because the flex
+    /// It lives here, on `LayoutBox`, because the flex
     /// container path and `apply_position_offsets_absolute` must agree on
     /// the number to the last bit — two copies of this subtraction that
     /// drift apart are the defect class night 8 recorded.
@@ -3711,6 +4214,40 @@ impl LayoutBox {
         // a `Px` height is already right, and an `auto` one is its content.
         if matches!(self.style.height, Length::Percent(_) | Length::Calc(_)) {
             self.calculate_block_height(Some(containing_block.content.height));
+        }
+        // A replaced box is sized by `layout_image_in`, not by
+        // `calculate_block_height`, and on the flow path that ran with no
+        // definite percent base (the stand-in's height is the parent's
+        // cursor: `None`, or a stale cursor): `height: 100%` was `auto` and
+        // the image took its natural ratio. This is the one place that holds
+        // the real containing block, so the replaced sizing is re-run
+        // against it: width against the padding-box width, height against
+        // its height, decorations and `aspect-ratio` / min / max along with
+        // them. The static position is kept (`layout_image_in` places the
+        // box at the cursor it is handed); the offsets below move it.
+        if let BoxType::Image {
+            natural_width,
+            natural_height,
+            ..
+        } = self.box_type
+        {
+            let cb = Dimensions {
+                content: Rect::new(
+                    containing_block.content.x,
+                    containing_block.content.y,
+                    containing_block.content.width,
+                    0.0,
+                ),
+                ..Default::default()
+            };
+            self.layout_image_in(
+                natural_width,
+                natural_height,
+                &cb,
+                Some(containing_block.content.height),
+            );
+            self.dimensions.content.x = origin_x;
+            self.dimensions.content.y = origin_y;
         }
         self.apply_position_offsets_absolute(containing_block);
         let (dx, dy) = (
@@ -3793,6 +4330,11 @@ impl LayoutBox {
         let has_right = offsets.right.is_some();
         let has_top = offsets.top.is_some();
         let has_bottom = offsets.bottom.is_some();
+        // CSS 2.1 §10.3.8 / §10.6.5: an absolutely positioned REPLACED box
+        // with `width: auto` or `height: auto` keeps its intrinsic size; both
+        // offsets set is over-constrained and the end-side one is ignored.
+        // Only a non-replaced box stretches between its two offsets.
+        let replaced_image = matches!(self.box_type, BoxType::Image { .. });
 
         // Handle horizontal positioning
         if has_left && has_right {
@@ -3801,7 +4343,7 @@ impl LayoutBox {
             let right = offsets.right.unwrap();
 
             // Calculate stretched width if width is auto
-            if matches!(self.style.width, Length::Auto) {
+            if matches!(self.style.width, Length::Auto) && !replaced_image {
                 let available_width = containing_block.content.width
                     - left
                     - right
@@ -3843,8 +4385,12 @@ impl LayoutBox {
             // Calculate stretched height if height is auto. The subtraction
             // lives in `inset_definite_content_height` so the flex container
             // path resolves the identical number.
-            if let Some(available_height) = self.inset_definite_content_height(containing_block) {
-                self.dimensions.content.height = available_height;
+            if !replaced_image {
+                if let Some(available_height) =
+                    self.inset_definite_content_height(containing_block)
+                {
+                    self.dimensions.content.height = available_height;
+                }
             }
 
             // Position from top
@@ -3924,14 +4470,25 @@ impl LayoutBox {
                     // function is handed the flow parent. That only matters
                     // when it clamps, i.e. when max-content exceeds `available`.
                     shrink_to_fit_content_width(self, available)
-                } else if self.float != Float::None {
+                } else if self.float != Float::None || self.style.display.is_table() {
                     // CSS 2.1 §10.3.5: a float with width:auto shrinks to
                     // fit; filling the line would leave nothing beside it.
+                    // An auto-width table does too (§17.5.2.2: its max-content
+                    // width, clamped to the containing block).
                     shrink_to_fit_content_width(self, available)
                 } else {
                     // Fill available space (CSS 2.1 §10.3.3)
                     available
                 }
+            }
+            // css-sizing-3 §3.2: `fit-content` is min(max-content,
+            // max(min-content, available)), the shrink-to-fit width, in
+            // every context; unlike `auto` it never fills a block. The
+            // `_` arm below read it as 0 (`Length::to_px`).
+            Length::FitContent => {
+                let available =
+                    (containing_block.content.width - total_margin_border_padding).max(0.0);
+                shrink_to_fit_content_width(self, available)
             }
             _ => {
                 let specified_width =
@@ -4108,6 +4665,83 @@ impl LayoutBox {
         }
     }
 
+    /// How far `apply_clearance` would move `child` (0 when it clears
+    /// nothing), without moving it.
+    fn clearance_shift(child: &LayoutBox, floats: &FloatContext, container_y: f32) -> f32 {
+        if child.clear == Clear::None || floats.is_empty() {
+            return 0.0;
+        }
+        let bottoms =
+            |v: &Vec<FloatExclusion>| v.iter().map(|f| f.rect.bottom()).fold(0.0, f32::max);
+        let cleared = match child.clear {
+            Clear::Left => bottoms(&floats.left_floats),
+            Clear::Right => bottoms(&floats.right_floats),
+            _ => bottoms(&floats.left_floats).max(bottoms(&floats.right_floats)),
+        };
+        (container_y + cleared - child.dimensions.border_box().y).max(0.0)
+    }
+
+    /// CSS 2.1 §9.4.1 / §9.5: an in-flow block child that does not establish
+    /// a formatting context shares its parent's, so the floats placed so far
+    /// (`floats`, in `parent`'s content coordinates) reach its line boxes.
+    /// Returns them in page coordinates for `context_floats`, or `None` for
+    /// a child that does not share the context.
+    fn shared_floats(
+        child: &LayoutBox,
+        hands_floats_down: bool,
+        floats: &FloatContext,
+        parent: &Dimensions,
+    ) -> Option<FloatContext> {
+        let shares = hands_floats_down
+            && matches!(child.box_type, BoxType::Block | BoxType::AnonymousBlock)
+            && !child.style.display.is_atomic_inline()
+            && !crate::margin_collapse::establishes_bfc(&child.style, child.float);
+        shares.then(|| floats.translated(parent.content.x, parent.content.y))
+    }
+
+    /// The band (see `FloatContext::line_band`) of the first line at or
+    /// below `*y` where a box `width` wide fits beside the floats, moving
+    /// `*y` down to the next float edge until it does or no float remains
+    /// (CSS 2.1 §9.5: a line box too narrow for its content shifts down).
+    fn fitting_band(
+        floats: &FloatContext,
+        y: &mut f32,
+        width: f32,
+        band_h: f32,
+        container_width: f32,
+    ) -> (f32, f32) {
+        let mut band = floats.line_band(*y, band_h, container_width);
+        while band.1 < width - 0.01 && band.1 < container_width {
+            let next = floats.next_clear_y_after(*y);
+            if next <= *y {
+                break;
+            }
+            *y = next;
+            band = floats.line_band(*y, band_h, container_width);
+        }
+        band
+    }
+
+    /// Move the content already on a line right by `dx` (a left float was
+    /// placed on it). A run split over several lines moves only its last
+    /// line, the one on this line box; floats and positioned boxes stay.
+    fn shift_line_content(children: &mut [LayoutBox], dx: f32) {
+        for sib in children {
+            if sib.float != Float::None
+                || matches!(sib.position, Position::Absolute | Position::Fixed)
+            {
+                continue;
+            }
+            if sib.text_flow_first_offset.is_some() {
+                if let Some(last) = sib.text_lines.as_mut().and_then(|t| t.last_mut()) {
+                    last.x_offset += dx;
+                    continue;
+                }
+            }
+            crate::flex::translate_subtree(sib, dx, 0.0);
+        }
+    }
+
     /// CSS 2.1 §9.5: a block that establishes a formatting context
     /// (overflow other than visible, flex, grid) must not overlap the
     /// floats beside it; it is laid out in the band they leave free.
@@ -4132,6 +4766,9 @@ impl LayoutBox {
     }
 
     fn layout_block_children(&mut self, definite_height: Option<f32>) {
+        if self.style.display.is_table() {
+            return table::layout_table_contents(self);
+        }
         let mut cursor_y = 0.0;
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
@@ -4168,7 +4805,7 @@ impl LayoutBox {
                 || matches!(self.style.width, Length::Px(px) if px <= 0.0));
 
         // Track lines for text-align adjustment after layout: (start_index, end_index, line_width)
-        let mut lines: Vec<(usize, usize, f32)> = Vec::new();
+        let mut lines: Vec<(usize, usize, f32, (f32, f32))> = Vec::new();
         let mut line_start_index: Option<usize> = None;
         let mut line_width = 0.0_f32;
         // IFC Slice B2: phase-5 mid-line splits whose CLOSED lines (line 0
@@ -4179,8 +4816,22 @@ impl LayoutBox {
         let mut seam: Option<SeamEdge> = None;
         // Floats placed among these children, in content-box coordinates
         // (x from 0 at the content edge, y relative to the content top).
-        let mut floats = FloatContext::new();
+        // A block that shares its parent's formatting context starts with
+        // that context's floats (CSS 2.1 §9.5; see `context_floats`).
+        let shares_context = self.context_floats.is_some();
+        let mut floats = self
+            .context_floats
+            .take()
+            .map(|f| f.translated(-self.dimensions.content.x, -self.dimensions.content.y))
+            .unwrap_or_default();
         let mut last_float_top = 0.0_f32;
+        // In-flow block children that do not establish a formatting context
+        // share this one: they get its floats and hand theirs back. The
+        // children of a flex, grid or multi-column container do not.
+        let hands_floats_down = !(self.style.display.is_flex() || self.style.display.is_grid())
+            && multicol::column_geometry(&self.style, container_width).is_none();
+        // Content a left float placed mid-line pushed right: (start, end, dx).
+        let mut line_shifts: Vec<(usize, usize, f32)> = Vec::new();
 
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout.
@@ -4208,8 +4859,31 @@ impl LayoutBox {
                     &cb,
                     definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
                 );
-                last_float_top =
-                    Self::place_float(child, &mut floats, &self.dimensions, cursor_y.max(last_float_top));
+                // A float that does not fit beside the content already on
+                // the line goes below that line (CSS 2.1 §9.5.1 rules 6
+                // and 8: it may not overlap the line's content).
+                let (old_left, old_width) =
+                    floats.line_band(cursor_y, empty_line_height, container_width);
+                let mut start_y = cursor_y.max(last_float_top);
+                if cursor_x > 0.0
+                    && cursor_x + child.dimensions.margin_box().width > old_width + 0.01
+                {
+                    start_y = start_y.max(
+                        cursor_y
+                            + line_advance(line_height, line_below_baseline, line_extents, strut),
+                    );
+                }
+                last_float_top = Self::place_float(child, &mut floats, &self.dimensions, start_y);
+                // A left float placed on the current line pushes the content
+                // already on it right: the line box now starts after it.
+                if cursor_x > 0.0 && child.float == Float::Left {
+                    let new_left = floats
+                        .line_band(cursor_y, empty_line_height, container_width)
+                        .0;
+                    if let Some(start) = line_start_index.filter(|_| new_left > old_left) {
+                        line_shifts.push((start, i, new_left - old_left));
+                    }
+                }
                 continue;
             }
 
@@ -4219,7 +4893,12 @@ impl LayoutBox {
             if matches!(child.box_type, BoxType::LineBreak) {
                 seam = None;
                 if let Some(start) = line_start_index {
-                    lines.push((start, i, line_width));
+                    lines.push((
+                        start,
+                        i,
+                        line_width,
+                        floats.line_band(cursor_y, empty_line_height, container_width),
+                    ));
                 }
                 let advance = if cursor_x > 0.0 || line_height > 0.0 {
                     line_advance(line_height, line_below_baseline, line_extents, strut)
@@ -4227,7 +4906,11 @@ impl LayoutBox {
                     empty_line_height
                 };
                 child.dimensions.content = Rect::new(
-                    self.dimensions.content.x + cursor_x,
+                    self.dimensions.content.x
+                        + floats
+                            .line_band(cursor_y, empty_line_height, container_width)
+                            .0
+                        + cursor_x,
                     self.dimensions.content.y + cursor_y,
                     0.0,
                     0.0,
@@ -4250,6 +4933,10 @@ impl LayoutBox {
             // run joins the current line only when it fits the remaining
             // space as a single line; longer text keeps the block path and
             // wraps there (full IFC text splitting is a later phase).
+            // CSS 2.1 §9.5: the band this line box has beside the floats
+            // (the whole content width when there are none).
+            let (mut line_left, mut line_avail) =
+                floats.line_band(cursor_y, empty_line_height, container_width);
             let flows_inline = is_inline_block
                 || (child.style.display == rustkit_css::Display::Inline
                     && matches!(
@@ -4269,7 +4956,7 @@ impl LayoutBox {
                 // scroller). Otherwise it flows inline only when it fits.
                 || (matches!(child.box_type, BoxType::Text(_))
                     && (!container_allows_wrap
-                        || child.text_single_line_width() <= container_width - cursor_x));
+                        || child.text_single_line_width() <= line_avail - cursor_x));
 
             if flows_inline {
                 // Cross-node shaping: kern the seam pair with the text
@@ -4279,7 +4966,7 @@ impl LayoutBox {
                 line_width += kern;
                 // Layout inline-level child to get its dimensions first
                 let mut cb = self.dimensions.clone();
-                cb.content.x = self.dimensions.content.x + cursor_x;
+                cb.content.x = self.dimensions.content.x + line_left + cursor_x;
                 cb.content.y = self.dimensions.content.y + cursor_y;
                 // Children self-position at cb.y + cb.height; the cursor is
                 // already baked into cb.y, so the height term must be zero.
@@ -4291,15 +4978,25 @@ impl LayoutBox {
 
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
+                let splits_across_lines = matches!(child.box_type, BoxType::Inline);
+                // The width that must fit beside the floats before the box
+                // may sit on a line (none for an inline, which splits).
+                let fit_width = if splits_across_lines {
+                    0.0
+                } else {
+                    child_width
+                };
 
                 // Check if child fits on current line (nowrap/pre never soft-wrap)
-                if container_allows_wrap
-                    && cursor_x > 0.0
-                    && cursor_x + child_width > container_width
-                {
+                if container_allows_wrap && cursor_x > 0.0 && cursor_x + child_width > line_avail {
                     // Record completed line for text-align
                     if let Some(start) = line_start_index {
-                        lines.push((start, i, line_width));
+                        lines.push((
+                            start,
+                            i,
+                            line_width,
+                            floats.line_band(cursor_y, empty_line_height, container_width),
+                        ));
                     }
 
                     // Wrap to next line
@@ -4312,12 +5009,49 @@ impl LayoutBox {
                     line_width = 0.0;
 
                     // Re-layout at new position
-                    cb.content.x = self.dimensions.content.x;
+                    // The next line may be narrowed by floats too: move down
+                    // until the box fits beside them or none remain. A
+                    // non-atomic inline splits instead (it keeps the band).
+                    (line_left, line_avail) = Self::fitting_band(
+                        &floats,
+                        &mut cursor_y,
+                        fit_width,
+                        empty_line_height,
+                        container_width,
+                    );
+                    cb.content.x = self.dimensions.content.x + line_left;
                     cb.content.y = self.dimensions.content.y + cursor_y;
                     child.layout_with_percent_base(
-                    &cb,
-                    definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
-                );
+                        &cb,
+                        definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
+                    );
+                }
+
+                // At the start of a line beside floats, a box too wide for
+                // the band moves down until it fits (CSS 2.1 §9.5).
+                if container_allows_wrap
+                    && !splits_across_lines
+                    && cursor_x == 0.0
+                    && child_width > line_avail + 0.01
+                    && line_avail < container_width
+                {
+                    let y0 = cursor_y;
+                    (line_left, _) = Self::fitting_band(
+                        &floats,
+                        &mut cursor_y,
+                        child_width,
+                        empty_line_height,
+                        container_width,
+                    );
+                    if cursor_y != y0 {
+                        cb.content.x = self.dimensions.content.x + line_left;
+                        cb.content.y = self.dimensions.content.y + cursor_y;
+                        child.layout_with_percent_base(
+                            &cb,
+                            definite_height
+                                .or((cb.content.height > 0.0).then_some(cb.content.height)),
+                        );
+                    }
                 }
 
                 // Track line start
@@ -4330,6 +5064,7 @@ impl LayoutBox {
                 // (dropping border/padding here shifted every decorated
                 // inline-block up-left by border+padding).
                 child.dimensions.content.x = self.dimensions.content.x
+                    + line_left
                     + cursor_x
                     + child.dimensions.margin.left
                     + child.dimensions.border.left
@@ -4364,12 +5099,23 @@ impl LayoutBox {
                         Self::inline_wrapped_tail(child, self.dimensions.content.x)
                     {
                         if let Some(start) = line_start_index {
-                            lines.push((start, i + 1, line_width + child_width));
+                            lines.push((
+                                start,
+                                i + 1,
+                                line_width + child_width,
+                                floats.line_band(cursor_y, empty_line_height, container_width),
+                            ));
                         }
-                        cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
-                            + (n_lines as f32 - 2.0).max(0.0) * lh;
-                        cursor_x = last_end;
-                        line_width = last_end;
+                        cursor_y +=
+                            line_advance(line_height, line_below_baseline, line_extents, strut)
+                                .max(lh)
+                                + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        cursor_x = (last_end
+                            - floats
+                                .line_band(cursor_y, empty_line_height, container_width)
+                                .0)
+                            .max(0.0);
+                        line_width = cursor_x;
                         line_height = lh;
                         line_below_baseline = 0.0;
                         line_extents = (0.0, 0.0);
@@ -4377,6 +5123,12 @@ impl LayoutBox {
                         seam = Self::seam_edge(child, true);
                         continue;
                     }
+                    // The atomic inlines inside it are on this line too.
+                    // Not above: wrapped text inside one of them is counted
+                    // there as the inline's own lines, and both together
+                    // made a two-line `inline-block` heading in a link 130
+                    // tall for its 76.
+                    line_height = line_height.max(child.tallest_atomic_in_inline());
                 } else {
                     line_height = line_height.max(child_height);
                 }
@@ -4427,7 +5179,13 @@ impl LayoutBox {
                 let kern = Self::seam_kern(seam.as_ref(), Self::seam_edge(child, false).as_ref());
                 cursor_x += kern;
                 line_width += kern;
-                let (n_lines, last_w) = child.layout_text_in_flow(&cb, line_top, cursor_x);
+                let (n_lines, last_w) = child.layout_text_in_flow(
+                    &cb,
+                    line_top,
+                    cursor_x,
+                    &floats,
+                    (line_left, line_avail),
+                );
                 seam = Self::seam_edge(child, true);
                 let lh = child.get_line_height();
                 if n_lines <= 1 {
@@ -4457,7 +5215,12 @@ impl LayoutBox {
                 // First, finish any inline-block line
                 if cursor_x > 0.0 {
                     if let Some(start) = line_start_index {
-                        lines.push((start, i, line_width));
+                        lines.push((
+                            start,
+                            i,
+                            line_width,
+                            floats.line_band(cursor_y, empty_line_height, container_width),
+                        ));
                     }
                     cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
                     cursor_x = 0.0;
@@ -4471,6 +5234,9 @@ impl LayoutBox {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 Self::narrow_beside_floats(child, &floats, &mut cb, cursor_y);
+                let shared =
+                    Self::shared_floats(child, hands_floats_down, &floats, &self.dimensions);
+                child.context_floats = shared.clone();
                 match (container_is_definite_zero, &child.box_type) {
                     // Author `width: 0`: block-path text wraps against it
                     // (see layout_text_with_zero_wrap).
@@ -4483,20 +5249,46 @@ impl LayoutBox {
                         definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
                     ),
                 }
+                // A cleared block that shares the floats is laid out again
+                // where its clearance puts it, so its lines are broken
+                // beside the floats it actually sits next to.
+                let shift = Self::clearance_shift(child, &floats, self.dimensions.content.y);
+                if shift > 0.0 && shared.is_some() {
+                    cb.content.height += shift;
+                    cursor_y += shift;
+                    child.context_floats = shared;
+                    child.layout_with_percent_base(
+                        &cb,
+                        definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
+                    );
+                }
                 cursor_y += Self::apply_clearance(child, &mut floats, self.dimensions.content.y);
+                if let Some(f) = child.context_floats.take() {
+                    floats = f.translated(-self.dimensions.content.x, -self.dimensions.content.y);
+                }
 
                 // An inline-level box (e.g. a styled <span>/<a>) laid out on
                 // its own is centered/right-aligned as a single-item line so
                 // its box decoration follows text-align.
                 if matches!(child.box_type, BoxType::Inline) {
-                    lines.push((i, i + 1, child.dimensions.margin_box().width));
+                    lines.push((
+                        i,
+                        i + 1,
+                        child.dimensions.margin_box().width,
+                        (0.0, container_width),
+                    ));
                 }
                 // IFC Slice A: a text run laid on the block path (a lone or
                 // first text child — the inline gate requires cursor_x > 0)
                 // is a single-item line. Leaves no longer self-align, so
                 // without this record centered headings would go left.
                 if matches!(child.box_type, BoxType::Text(_)) {
-                    lines.push((i, i + 1, child.dimensions.content.width));
+                    lines.push((
+                        i,
+                        i + 1,
+                        child.dimensions.content.width,
+                        (0.0, container_width),
+                    ));
                 }
 
                 if child.float == Float::None {
@@ -4515,7 +5307,12 @@ impl LayoutBox {
         // Record any remaining inline-block line
         if cursor_x > 0.0 {
             if let Some(start) = line_start_index {
-                lines.push((start, self.children.len(), line_width));
+                lines.push((
+                    start,
+                    self.children.len(),
+                    line_width,
+                    floats.line_band(cursor_y, empty_line_height, container_width),
+                ));
             }
             cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
         }
@@ -4523,17 +5320,30 @@ impl LayoutBox {
         // IFC Slice B2: align the CLOSED lines of each mid-line split
         // (line 0 = prior siblings + first fragment as one unit; middles
         // per-line) before the recorded-lines pass touches last fragments.
+        for (start, end, dx) in line_shifts {
+            Self::shift_line_content(&mut self.children[start..end], dx);
+        }
+
         for (start, ti) in split_records {
-            Self::align_split_close(&mut self.children, start, ti, container_width, text_align);
+            Self::align_split_close(
+                &mut self.children,
+                start,
+                ti,
+                container_width,
+                text_align,
+                &floats,
+                self.dimensions.content.y,
+                empty_line_height,
+            );
         }
 
         // Apply text-align to all recorded lines
         let valign_font = self.style.clone();
-        for (start, end, width) in lines {
+        for (start, end, width, (_, band_width)) in lines {
             Self::apply_text_align_offset(
                 &mut self.children[start..end],
                 width,
-                container_width,
+                band_width,
                 text_align,
             );
             // Slice C: vertical alignment about the line baseline.
@@ -4549,6 +5359,10 @@ impl LayoutBox {
         }
 
         self.dimensions.content.height = cursor_y;
+        if shares_context {
+            self.context_floats =
+                Some(floats.translated(self.dimensions.content.x, self.dimensions.content.y));
+        }
     }
 
     /// IFC Slice C (CSS2 §10.8 subset): align line members VERTICALLY about
@@ -4649,7 +5463,11 @@ impl LayoutBox {
         let x_height = fs * 0.5;
         for &i in &members {
             let c = &children[i];
-            let above = if matches!(c.box_type, BoxType::Text(_)) || seats_as_text(c) {
+            let above = if seats_as_text(c) {
+                // With the atomic inlines inside it, which sit on the same
+                // baseline (line_member_baseline_extents).
+                c.line_member_baseline_extents().map_or(text_extents(&c.style).0, |e| e.0)
+            } else if matches!(c.box_type, BoxType::Text(_)) {
                 text_extents(&c.style).0
             } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
             {
@@ -4718,6 +5536,9 @@ impl LayoutBox {
             // line leaves the run where it is. Ledgered, not chased.
             if dy.abs() > 0.01 && !is_multi_line_split {
                 crate::flex::translate_subtree(c, 0.0, dy);
+            }
+            if seats_as_text(c) {
+                c.seat_atomics_in_inline(baseline_y, line_top);
             }
         }
     }
@@ -4855,31 +5676,58 @@ impl LayoutBox {
     /// (`apply_text_align_offset`) when it closes.
     ///
     /// Under Left/Justify this is a no-op — FLOW offsets are already final.
+    ///
+    /// Beside floats each visual line aligns within its own band
+    /// (`FloatContext::line_band`, `floats` in the container's content
+    /// coordinates, whose top is `container_y`): line 0 with the band the
+    /// flow gave it (line height `band_h`), the others at the run's line
+    /// height.
+    #[allow(clippy::too_many_arguments)]
     fn align_split_close(
         children: &mut [LayoutBox],
         line_start: usize,
         text_index: usize,
         container_width: f32,
         text_align: TextAlign,
+        floats: &FloatContext,
+        container_y: f32,
+        band_h: f32,
     ) {
         if !matches!(text_align, TextAlign::Right | TextAlign::Center) {
             return;
         }
-        let Some(text_lines) = children[text_index].text_lines.as_ref() else {
+        let run = &children[text_index];
+        let Some(text_lines) = run.text_lines.as_ref() else {
             return;
         };
         let n = text_lines.len();
         if n < 2 {
             return;
         }
+        let top = run.dimensions.content.y - container_y;
+        let lh = run.dimensions.content.height / n as f32;
+        let band = |k: usize| {
+            if k == 0 {
+                floats.line_band(top, band_h, container_width)
+            } else {
+                floats.line_band(top + k as f32 * lh, lh, container_width)
+            }
+        };
+        let (left0, width0) = band(0);
         let flow0 = text_lines[0].x_offset;
-        let line0_width = flow0 + text_lines[0].width;
-        let align = |w: f32| match text_align {
-            TextAlign::Right => (container_width - w).max(0.0),
-            TextAlign::Center => ((container_width - w) / 2.0).max(0.0),
+        let line0_width = flow0 - left0 + text_lines[0].width;
+        let align_in = |avail: f32, w: f32| match text_align {
+            TextAlign::Right => (avail - w).max(0.0),
+            TextAlign::Center => ((avail - w) / 2.0).max(0.0),
             _ => 0.0,
         };
-        let o0 = align(line0_width);
+        let middle: Vec<f32> = (1..n - 1)
+            .map(|k| {
+                let (left, avail) = band(k);
+                left + align_in(avail, text_lines[k].width)
+            })
+            .collect();
+        let o0 = align_in(width0, line0_width);
         if o0 > 0.0 {
             let (prior, rest) = children.split_at_mut(text_index);
             for sib in &mut prior[line_start..] {
@@ -4903,8 +5751,8 @@ impl LayoutBox {
         }
         // Middle lines (0 and last excluded): pure per-line alignment.
         if let Some(tls) = children[text_index].text_lines.as_mut() {
-            for tl in &mut tls[1..n - 1] {
-                tl.x_offset = align(tl.width);
+            for (tl, x) in tls[1..n - 1].iter_mut().zip(middle) {
+                tl.x_offset = x;
             }
         }
     }
@@ -4916,6 +5764,9 @@ impl LayoutBox {
         float_context: &mut FloatContext,
         definite_height: Option<f32>,
     ) {
+        if self.style.display.is_table() {
+            return table::layout_table_contents(self);
+        }
         let mut cursor_y = 0.0;
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
@@ -4947,7 +5798,7 @@ impl LayoutBox {
                 || matches!(self.style.width, Length::Px(px) if px <= 0.0));
 
         // Track lines for text-align adjustment after layout: (start_index, end_index, line_width)
-        let mut lines: Vec<(usize, usize, f32)> = Vec::new();
+        let mut lines: Vec<(usize, usize, f32, (f32, f32))> = Vec::new();
         let mut line_start_index: Option<usize> = None;
         let mut line_width = 0.0_f32;
         // IFC Slice B2: phase-5 mid-line splits whose CLOSED lines (line 0
@@ -4958,8 +5809,22 @@ impl LayoutBox {
         let mut seam: Option<SeamEdge> = None;
 
         // Floats placed among these children (see layout_block_children).
-        let mut floats = FloatContext::new();
+        // A block that shares its parent's formatting context starts with
+        // that context's floats (CSS 2.1 §9.5; see `context_floats`).
+        let shares_context = self.context_floats.is_some();
+        let mut floats = self
+            .context_floats
+            .take()
+            .map(|f| f.translated(-self.dimensions.content.x, -self.dimensions.content.y))
+            .unwrap_or_default();
         let mut last_float_top = 0.0_f32;
+        // In-flow block children that do not establish a formatting context
+        // share this one: they get its floats and hand theirs back. The
+        // children of a flex, grid or multi-column container do not.
+        let hands_floats_down = !(self.style.display.is_flex() || self.style.display.is_grid())
+            && multicol::column_geometry(&self.style, container_width).is_none();
+        // Content a left float placed mid-line pushed right: (start, end, dx).
+        let mut line_shifts: Vec<(usize, usize, f32)> = Vec::new();
 
         // `cb.content.height = cursor_y` below is the STATIC POSITION trick
         // (calculate_block_position stacks a box at cb.y + cb.height), not
@@ -5001,8 +5866,31 @@ impl LayoutBox {
                     &mut FloatContext::new(),
                     definite_height,
                 );
-                last_float_top =
-                    Self::place_float(child, &mut floats, &self.dimensions, cursor_y.max(last_float_top));
+                // A float that does not fit beside the content already on
+                // the line goes below that line (CSS 2.1 §9.5.1 rules 6
+                // and 8: it may not overlap the line's content).
+                let (old_left, old_width) =
+                    floats.line_band(cursor_y, empty_line_height, container_width);
+                let mut start_y = cursor_y.max(last_float_top);
+                if cursor_x > 0.0
+                    && cursor_x + child.dimensions.margin_box().width > old_width + 0.01
+                {
+                    start_y = start_y.max(
+                        cursor_y
+                            + line_advance(line_height, line_below_baseline, line_extents, strut),
+                    );
+                }
+                last_float_top = Self::place_float(child, &mut floats, &self.dimensions, start_y);
+                // A left float placed on the current line pushes the content
+                // already on it right: the line box now starts after it.
+                if cursor_x > 0.0 && child.float == Float::Left {
+                    let new_left = floats
+                        .line_band(cursor_y, empty_line_height, container_width)
+                        .0;
+                    if let Some(start) = line_start_index.filter(|_| new_left > old_left) {
+                        line_shifts.push((start, i, new_left - old_left));
+                    }
+                }
                 continue;
             }
 
@@ -5032,7 +5920,12 @@ impl LayoutBox {
             if matches!(child.box_type, BoxType::LineBreak) {
                 seam = None;
                 if let Some(start) = line_start_index {
-                    lines.push((start, i, line_width));
+                    lines.push((
+                        start,
+                        i,
+                        line_width,
+                        floats.line_band(cursor_y, empty_line_height, container_width),
+                    ));
                 }
                 let advance = if cursor_x > 0.0 || line_height > 0.0 {
                     line_advance(line_height, line_below_baseline, line_extents, strut)
@@ -5040,7 +5933,11 @@ impl LayoutBox {
                     empty_line_height
                 };
                 child.dimensions.content = Rect::new(
-                    self.dimensions.content.x + cursor_x,
+                    self.dimensions.content.x
+                        + floats
+                            .line_band(cursor_y, empty_line_height, container_width)
+                            .0
+                        + cursor_x,
                     self.dimensions.content.y + cursor_y,
                     0.0,
                     0.0,
@@ -5057,6 +5954,10 @@ impl LayoutBox {
 
             // CSS2 §9.4.2: ALL inline-level boxes share line boxes — see
             // layout_block_children for the full rationale.
+            // CSS 2.1 §9.5: the band this line box has beside the floats
+            // (the whole content width when there are none).
+            let (mut line_left, mut line_avail) =
+                floats.line_band(cursor_y, empty_line_height, container_width);
             let flows_inline = is_inline_block
                 || (child.style.display == rustkit_css::Display::Inline
                     && matches!(
@@ -5076,7 +5977,7 @@ impl LayoutBox {
                 // scroller). Otherwise it flows inline only when it fits.
                 || (matches!(child.box_type, BoxType::Text(_))
                     && (!container_allows_wrap
-                        || child.text_single_line_width() <= container_width - cursor_x));
+                        || child.text_single_line_width() <= line_avail - cursor_x));
 
             if flows_inline {
                 // Cross-node shaping: kern the seam pair with the text
@@ -5092,7 +5993,7 @@ impl LayoutBox {
                 let margin_context = &mut ib_margin_context;
                 // Layout to get dimensions first
                 let mut cb = self.dimensions.clone();
-                cb.content.x = self.dimensions.content.x + cursor_x;
+                cb.content.x = self.dimensions.content.x + line_left + cursor_x;
                 cb.content.y = self.dimensions.content.y + cursor_y;
                 // Children self-position at cb.y + cb.height; the cursor is
                 // already baked into cb.y, so the height term must be zero.
@@ -5101,15 +6002,25 @@ impl LayoutBox {
 
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
+                let splits_across_lines = matches!(child.box_type, BoxType::Inline);
+                // The width that must fit beside the floats before the box
+                // may sit on a line (none for an inline, which splits).
+                let fit_width = if splits_across_lines {
+                    0.0
+                } else {
+                    child_width
+                };
 
                 // Check if child fits on current line (nowrap/pre never soft-wrap)
-                if container_allows_wrap
-                    && cursor_x > 0.0
-                    && cursor_x + child_width > container_width
-                {
+                if container_allows_wrap && cursor_x > 0.0 && cursor_x + child_width > line_avail {
                     // Record completed line for text-align
                     if let Some(start) = line_start_index {
-                        lines.push((start, i, line_width));
+                        lines.push((
+                            start,
+                            i,
+                            line_width,
+                            floats.line_band(cursor_y, empty_line_height, container_width),
+                        ));
                     }
 
                     // Wrap to next line
@@ -5122,7 +6033,17 @@ impl LayoutBox {
                     line_width = 0.0;
 
                     // Re-layout at new position
-                    cb.content.x = self.dimensions.content.x;
+                    // The next line may be narrowed by floats too: move down
+                    // until the box fits beside them or none remain. A
+                    // non-atomic inline splits instead (it keeps the band).
+                    (line_left, line_avail) = Self::fitting_band(
+                        &floats,
+                        &mut cursor_y,
+                        fit_width,
+                        empty_line_height,
+                        container_width,
+                    );
+                    cb.content.x = self.dimensions.content.x + line_left;
                     cb.content.y = self.dimensions.content.y + cursor_y;
                     child.layout_with_collapse_in(
                         &cb,
@@ -5130,6 +6051,34 @@ impl LayoutBox {
                         float_context,
                         definite_height,
                     );
+                }
+
+                // At the start of a line beside floats, a box too wide for
+                // the band moves down until it fits (CSS 2.1 §9.5).
+                if container_allows_wrap
+                    && !splits_across_lines
+                    && cursor_x == 0.0
+                    && child_width > line_avail + 0.01
+                    && line_avail < container_width
+                {
+                    let y0 = cursor_y;
+                    (line_left, _) = Self::fitting_band(
+                        &floats,
+                        &mut cursor_y,
+                        child_width,
+                        empty_line_height,
+                        container_width,
+                    );
+                    if cursor_y != y0 {
+                        cb.content.x = self.dimensions.content.x + line_left;
+                        cb.content.y = self.dimensions.content.y + cursor_y;
+                        child.layout_with_collapse_in(
+                            &cb,
+                            margin_context,
+                            float_context,
+                            definite_height,
+                        );
+                    }
                 }
 
                 // Track line start
@@ -5142,6 +6091,7 @@ impl LayoutBox {
                 // (dropping border/padding here shifted every decorated
                 // inline-block up-left by border+padding).
                 child.dimensions.content.x = self.dimensions.content.x
+                    + line_left
                     + cursor_x
                     + child.dimensions.margin.left
                     + child.dimensions.border.left
@@ -5176,12 +6126,23 @@ impl LayoutBox {
                         Self::inline_wrapped_tail(child, self.dimensions.content.x)
                     {
                         if let Some(start) = line_start_index {
-                            lines.push((start, i + 1, line_width + child_width));
+                            lines.push((
+                                start,
+                                i + 1,
+                                line_width + child_width,
+                                floats.line_band(cursor_y, empty_line_height, container_width),
+                            ));
                         }
-                        cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
-                            + (n_lines as f32 - 2.0).max(0.0) * lh;
-                        cursor_x = last_end;
-                        line_width = last_end;
+                        cursor_y +=
+                            line_advance(line_height, line_below_baseline, line_extents, strut)
+                                .max(lh)
+                                + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        cursor_x = (last_end
+                            - floats
+                                .line_band(cursor_y, empty_line_height, container_width)
+                                .0)
+                            .max(0.0);
+                        line_width = cursor_x;
                         line_height = lh;
                         line_below_baseline = 0.0;
                         line_extents = (0.0, 0.0);
@@ -5189,6 +6150,12 @@ impl LayoutBox {
                         seam = Self::seam_edge(child, true);
                         continue;
                     }
+                    // The atomic inlines inside it are on this line too.
+                    // Not above: wrapped text inside one of them is counted
+                    // there as the inline's own lines, and both together
+                    // made a two-line `inline-block` heading in a link 130
+                    // tall for its 76.
+                    line_height = line_height.max(child.tallest_atomic_in_inline());
                 } else {
                     line_height = line_height.max(child_height);
                 }
@@ -5236,7 +6203,13 @@ impl LayoutBox {
                 let kern = Self::seam_kern(seam.as_ref(), Self::seam_edge(child, false).as_ref());
                 cursor_x += kern;
                 line_width += kern;
-                let (n_lines, last_w) = child.layout_text_in_flow(&cb, line_top, cursor_x);
+                let (n_lines, last_w) = child.layout_text_in_flow(
+                    &cb,
+                    line_top,
+                    cursor_x,
+                    &floats,
+                    (line_left, line_avail),
+                );
                 seam = Self::seam_edge(child, true);
                 let lh = child.get_line_height();
                 if n_lines <= 1 {
@@ -5261,7 +6234,12 @@ impl LayoutBox {
                 // First, finish any inline-block line
                 if cursor_x > 0.0 {
                     if let Some(start) = line_start_index {
-                        lines.push((start, i, line_width));
+                        lines.push((
+                            start,
+                            i,
+                            line_width,
+                            floats.line_band(cursor_y, empty_line_height, container_width),
+                        ));
                     }
                     cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
                     cursor_x = 0.0;
@@ -5275,6 +6253,10 @@ impl LayoutBox {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 Self::narrow_beside_floats(child, &floats, &mut cb, cursor_y);
+                let shared =
+                    Self::shared_floats(child, hands_floats_down, &floats, &self.dimensions);
+                child.context_floats = shared.clone();
+                let margins_before = shared.as_ref().map(|_| margin_context.clone());
                 match (container_is_definite_zero, &child.box_type) {
                     // Author `width: 0`: block-path text wraps against it
                     // (see layout_text_with_zero_wrap). Text has no margins
@@ -5290,20 +6272,48 @@ impl LayoutBox {
                         definite_height,
                     ),
                 }
+                // A cleared block that shares the floats is laid out again
+                // where its clearance puts it (same pending margins), so its
+                // lines are broken beside the floats it actually sits next to.
+                let shift = Self::clearance_shift(child, &floats, self.dimensions.content.y);
+                if let (true, Some(before)) = (shift > 0.0, margins_before) {
+                    *margin_context = before;
+                    cb.content.height += shift;
+                    child.context_floats = shared;
+                    child.layout_with_collapse_in(
+                        &cb,
+                        margin_context,
+                        float_context,
+                        definite_height,
+                    );
+                }
                 // cursor_y below is read from the child's border box, so the
                 // clearance shift carries into the flow.
                 Self::apply_clearance(child, &mut floats, self.dimensions.content.y);
+                if let Some(f) = child.context_floats.take() {
+                    floats = f.translated(-self.dimensions.content.x, -self.dimensions.content.y);
+                }
 
                 // See layout_block_children: keep inline box decoration aligned.
                 if matches!(child.box_type, BoxType::Inline) {
-                    lines.push((i, i + 1, child.dimensions.margin_box().width));
+                    lines.push((
+                        i,
+                        i + 1,
+                        child.dimensions.margin_box().width,
+                        (0.0, container_width),
+                    ));
                 }
                 // IFC Slice A: a text run laid on the block path (a lone or
                 // first text child — the inline gate requires cursor_x > 0)
                 // is a single-item line. Leaves no longer self-align, so
                 // without this record centered headings would go left.
                 if matches!(child.box_type, BoxType::Text(_)) {
-                    lines.push((i, i + 1, child.dimensions.content.width));
+                    lines.push((
+                        i,
+                        i + 1,
+                        child.dimensions.content.width,
+                        (0.0, container_width),
+                    ));
                 }
 
                 if child.float == Float::None {
@@ -5322,24 +6332,42 @@ impl LayoutBox {
         // Record any remaining inline-block line
         if cursor_x > 0.0 {
             if let Some(start) = line_start_index {
-                lines.push((start, self.children.len(), line_width));
+                lines.push((
+                    start,
+                    self.children.len(),
+                    line_width,
+                    floats.line_band(cursor_y, empty_line_height, container_width),
+                ));
             }
             cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
         }
 
         // IFC Slice B2: align the CLOSED lines of each mid-line split —
         // see layout_block_children.
+        for (start, end, dx) in line_shifts {
+            Self::shift_line_content(&mut self.children[start..end], dx);
+        }
+
         for (start, ti) in split_records {
-            Self::align_split_close(&mut self.children, start, ti, container_width, text_align);
+            Self::align_split_close(
+                &mut self.children,
+                start,
+                ti,
+                container_width,
+                text_align,
+                &floats,
+                self.dimensions.content.y,
+                empty_line_height,
+            );
         }
 
         // Apply text-align to all recorded lines
         let valign_font = self.style.clone();
-        for (start, end, width) in lines {
+        for (start, end, width, (_, band_width)) in lines {
             Self::apply_text_align_offset(
                 &mut self.children[start..end],
                 width,
-                container_width,
+                band_width,
                 text_align,
             );
             // Slice C: vertical alignment about the line baseline.
@@ -5372,6 +6400,10 @@ impl LayoutBox {
         }
 
         self.dimensions.content.height = cursor_y;
+        if shares_context {
+            self.context_floats =
+                Some(floats.translated(self.dimensions.content.x, self.dimensions.content.y));
+        }
     }
 
     /// CSS 2.1 §10.5: the content height a percentage-height CHILD of this
@@ -5503,6 +6535,11 @@ impl LayoutBox {
         let border_bottom = self.dimensions.border.bottom;
         let padding_border_height = padding_top + padding_bottom + border_top + border_bottom;
         let is_border_box = self.style.box_sizing == BoxSizing::BorderBox;
+        let table_rows_height = self
+            .style
+            .display
+            .is_table()
+            .then_some(self.dimensions.content.height);
 
         // Lifted out of the match so the arm below can read the sum without
         // borrowing `self.style` across the assignment to `self.dimensions`.
@@ -5595,6 +6632,16 @@ impl LayoutBox {
                     specified
                 };
             }
+            // The other viewport units are lengths like `vh`: they fell to
+            // the `auto` arm, so `height: 2vw` was content-sized.
+            Length::Vw(_) | Length::Vmin(_) | Length::Vmax(_) => {
+                let specified = self.length_to_px(&self.style.height, 0.0);
+                self.dimensions.content.height = if is_border_box {
+                    (specified - padding_border_height).max(0.0)
+                } else {
+                    specified
+                };
+            }
             _ => {
                 // Auto or Zero - content.height was set by layout_block_children
                 // But if aspect-ratio is set and we have a width, calculate height from it
@@ -5609,6 +6656,18 @@ impl LayoutBox {
                     padding_border_height,
                 ) {
                     self.dimensions.content.height = h;
+                }
+                // `-webkit-line-clamp: N` on an auto height: the box ends
+                // at its Nth line box; the rest is overflow.
+                if self.style.height == Length::Auto {
+                    if let Some(bottom) = self
+                        .style
+                        .line_clamp()
+                        .and_then(|n| self.line_clamp_bottom(n))
+                    {
+                        self.dimensions.content.height =
+                            (bottom - self.dimensions.content.y).max(0.0);
+                    }
                 }
             }
         }
@@ -5625,6 +6684,19 @@ impl LayoutBox {
             // a pre-existing inconsistency with the height arm, left as it is
             // so this change carries one rule and not two.)
             Length::Calc(_) => self.length_to_px(&self.style.min_height, self.viewport.1),
+            // Font-relative and viewport units, and the comparison functions:
+            // lengths like any other. They fell through to "no minimum", so
+            // `min-height: 2rem` did nothing on any box (GitHub's small
+            // buttons, 22 tall for 32). Same basis as the arms above for a
+            // percentage inside `max()` or `clamp()`.
+            Length::Em(_)
+            | Length::Rem(_)
+            | Length::Vw(_)
+            | Length::Vmin(_)
+            | Length::Vmax(_)
+            | Length::Min(_)
+            | Length::Max(_)
+            | Length::Clamp(_) => self.length_to_px(&self.style.min_height, self.viewport.1),
             _ => 0.0,
         };
         let min_height = if is_border_box && min_height_raw > 0.0 {
@@ -5642,6 +6714,15 @@ impl LayoutBox {
             Length::Vh(vh) => vh / 100.0 * self.viewport.1,
             Length::Percent(pct) => pct / 100.0 * self.viewport.1,
             Length::Calc(_) => self.length_to_px(&self.style.max_height, self.viewport.1),
+            // As for `min-height` above: these were "no maximum".
+            Length::Em(_)
+            | Length::Rem(_)
+            | Length::Vw(_)
+            | Length::Vmin(_)
+            | Length::Vmax(_)
+            | Length::Min(_)
+            | Length::Max(_)
+            | Length::Clamp(_) => self.length_to_px(&self.style.max_height, self.viewport.1),
             _ => f32::INFINITY,
         };
         let max_height = if is_border_box && max_height_raw < f32::INFINITY {
@@ -5652,6 +6733,56 @@ impl LayoutBox {
         if self.dimensions.content.height > max_height {
             self.dimensions.content.height = max_height;
         }
+        // A table's specified height is a minimum (CSS 2.1 §17.5.3): its
+        // rows, laid out by table.rs before this runs, are never cut.
+        if let Some(rows) = table_rows_height {
+            self.dimensions.content.height = self.dimensions.content.height.max(rows);
+        }
+    }
+
+    /// css-overflow-4 §4.2 (legacy `-webkit-line-clamp`): the bottom of
+    /// this block's `n`th line box, counting the line boxes of its in-flow
+    /// descendants in block order; `None` when it has `n` or fewer. There
+    /// is no line box model, so the lines are recovered from what sits on
+    /// them: text fragments and atomic inlines. Those on one line overlap
+    /// vertically; consecutive lines only touch.
+    fn line_clamp_bottom(&self, n: u32) -> Option<f32> {
+        fn collect(b: &LayoutBox, bands: &mut Vec<(f32, f32)>) {
+            for c in &b.children {
+                if matches!(c.position, Position::Absolute | Position::Fixed)
+                    || c.float != Float::None
+                {
+                    continue;
+                }
+                match &c.box_type {
+                    BoxType::Text(_) => match c.text_line_fragments() {
+                        Some(f) => bands.extend(f.iter().map(|r| (r.y, r.y + r.height))),
+                        None => {
+                            let r = c.dimensions.content;
+                            bands.push((r.y, r.y + r.height));
+                        }
+                    },
+                    BoxType::LineBreak => {}
+                    _ if c.is_atomic_line_member() => {
+                        let r = c.dimensions.margin_box();
+                        bands.push((r.y, r.y + r.height));
+                    }
+                    _ => collect(c, bands),
+                }
+            }
+        }
+        let mut bands = Vec::new();
+        collect(self, &mut bands);
+        bands.retain(|(top, bottom)| bottom > top);
+        bands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut lines: Vec<(f32, f32)> = Vec::new();
+        for (top, bottom) in bands {
+            match lines.last_mut() {
+                Some(line) if top < line.1 - 0.5 => line.1 = line.1.max(bottom),
+                _ => lines.push((top, bottom)),
+            }
+        }
+        (n >= 1 && lines.len() > n as usize).then(|| lines[n as usize - 1].1)
     }
 
     /// Convert a Length to pixels.
@@ -5691,7 +6822,7 @@ impl LayoutBox {
         }
 
         // Sort positioned elements by z-index
-        positioned.sort_by(|a, b| a.1.cmp(&b.1));
+        positioned.sort_by_key(|a| a.1);
 
         // Combine: negative z-index, normal flow, positive z-index
         let mut result: Vec<&LayoutBox> = Vec::new();
@@ -5719,11 +6850,235 @@ impl LayoutBox {
     /// Perform hit testing at the given point.
     /// Returns the hit test result with information about the element at the point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTestResult> {
-        self.hit_test_internal(x, y, 0)
+        self.hit_test_internal(x, y, 0, false)
     }
 
-    /// Internal hit test that tracks depth.
-    fn hit_test_internal(&self, x: f32, y: f32, depth: u32) -> Option<HitTestResult> {
+    /// Hit test a point of the window (VIEWPORT coordinates) in a page
+    /// scrolled by `scroll`, when `self` is the root of the layout.
+    ///
+    /// The page's boxes are in document coordinates and move with the
+    /// scroll. A `position: fixed` box does not (the painter's
+    /// `PushViewportFixed` run), so it is tested with the viewport point,
+    /// wherever it sits in the tree: it is not inside its parent's box. A
+    /// fixed box with a negative `z-index` is under the page; the others
+    /// are over it, the highest `z-index` and then the latest first.
+    pub fn hit_test_scrolled(&self, viewport_x: f32, viewport_y: f32, scroll: (f32, f32)) -> Option<HitTestResult> {
+        let mut held = Vec::new();
+        self.hit_test_held_fixed(viewport_x, viewport_y, 0, &mut held);
+        self.top_held_or_page(held, viewport_x, viewport_y, scroll)
+    }
+
+    /// `hit_test_scrolled` with the fixed boxes already found
+    /// (`held_fixed_paths` of this same layout). Finding them visits every
+    /// box, and every pointer move is a hit test: with the paths in hand a
+    /// hit test is those boxes and the pruned walk of the page.
+    pub fn hit_test_scrolled_with(
+        &self,
+        viewport_x: f32,
+        viewport_y: f32,
+        scroll: (f32, f32),
+        held_fixed: &[Vec<usize>],
+    ) -> Option<HitTestResult> {
+        let mut held = Vec::new();
+        for path in held_fixed {
+            let mut ancestors = Vec::with_capacity(path.len());
+            let mut at = self;
+            for &index in path {
+                let Some(child) = at.children.get(index) else {
+                    // Not this layout's paths: find the boxes again.
+                    return self.hit_test_scrolled(viewport_x, viewport_y, scroll);
+                };
+                ancestors.push(at);
+                at = child;
+            }
+            if at.position != Position::Fixed {
+                return self.hit_test_scrolled(viewport_x, viewport_y, scroll);
+            }
+            // A fixed box in a fixed box is drawn in its ancestor's
+            // stacking context: the outermost one's `z-index` places both.
+            let z_index = ancestors
+                .iter()
+                .find(|a| a.position == Position::Fixed)
+                .map_or(at.z_index, |outer| outer.z_index);
+            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, path.len() as u32, true) {
+                hit.viewport_fixed = true;
+                for ancestor in ancestors.iter().rev() {
+                    ancestor.add_as_ancestor(&mut hit);
+                }
+                held.push((z_index, hit));
+            }
+        }
+        self.top_held_or_page(held, viewport_x, viewport_y, scroll)
+    }
+
+    /// The hit among those in held fixed boxes (in tree order, each with
+    /// its `z-index`) and the page under them.
+    fn top_held_or_page(
+        &self,
+        held: Vec<(i32, HitTestResult)>,
+        viewport_x: f32,
+        viewport_y: f32,
+        scroll: (f32, f32),
+    ) -> Option<HitTestResult> {
+        // `max_by_key` keeps the last of equals: the box painted last.
+        let top = held.into_iter().max_by_key(|(z_index, _)| *z_index);
+        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, 0, true);
+        match top {
+            Some((z_index, hit)) if z_index >= 0 => Some(hit),
+            Some((_, hit)) => page().or(Some(hit)),
+            None => page(),
+        }
+    }
+
+    /// A hit on this box, the root of the layout, for the root element
+    /// `node_id`, whether or not it is a target: what a point of the window
+    /// lands on when no box there is one (`body { pointer-events: none }`
+    /// under an open menu).
+    pub fn hit_as_root_element(&self, node_id: usize, x: f32, y: f32) -> Option<HitTestResult> {
+        let mut hit = self.as_hit(x, y, 0);
+        hit.node_id = Some(node_id);
+        hit.link_href = None;
+        Some(hit)
+    }
+
+    /// This box's transform in layout coordinates, about its
+    /// `transform-origin`, as the painter draws it (`PushTransform`, the
+    /// renderer's `affine_about_origin`): `None` when it has none.
+    fn own_transform(&self) -> Option<[f32; 6]> {
+        let transform = self.style.effective_transform();
+        if transform.is_identity() {
+            return None;
+        }
+        let border_box = self.dimensions.border_box();
+        let m = transform.to_matrix(border_box.width, border_box.height);
+        let origin = &self.style.transform_origin;
+        let ox = border_box.x + origin.x.to_px(16.0, 16.0, border_box.width);
+        let oy = border_box.y + origin.y.to_px(16.0, 16.0, border_box.height);
+        // T(origin) · m · T(-origin)
+        Some([
+            m[0],
+            m[1],
+            m[2],
+            m[3],
+            m[4] + ox - (m[0] * ox + m[2] * oy),
+            m[5] + oy - (m[1] * ox + m[3] * oy),
+        ])
+    }
+
+    /// Whether the boxes inside this one are in a transformed box, where a
+    /// fixed box moves with the page (the painter's `transformed_ancestors`).
+    fn transforms_descendants(&self) -> bool {
+        !self.style.effective_transform().is_identity()
+    }
+
+    /// Whether a point in this box can land on it: not when it is not
+    /// shown, and not when it is `pointer-events: none`. Both inherit and
+    /// a descendant can undo either, so its children are tested all the same.
+    fn is_hit_target(&self) -> bool {
+        self.style.visibility == rustkit_css::Visibility::Visible
+            && self.style.pointer_events == rustkit_css::PointerEvents::Auto
+    }
+
+    /// The fixed boxes under this one that the scroll does not move (the
+    /// ones `hit_test_held_fixed` tests), in tree order, each as the child
+    /// indices that lead to it from here. The engine asks once per layout
+    /// and hands them to `hit_test_scrolled_with`, so a page with none
+    /// pays for no walk and a page with some pays for it once.
+    pub fn held_fixed_paths(&self) -> Vec<Vec<usize>> {
+        let mut paths = Vec::new();
+        self.collect_held_fixed(&mut Vec::new(), &mut paths);
+        paths
+    }
+
+    fn collect_held_fixed(&self, at: &mut Vec<usize>, paths: &mut Vec<Vec<usize>>) {
+        if self.transforms_descendants() {
+            return;
+        }
+        for (index, child) in self.children.iter().enumerate() {
+            at.push(index);
+            if child.position == Position::Fixed {
+                paths.push(at.clone());
+            }
+            // A fixed box inside this one is held too: the window, not
+            // its fixed ancestor, is its containing block, so it can lie
+            // outside that ancestor's box (a 0x0 fixed container holding
+            // a full-window overlay).
+            child.collect_held_fixed(at, paths);
+            at.pop();
+        }
+    }
+
+    /// Collect a hit at the point, with its `z-index`, for each fixed box
+    /// the scroll does not move, in tree order. A fixed box inside another
+    /// is one of them (`collect_held_fixed`), placed by the outermost
+    /// one's `z-index` (`outer_z`).
+    fn hit_test_held_fixed(&self, x: f32, y: f32, depth: u32, hits: &mut Vec<(i32, HitTestResult)>) {
+        self.hit_test_held_fixed_in(x, y, depth, None, hits)
+    }
+
+    fn hit_test_held_fixed_in(
+        &self,
+        x: f32,
+        y: f32,
+        depth: u32,
+        outer_z: Option<i32>,
+        hits: &mut Vec<(i32, HitTestResult)>,
+    ) {
+        if self.transforms_descendants() {
+            return;
+        }
+        let first = hits.len();
+        for child in &self.children {
+            let fixed = child.position == Position::Fixed;
+            if fixed {
+                if let Some(mut hit) = child.hit_test_internal(x, y, depth + 1, true) {
+                    hit.viewport_fixed = true;
+                    hits.push((outer_z.unwrap_or(child.z_index), hit));
+                }
+            }
+            let outer_z = outer_z.or(fixed.then_some(child.z_index));
+            child.hit_test_held_fixed_in(x, y, depth + 1, outer_z, hits);
+        }
+        for (_, hit) in &mut hits[first..] {
+            self.add_as_ancestor(hit);
+        }
+    }
+
+    /// Add this box to the path of a hit in one of its descendants.
+    fn add_as_ancestor(&self, result: &mut HitTestResult) {
+        result.ancestors.push(HitTestAncestor {
+            box_type: self.box_type.clone(),
+            border_box: self.dimensions.border_box(),
+            content_box: self.dimensions.content,
+            z_index: self.z_index,
+            position: self.position,
+        });
+        // Nearest link wins: only fill in from an ancestor if no
+        // closer box already supplied one.
+        if result.link_href.is_none() {
+            result.link_href = self.link_href.clone();
+        }
+        // Same for the node: an anonymous box (a line, a text run
+        // laid out without one) is hit on behalf of its nearest
+        // ancestor that has a DOM node, or a click on it reaches no
+        // element at all.
+        if result.node_id.is_none() {
+            result.node_id = self.node_id;
+        }
+    }
+
+    /// Internal hit test that tracks depth. `skip_held_fixed` leaves out
+    /// the fixed boxes the scroll does not move (`hit_test_scrolled` tests
+    /// those with the viewport point).
+    fn hit_test_internal(&self, x: f32, y: f32, depth: u32, skip_held_fixed: bool) -> Option<HitTestResult> {
+        // A transformed box and its descendants are drawn moved
+        // (`PushTransform`): the point is taken back to where they are
+        // laid out. A box squashed flat (`scale(0)`) is drawn nowhere.
+        let (x, y) = match self.own_transform() {
+            Some(m) => invert_affine(m).map(|inv| apply_affine(inv, x, y))?,
+            None => (x, y),
+        };
+
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
 
@@ -5733,31 +7088,36 @@ impl LayoutBox {
         }
 
         // Check children in reverse paint order (topmost first)
+        let skip_held_fixed = skip_held_fixed && !self.transforms_descendants();
         let paint_order = self.get_paint_order();
         for child in paint_order.iter().rev() {
-            if let Some(mut result) = child.hit_test_internal(x, y, depth + 1) {
+            if skip_held_fixed && child.position == Position::Fixed {
+                continue;
+            }
+            if let Some(mut result) = child.hit_test_internal(x, y, depth + 1, skip_held_fixed) {
                 // Found a hit in a child - add ourselves to the path
-                result.ancestors.push(HitTestAncestor {
-                    box_type: self.box_type.clone(),
-                    border_box: self.dimensions.border_box(),
-                    content_box: self.dimensions.content,
-                    z_index: self.z_index,
-                    position: self.position,
-                });
-                // Nearest link wins: only fill in from an ancestor if no
-                // closer box already supplied one.
-                if result.link_href.is_none() {
-                    result.link_href = self.link_href.clone();
-                }
+                self.add_as_ancestor(&mut result);
                 return Some(result);
             }
         }
 
+        // No child was hit, so we are the target, if we can be one: a
+        // see-through overlay or a closed menu leaves the point to
+        // whatever is under it.
+        if !self.is_hit_target() {
+            return None;
+        }
+
+        Some(self.as_hit(x, y, depth))
+    }
+
+    /// This box as the target of a hit at the point.
+    fn as_hit(&self, x: f32, y: f32, depth: u32) -> HitTestResult {
+        let border_box = self.dimensions.border_box();
         // Detect if element is scrollable by checking overflow style
         let is_scrollable = self.detect_overflow();
 
-        // No child was hit, so we are the target
-        Some(HitTestResult {
+        HitTestResult {
             box_type: self.box_type.clone(),
             border_box,
             content_box: self.dimensions.content,
@@ -5771,7 +7131,8 @@ impl LayoutBox {
             is_scrollable,
             link_href: self.link_href.clone(),
             node_id: self.node_id,
-        })
+            viewport_fixed: false,
+        }
     }
 
     /// Detect if this element has overflow and should be scrollable.
@@ -5816,6 +7177,14 @@ impl LayoutBox {
 
     /// Internal hit test that collects all results.
     fn hit_test_all_internal(&self, x: f32, y: f32, depth: u32, results: &mut Vec<HitTestResult>) {
+        // Where `hit_test_internal` looks: a transformed box where it is drawn.
+        let (x, y) = match self.own_transform() {
+            Some(m) => match invert_affine(m) {
+                Some(inv) => apply_affine(inv, x, y),
+                None => return,
+            },
+            None => (x, y),
+        };
         let border_box = self.dimensions.border_box();
 
         if !border_box.contains(x, y) {
@@ -5837,6 +7206,7 @@ impl LayoutBox {
             is_scrollable: false,
             link_href: self.link_href.clone(),
             node_id: self.node_id,
+            viewport_fixed: false,
         });
 
         // Check all children
@@ -5844,6 +7214,22 @@ impl LayoutBox {
             child.hit_test_all_internal(x, y, depth + 1, results);
         }
     }
+}
+
+/// A point under a 2D affine `[a, b, c, d, e, f]` (the painter's layout).
+fn apply_affine(m: [f32; 6], x: f32, y: f32) -> (f32, f32) {
+    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+}
+
+/// The inverse of a 2D affine, or `None` when it has none (it squashes
+/// the plane onto a line or a point).
+fn invert_affine(m: [f32; 6]) -> Option<[f32; 6]> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det.abs() < 1e-6 {
+        return None;
+    }
+    let (a, b, c, d) = (m[3] / det, -m[1] / det, -m[2] / det, m[0] / det);
+    Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
 }
 
 /// Result of a hit test operation.
@@ -5880,6 +7266,10 @@ pub struct HitTestResult {
     /// `link_href` this is NOT inherited from ancestors: the caller wants
     /// the element actually under the cursor.
     pub node_id: Option<usize>,
+    /// The hit is in a `position: fixed` box the page's scroll does not
+    /// move (`LayoutBox::hit_test_scrolled`): its boxes are where the
+    /// window shows them, with no scroll to add.
+    pub viewport_fixed: bool,
 }
 
 impl HitTestResult {
@@ -5921,32 +7311,187 @@ pub struct HitTestAncestor {
     pub position: Position,
 }
 
-/// Border radius values for each corner.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BorderRadius {
-    pub top_left: f32,
-    pub top_right: f32,
-    pub bottom_right: f32,
-    pub bottom_left: f32,
+/// One corner's used radii in px: the horizontal and vertical semi-axes of
+/// its quarter ellipse. A circle has `h == v`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CornerRadius {
+    pub h: f32,
+    pub v: f32,
 }
 
-impl BorderRadius {
-    /// Create uniform border radius.
-    pub fn uniform(radius: f32) -> Self {
-        Self {
-            top_left: radius,
-            top_right: radius,
-            bottom_right: radius,
-            bottom_left: radius,
+impl CornerRadius {
+    /// A quarter circle of radius `r`.
+    pub fn circular(r: f32) -> Self {
+        Self { h: r, v: r }
+    }
+
+    /// A corner with either radius zero is square (CSS Backgrounds 3 §5.1).
+    pub fn is_zero(&self) -> bool {
+        self.h <= 0.0 || self.v <= 0.0
+    }
+
+    /// The radii of the curve `dx` in from the vertical edge and `dy` in from
+    /// the horizontal one: the padding edge for border widths (§5.2). Square
+    /// once either inset swallows its radius.
+    pub fn inset(&self, dx: f32, dy: f32) -> Self {
+        let inner = Self {
+            h: (self.h - dx).max(0.0),
+            v: (self.v - dy).max(0.0),
+        };
+        if inner.is_zero() {
+            Self::default()
+        } else {
+            inner
         }
     }
 
-    /// Check if all radii are zero (no rounding).
+    /// The radii of a shadow's corner when the box's shape is grown by
+    /// `spread` px, or shrunk by a negative one (CSS Backgrounds 3 §6.1.1).
+    ///
+    /// A radius grows by the spread. One smaller than the spread grows by
+    /// less, `spread * (1 + (r / spread - 1)^3)`, so a nearly square corner
+    /// stays nearly square and a square one stays square.
+    pub fn spread(&self, spread: f32) -> Self {
+        if self.is_zero() || spread == 0.0 {
+            return *self;
+        }
+        let grow = |r: f32| {
+            if spread > 0.0 && r < spread {
+                r + spread * (1.0 + (r / spread - 1.0).powi(3))
+            } else {
+                (r + spread).max(0.0)
+            }
+        };
+        let out = Self {
+            h: grow(self.h),
+            v: grow(self.v),
+        };
+        if out.is_zero() {
+            Self::default()
+        } else {
+            out
+        }
+    }
+}
+
+/// Border radius values for each corner.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BorderRadius {
+    pub top_left: CornerRadius,
+    pub top_right: CornerRadius,
+    pub bottom_right: CornerRadius,
+    pub bottom_left: CornerRadius,
+}
+
+impl BorderRadius {
+    /// Create uniform, circular border radius.
+    pub fn uniform(radius: f32) -> Self {
+        let corner = CornerRadius::circular(radius);
+        Self {
+            top_left: corner,
+            top_right: corner,
+            bottom_right: corner,
+            bottom_left: corner,
+        }
+    }
+
+    /// Check if every corner is square (no rounding).
     pub fn is_zero(&self) -> bool {
-        self.top_left == 0.0
-            && self.top_right == 0.0
-            && self.bottom_right == 0.0
-            && self.bottom_left == 0.0
+        self.top_left.is_zero()
+            && self.top_right.is_zero()
+            && self.bottom_right.is_zero()
+            && self.bottom_left.is_zero()
+    }
+
+    /// The radii as they are used on a `width` x `height` box: negative
+    /// values dropped, a corner with one zero radius made square, and all of
+    /// them scaled by one factor so that adjacent corners do not overlap
+    /// (CSS Backgrounds 3 §5.5):
+    /// `f = min(1, width / (two radii along a horizontal side), height / (two
+    /// radii along a vertical side))`.
+    ///
+    /// One factor for all eight radii keeps every corner's shape. It is
+    /// applied as `side * (r / sum)` for the side that overlaps most, so two
+    /// equal radii on that side come out at exactly half of it: four equal
+    /// circular radii give `min(r, width / 2, height / 2)` to the bit.
+    pub fn fitted(&self, width: f32, height: f32) -> Self {
+        let clean = |c: CornerRadius| {
+            let c = CornerRadius {
+                h: c.h.max(0.0),
+                v: c.v.max(0.0),
+            };
+            if c.is_zero() {
+                CornerRadius::default()
+            } else {
+                c
+            }
+        };
+        let (tl, tr, br, bl) = (
+            clean(self.top_left),
+            clean(self.top_right),
+            clean(self.bottom_right),
+            clean(self.bottom_left),
+        );
+        // The side whose radii overlap most: (side length, sum of its two).
+        let mut tightest: Option<(f32, f32)> = None;
+        for (side, sum) in [
+            (width.max(0.0), tl.h + tr.h),
+            (width.max(0.0), bl.h + br.h),
+            (height.max(0.0), tl.v + bl.v),
+            (height.max(0.0), tr.v + br.v),
+        ] {
+            let tighter = match tightest {
+                Some((s, total)) => side / sum < s / total,
+                None => true,
+            };
+            if sum > side && tighter {
+                tightest = Some((side, sum));
+            }
+        }
+        let Some((side, sum)) = tightest else {
+            return Self {
+                top_left: tl,
+                top_right: tr,
+                bottom_right: br,
+                bottom_left: bl,
+            };
+        };
+        let scale = |c: CornerRadius| CornerRadius {
+            h: side * (c.h / sum),
+            v: side * (c.v / sum),
+        };
+        Self {
+            top_left: scale(tl),
+            top_right: scale(tr),
+            bottom_right: scale(br),
+            bottom_left: scale(bl),
+        }
+    }
+
+    /// The radii of the same box drawn `sx` times as wide and `sy` times as
+    /// tall.
+    pub fn scaled(&self, sx: f32, sy: f32) -> Self {
+        let scale = |c: CornerRadius| CornerRadius {
+            h: c.h * sx,
+            v: c.v * sy,
+        };
+        Self {
+            top_left: scale(self.top_left),
+            top_right: scale(self.top_right),
+            bottom_right: scale(self.bottom_right),
+            bottom_left: scale(self.bottom_left),
+        }
+    }
+
+    /// The radii of this shape grown by `spread` px on every side: the
+    /// corners of a box shadow (see `CornerRadius::spread`).
+    pub fn spread(&self, spread: f32) -> Self {
+        Self {
+            top_left: self.top_left.spread(spread),
+            top_right: self.top_right.spread(spread),
+            bottom_right: self.bottom_right.spread(spread),
+            bottom_left: self.bottom_left.spread(spread),
+        }
     }
 }
 
@@ -5991,6 +7536,16 @@ pub enum DisplayCommand {
         /// positions the baseline at y + ascent instead of consulting a
         /// third per-glyph shaper.
         ascent: Option<f32>,
+        /// SHAPED-RUN CONTRACT, slice S0
+        /// (docs/SHAPED_RUN_CONTRACT_2026-09-30.md): the frozen run layout
+        /// shaped for this line. When present, paint places ITS glyph ids
+        /// from ITS face and resolves no family list; `advances` is then
+        /// this run's per-character projection and `font_family` is kept
+        /// for the old path only. `None` where the run is outside the slice
+        /// (a fallback character, an emoji, a platform whose shaper does
+        /// not name its face) and on the legacy callers; paint then walks
+        /// `text` as before. A lane that edits the emitter keeps this field.
+        run: Option<std::sync::Arc<GlyphRun>>,
     },
     /// Draw text decoration line (underline, strikethrough, overline).
     TextDecoration {
@@ -6011,6 +7566,15 @@ pub enum DisplayCommand {
         dest_rect: Rect,
         /// Object-fit mode
         object_fit: ObjectFit,
+        /// The element's content box: the object-fit container. The painter
+        /// re-fits the decoded texture into it, because `dest_rect` was
+        /// computed from whatever natural size layout knew (a placeholder
+        /// when the image had not loaded yet) and is not clipped.
+        content_box: Rect,
+        /// `object-position` as a fraction of the free space per axis…
+        object_position: (f32, f32),
+        /// …plus a pixel offset (`right 10px` is 100% and -10px).
+        object_position_offset: (f32, f32),
         /// Opacity (0.0 - 1.0)
         opacity: f32,
         /// The box's computed CSS `color` — what `currentColor` resolves to
@@ -6028,7 +7592,33 @@ pub enum DisplayCommand {
         size: BackgroundSize,
         /// Background position (0-1 range)
         position: (f32, f32),
+        /// Px added to the position: a `background-position` length
+        /// (`10px 20px`, a sprite's `-40px -30px`). Zero on an axis
+        /// positioned by a percentage or keyword.
+        offset: (f32, f32),
         /// Background repeat
+        repeat: BackgroundRepeat,
+    },
+    /// Paint `color` through the alpha of a mask image (CSS Masking 1 §6):
+    /// the icon idiom `background-color: currentColor; mask-image:
+    /// url(icon.svg)`. The mask image is sized, positioned and repeated in
+    /// `rect` exactly as a `BackgroundImage` is (see [`background_tiles`]),
+    /// and nothing paints outside `rect`. Where the mask is transparent
+    /// nothing paints; where it is opaque, `color` does.
+    MaskedColor {
+        /// The colour seen through the mask (the box's background colour).
+        color: Color,
+        /// URL or cache key of the mask image.
+        url: String,
+        /// The mask positioning area (the `mask-origin` box).
+        rect: Rect,
+        /// `mask-size`, resolved as `BackgroundImage::size` is.
+        size: BackgroundSize,
+        /// `mask-position` fractions (0-1).
+        position: (f32, f32),
+        /// `mask-position` px offsets.
+        offset: (f32, f32),
+        /// `mask-repeat`.
         repeat: BackgroundRepeat,
     },
     /// Draw a box shadow.
@@ -6045,6 +7635,10 @@ pub enum DisplayCommand {
         color: Color,
         /// Box rectangle (shadow is drawn outside this box, or inside if inset)
         rect: Rect,
+        /// The box's used border-box corner radii. The shadow's shape is
+        /// this shape moved and spread, and an outer shadow is clipped to
+        /// outside this shape (CSS Backgrounds 3 §6.1).
+        border_radius: BorderRadius,
         /// Whether this is an inset shadow
         inset: bool,
     },
@@ -6105,6 +7699,25 @@ pub enum DisplayCommand {
         /// a bare UA control). `rect` is the border box; the text line is
         /// seated inside border + padding, as Chrome's inner editor is.
         padding: [f32; 4],
+        /// Which control this is; see `TextControlKind`.
+        kind: TextControlKind,
+    },
+    /// Draw a list box (`<select>` with `size > 1` or `multiple`): one row
+    /// per option inside the frame, the selected rows highlighted, rows past
+    /// the frame clipped.
+    ListBox {
+        rect: Rect,
+        options: Vec<String>,
+        /// Indices into `options` of the selected rows.
+        selected: Vec<usize>,
+        row_height: f32,
+        font_size: f32,
+        font_family: String,
+        font_weight: u16,
+        text_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
     },
     /// Draw a button.
     Button {
@@ -6176,6 +7789,34 @@ pub enum DisplayCommand {
     },
     /// Pop a transform matrix.
     PopTransform,
+    /// Fade everything up to the matching `PopOpacity` by this factor (CSS
+    /// Color 4 §4 `opacity`, strictly between 0 and 1: a box at 0 emits
+    /// nothing and a box at 1 needs no scope). Scopes nest and multiply.
+    ///
+    /// The group is to be faded as one picture: a child over its parent's
+    /// background does not show the background through it. A painter that
+    /// cannot draw the scope into a layer of its own fades each command
+    /// instead, which differs only where the group's paint overlaps itself.
+    PushOpacity(f32),
+    /// End the innermost opacity scope.
+    PopOpacity,
+    /// Paint everything up to the matching `PopFilter` as one group and lay
+    /// it down through this 4x5 row-major colour matrix, applied to
+    /// unpremultiplied colour and clamped: the colour-matrix functions of
+    /// CSS `filter` (Filter Effects 1 §13), composed in order. Scopes nest.
+    PushFilter([f32; 20]),
+    /// End the innermost filter scope.
+    PopFilter,
+
+    /// Start of a `position: fixed` box whose containing block is the
+    /// viewport. What follows, up to the matching `PopViewportFixed`, does
+    /// not move when the page scrolls. The pair draws nothing and the list
+    /// stays in document coordinates: whoever draws a scrolled page undoes
+    /// the scroll for this run (`Renderer::set_scroll_offset`). Runs do
+    /// not nest: a fixed box inside one is already held.
+    PushViewportFixed,
+    /// End of a `PushViewportFixed` run.
+    PopViewportFixed,
 
     /// Draw text with a gradient fill (for background-clip: text effect).
     GradientText {
@@ -6352,6 +7993,56 @@ impl ObjectFit {
     }
 }
 
+impl ObjectFit {
+    /// Where an image paints and which part of it shows (CSS Images 3
+    /// §5.5 `object-fit`, §5.6 `object-position`): the fitted object box,
+    /// clipped to the content box, as a screen rect plus the matching
+    /// normalized texture coordinates `[u0, v0, u1, v1]`.
+    ///
+    /// `cover` and an oversized `none` overflow the box; replaced content
+    /// is clipped to it, so the overflow becomes a UV crop rather than
+    /// paint outside the element. `None` when nothing is visible.
+    pub fn paint_quad(
+        &self,
+        container: Rect,
+        image_width: f32,
+        image_height: f32,
+        position: (f32, f32),
+        offset: (f32, f32),
+    ) -> Option<(Rect, [f32; 4])> {
+        let positive = |v: f32| v.is_finite() && v > 0.0;
+        if !(positive(container.width)
+            && positive(container.height)
+            && positive(image_width)
+            && positive(image_height))
+        {
+            return None;
+        }
+
+        let mut object = self
+            .compute_rect(container, image_width, image_height, position)
+            .dest;
+        object.x += offset.0;
+        object.y += offset.1;
+
+        let x0 = object.x.max(container.x);
+        let y0 = object.y.max(container.y);
+        let x1 = (object.x + object.width).min(container.x + container.width);
+        let y1 = (object.y + object.height).min(container.y + container.height);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+
+        let uv = [
+            (x0 - object.x) / object.width,
+            (y0 - object.y) / object.height,
+            (x1 - object.x) / object.width,
+            (y1 - object.y) / object.height,
+        ];
+        Some((Rect::new(x0, y0, x1 - x0, y1 - y0), uv))
+    }
+}
+
 /// Result of computing image draw rectangle
 #[derive(Debug, Clone)]
 pub struct ImageDrawRect {
@@ -6488,6 +8179,361 @@ impl BackgroundRepeat {
     }
 }
 
+/// A vector mask image's paint (an SVG mask spliced in as commands),
+/// recoloured for `MaskedColor`: every colour becomes `color`, and the
+/// command's own alpha stays as coverage, so what paints is `color` times
+/// the mask's alpha (CSS Masking 1 §6.2, `mask-mode: alpha`). Commands
+/// that carry no colour (clips, transforms, raster images) are left.
+pub fn tint_mask_commands(commands: &mut [DisplayCommand], color: Color) {
+    let tint = |c: &mut Color| *c = Color { a: color.a * c.a, ..color };
+    let tint_stops = |stops: &mut Vec<rustkit_css::ColorStop>| {
+        for stop in stops {
+            tint(&mut stop.color);
+        }
+    };
+    for cmd in commands {
+        match cmd {
+            DisplayCommand::SolidColor(c, _)
+            | DisplayCommand::RoundedRect { color: c, .. }
+            | DisplayCommand::Text { color: c, .. }
+            | DisplayCommand::FillRect { color: c, .. }
+            | DisplayCommand::StrokeRect { color: c, .. }
+            | DisplayCommand::FillCircle { color: c, .. }
+            | DisplayCommand::StrokeCircle { color: c, .. }
+            | DisplayCommand::FillEllipse { color: c, .. }
+            | DisplayCommand::Line { color: c, .. }
+            | DisplayCommand::Polyline { color: c, .. }
+            | DisplayCommand::FillPolygon { color: c, .. }
+            | DisplayCommand::StrokePolygon { color: c, .. }
+            | DisplayCommand::MaskedColor { color: c, .. } => tint(c),
+            DisplayCommand::LinearGradient { stops, .. }
+            | DisplayCommand::RadialGradient { stops, .. }
+            | DisplayCommand::ConicGradient { stops, .. } => tint_stops(stops),
+            _ => {}
+        }
+    }
+}
+
+/// What of `command` is inside `clip` (both in document space), appended
+/// to `out`.
+///
+/// The renderer clips quads against its clip stack, not polygons, circles
+/// or strokes, so the `PushClip` around a vector background held nothing
+/// in: a box showing one icon of a sprite sheet painted the whole sheet,
+/// and carried every command of it into every frame (wikipedia.org's
+/// portal: 21 boxes, 1.67 million commands). A command wholly inside is
+/// kept as it is and one wholly outside is dropped. One across the edge
+/// becomes the polygons the renderer would draw for it (a quad per stroke
+/// segment, 48 sides to a circle), each cut at the edge.
+pub fn clip_vector_command(
+    command: DisplayCommand,
+    clip: Rect,
+    out: &mut Vec<DisplayCommand>,
+) {
+    use DisplayCommand as C;
+    const SIDES: usize = 48;
+
+    let (left, top, right, bottom) = (clip.x, clip.y, clip.x + clip.width, clip.y + clip.height);
+    let misses = |b: (f32, f32, f32, f32)| b.2 <= left || b.0 >= right || b.3 <= top || b.1 >= bottom;
+    let within = |b: (f32, f32, f32, f32)| b.0 >= left && b.2 <= right && b.1 >= top && b.3 <= bottom;
+    let bounds = |points: &[(f32, f32)], half: f32| {
+        points.iter().fold(
+            (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY),
+            |(x0, y0, x1, y1), &(x, y)| (x0.min(x - half), y0.min(y - half), x1.max(x + half), y1.max(y + half)),
+        )
+    };
+    let around = |cx: f32, cy: f32, rx: f32, ry: f32| -> Vec<(f32, f32)> {
+        (0..SIDES)
+            .map(|i| {
+                let angle = i as f32 / SIDES as f32 * std::f32::consts::TAU;
+                (cx + rx * angle.cos(), cy + ry * angle.sin())
+            })
+            .collect()
+    };
+    // A filled polygon, cut.
+    let fill = |points: Vec<(f32, f32)>, color, out: &mut Vec<C>| {
+        let b = bounds(&points, 0.0);
+        if points.is_empty() || misses(b) {
+            return;
+        }
+        let points = if within(b) { points } else { clip_polygon(points, clip) };
+        if points.len() >= 3 {
+            out.push(C::FillPolygon { points, color });
+        }
+    };
+    // The segments of a stroke, each as the quad the renderer draws for it.
+    let stroke = |points: &[(f32, f32)], color, width: f32, out: &mut Vec<C>| {
+        for pair in points.windows(2) {
+            let ((x1, y1), (x2, y2)) = (pair[0], pair[1]);
+            let (dx, dy) = (x2 - x1, y2 - y1);
+            let length = (dx * dx + dy * dy).sqrt();
+            if length > 0.0 {
+                let (nx, ny) = (-dy / length * width * 0.5, dx / length * width * 0.5);
+                let quad = vec![(x1 + nx, y1 + ny), (x2 + nx, y2 + ny), (x2 - nx, y2 - ny), (x1 - nx, y1 - ny)];
+                fill(quad, color, out);
+            }
+        }
+    };
+    // Whole, gone, or neither.
+    let place = |b: (f32, f32, f32, f32)| if misses(b) { None } else { Some(within(b)) };
+
+    match command {
+        C::FillPolygon { points, color } => fill(points, color, out),
+        C::FillRect { rect, color } => {
+            let (x0, y0) = (rect.x.max(left), rect.y.max(top));
+            let (x1, y1) = ((rect.x + rect.width).min(right), (rect.y + rect.height).min(bottom));
+            if x1 > x0 && y1 > y0 {
+                out.push(C::FillRect {
+                    rect: Rect::new(x0, y0, x1 - x0, y1 - y0),
+                    color,
+                });
+            }
+        }
+        C::FillCircle { cx, cy, radius, color } => {
+            match place((cx - radius, cy - radius, cx + radius, cy + radius)) {
+                Some(true) => out.push(command),
+                Some(false) => fill(around(cx, cy, radius, radius), color, out),
+                None => {}
+            }
+        }
+        C::FillEllipse { rect, color } => {
+            match place((rect.x, rect.y, rect.x + rect.width, rect.y + rect.height)) {
+                Some(true) => out.push(command),
+                Some(false) => {
+                    let (rx, ry) = (rect.width * 0.5, rect.height * 0.5);
+                    fill(around(rect.x + rx, rect.y + ry, rx, ry), color, out);
+                }
+                None => {}
+            }
+        }
+        C::StrokeCircle { cx, cy, radius, color, width } => {
+            let outer = radius + width * 0.5;
+            match place((cx - outer, cy - outer, cx + outer, cy + outer)) {
+                Some(true) => out.push(command),
+                Some(false) => {
+                    // The annulus r ± w/2, a quad per side.
+                    let inner = (radius - width * 0.5).max(0.0);
+                    let (ring_out, ring_in) = (around(cx, cy, outer, outer), around(cx, cy, inner, inner));
+                    for i in 0..SIDES {
+                        let j = (i + 1) % SIDES;
+                        fill(vec![ring_out[i], ring_out[j], ring_in[j], ring_in[i]], color, out);
+                    }
+                }
+                None => {}
+            }
+        }
+        C::Line { x1, y1, x2, y2, color, width } => match place(bounds(&[(x1, y1), (x2, y2)], width * 0.5)) {
+            Some(true) => out.push(command),
+            Some(false) => stroke(&[(x1, y1), (x2, y2)], color, width, out),
+            None => {}
+        },
+        C::Polyline { ref points, color, width } => match place(bounds(points, width * 0.5)) {
+            Some(true) => out.push(command),
+            Some(false) => stroke(points, color, width, out),
+            None => {}
+        },
+        C::StrokePolygon { ref points, color, width } => match place(bounds(points, width * 0.5)) {
+            Some(true) => out.push(command),
+            Some(false) => {
+                let mut closed = points.clone();
+                closed.extend(points.first().copied());
+                stroke(&closed, color, width, out);
+            }
+            None => {}
+        },
+        // Kept whole when any of it may be inside.
+        C::StrokeRect { rect, width, .. } => {
+            let half = width * 0.5;
+            if !misses((rect.x - half, rect.y - half, rect.x + rect.width + half, rect.y + rect.height + half)) {
+                out.push(command);
+            }
+        }
+        other => out.push(other),
+    }
+}
+
+/// The part of the polygon `points` inside `clip` (Sutherland-Hodgman, one
+/// pass per edge of the rectangle). A convex polygon stays convex.
+pub fn clip_polygon(points: Vec<(f32, f32)>, clip: Rect) -> Vec<(f32, f32)> {
+    let edges = [
+        (true, clip.x, true),
+        (true, clip.x + clip.width, false),
+        (false, clip.y, true),
+        (false, clip.y + clip.height, false),
+    ];
+    let mut output = points;
+    for (vertical, bound, keep_from) in edges {
+        let input = std::mem::take(&mut output);
+        let Some(&last) = input.last() else {
+            break;
+        };
+        let along = |p: (f32, f32)| if vertical { p.0 } else { p.1 };
+        let inside = |p: (f32, f32)| if keep_from { along(p) >= bound } else { along(p) <= bound };
+        let mut previous = last;
+        for &current in &input {
+            if inside(current) != inside(previous) {
+                let t = (bound - along(previous)) / (along(current) - along(previous));
+                let x = previous.0 + (current.0 - previous.0) * t;
+                let y = previous.1 + (current.1 - previous.1) * t;
+                output.push(if vertical { (bound, y) } else { (x, bound) });
+            }
+            if inside(current) {
+                output.push(current);
+            }
+            previous = current;
+        }
+    }
+    output
+}
+
+/// Where each copy of a background image goes: the tiles intersecting
+/// `container` for an image of `image_width` x `image_height`, sized by
+/// `size`, placed by `position` (0-1 per axis) plus `offset` px and laid
+/// out by `repeat`.
+/// Tiles are unclipped; the painter clips them to `container`.
+///
+/// Moved out of the renderer so the raster lane and the engine's SVG
+/// splice (a vector background is painted as commands, not a texture)
+/// place the same tiles.
+pub fn background_tiles(
+    container: Rect,
+    size: &BackgroundSize,
+    position: (f32, f32),
+    offset: (f32, f32),
+    repeat: BackgroundRepeat,
+    image_width: f32,
+    image_height: f32,
+) -> Vec<Rect> {
+    let mut tiles = Vec::new();
+    if image_width == 0.0 || image_height == 0.0 {
+        return tiles;
+    }
+
+    let (bg_width, bg_height) = size.compute_size(container, image_width, image_height);
+    if bg_width == 0.0 || bg_height == 0.0 {
+        return tiles;
+    }
+
+    let mut start_x = container.x + (container.width - bg_width) * position.0 + offset.0;
+    let mut start_y = container.y + (container.height - bg_height) * position.1 + offset.1;
+
+    // Adjust size and spacing for space/round modes
+    let mut adjusted_bg_width = bg_width;
+    let mut adjusted_bg_height = bg_height;
+    let mut spacing_x = 0.0_f32;
+    let mut spacing_y = 0.0_f32;
+
+    match repeat {
+        BackgroundRepeat::Space => {
+            // Calculate how many full images fit
+            let fit_count_x = (container.width / bg_width).floor().max(1.0);
+            let fit_count_y = (container.height / bg_height).floor().max(1.0);
+
+            // Calculate spacing to evenly distribute
+            if fit_count_x > 1.0 {
+                let total_image_width = fit_count_x * bg_width;
+                let remaining_space_x = container.width - total_image_width;
+                spacing_x = remaining_space_x / (fit_count_x - 1.0);
+            }
+
+            if fit_count_y > 1.0 {
+                let total_image_height = fit_count_y * bg_height;
+                let remaining_space_y = container.height - total_image_height;
+                spacing_y = remaining_space_y / (fit_count_y - 1.0);
+            }
+
+            // Start at container edge for space mode
+            start_x = container.x;
+            start_y = container.y;
+        }
+        BackgroundRepeat::Round => {
+            // Calculate integer repetitions by rounding
+            let repetitions_x = (container.width / bg_width).round().max(1.0);
+            let repetitions_y = (container.height / bg_height).round().max(1.0);
+
+            // Scale image to fit exactly
+            adjusted_bg_width = container.width / repetitions_x;
+            adjusted_bg_height = container.height / repetitions_y;
+
+            // Start at container edge for round mode
+            start_x = container.x;
+            start_y = container.y;
+        }
+        _ => {}
+    }
+
+    // Determine tiling based on repeat
+    let (tile_x, tile_y) = match repeat {
+        BackgroundRepeat::Repeat => (true, true),
+        BackgroundRepeat::RepeatX => (true, false),
+        BackgroundRepeat::RepeatY => (false, true),
+        BackgroundRepeat::NoRepeat => (false, false),
+        BackgroundRepeat::Space => (true, true),
+        BackgroundRepeat::Round => (true, true),
+    };
+
+    if !tile_x && !tile_y {
+        // Single image - drawn at the calculated position
+        tiles.push(Rect {
+            x: start_x,
+            y: start_y,
+            width: adjusted_bg_width,
+            height: adjusted_bg_height,
+        });
+        return tiles;
+    }
+
+    let x_start = if tile_x && repeat != BackgroundRepeat::Space && repeat != BackgroundRepeat::Round {
+        // Find the leftmost position that's visible (for repeat mode)
+        let tiles_left = ((start_x - container.x) / adjusted_bg_width).ceil() as i32;
+        start_x - (tiles_left as f32 * adjusted_bg_width)
+    } else {
+        start_x
+    };
+
+    let y_start = if tile_y && repeat != BackgroundRepeat::Space && repeat != BackgroundRepeat::Round {
+        let tiles_up = ((start_y - container.y) / adjusted_bg_height).ceil() as i32;
+        start_y - (tiles_up as f32 * adjusted_bg_height)
+    } else {
+        start_y
+    };
+
+    let mut y = y_start;
+    while y < container.y + container.height {
+        let mut x = x_start;
+        while x < container.x + container.width {
+            let tile_rect = Rect {
+                x,
+                y,
+                width: adjusted_bg_width,
+                height: adjusted_bg_height,
+            };
+
+            // Only tiles visible within the container
+            if tile_rect.x + tile_rect.width > container.x
+                && tile_rect.y + tile_rect.height > container.y
+                && tile_rect.x < container.x + container.width
+                && tile_rect.y < container.y + container.height
+            {
+                tiles.push(tile_rect);
+            }
+
+            if tile_x {
+                x += adjusted_bg_width + spacing_x;
+            } else {
+                break;
+            }
+        }
+
+        if tile_y {
+            y += adjusted_bg_height + spacing_y;
+        } else {
+            break;
+        }
+    }
+    tiles
+}
+
 /// Parse a CSS length value to pixels
 fn parse_length(value: &str) -> Option<f32> {
     // Delegates to rustkit-css (duplication audit P0: this was a third,
@@ -6504,6 +8550,11 @@ fn parse_length(value: &str) -> Option<f32> {
 /// A display list of paint commands.
 #[derive(Debug, Clone)]
 pub struct DisplayList {
+    /// In document coordinates, for a page that is not scrolled. Whatever
+    /// draws a scrolled page draws this same list with the renderer's
+    /// scroll offset set (`Renderer::set_scroll_offset`), which moves the
+    /// list and holds the `PushViewportFixed` runs still; a point is
+    /// tested with `LayoutBox::hit_test_scrolled`.
     pub commands: Vec<DisplayCommand>,
     /// Root element font size for rem unit calculations
     root_font_size: f32,
@@ -6522,6 +8573,12 @@ pub struct DisplayList {
     /// dropdown escaping an `overflow: hidden` wrapper). Such a box pops
     /// exactly these clips before painting and re-pushes them after.
     escapable_clips: Vec<(Rect, BorderRadius)>,
+    /// Whether the box being painted is inside a `PushViewportFixed` run.
+    in_viewport_fixed: bool,
+    /// How many ancestors of the box being painted have a `transform`. A
+    /// transformed box is the containing block of the fixed boxes inside
+    /// it (css-transforms-1 §3), so those move with it and with the page.
+    transformed_ancestors: u32,
     /// `text-overflow: ellipsis` scope of the nearest block container being
     /// painted (css-overflow-3 §5.1). Inline boxes, anonymous blocks and
     /// text runs paint inside it; a nested block container replaces it with
@@ -6626,6 +8683,8 @@ impl DisplayList {
             depth: 0,
             root_overflow_visible: true,
             escapable_clips: Vec::new(),
+            in_viewport_fixed: false,
+            transformed_ancestors: 0,
             ellipsis: None,
         }
     }
@@ -6645,6 +8704,8 @@ impl DisplayList {
             root_overflow_visible: root.style.overflow_x == rustkit_css::Overflow::Visible
                 && root.style.overflow_y == rustkit_css::Overflow::Visible,
             escapable_clips: Vec::new(),
+            in_viewport_fixed: false,
+            transformed_ancestors: 0,
             ellipsis: None,
         }
     }
@@ -6678,6 +8739,16 @@ impl DisplayList {
 
     /// Render a stacking context with proper z-ordering.
     fn render_stacking_context(&mut self, layout_box: &LayoutBox, parent_z: i32, layer: &mut u32) {
+        // `opacity` fades the box and its whole subtree as one group, and
+        // at 0 the group paints nothing (it still takes its space and its
+        // hits). Until 2026-10-08 only the image command carried it, so a
+        // `div` at `opacity: 0` painted solid: google.com's search box
+        // glow and every hover overlay that waits at 0.
+        let opacity = Self::group_opacity(layout_box);
+        if opacity <= 0.0 {
+            return;
+        }
+
         let z_index = if layout_box.position != Position::Static {
             layout_box.z_index
         } else {
@@ -6697,8 +8768,13 @@ impl DisplayList {
         // its absolute children — image-gallery's `.gallery-item { position:
         // relative; overflow: hidden }` must keep its `.image-overlay` inside
         // the clip. `LayoutBox::position` alone would let the overlay escape.
+        // A `clip-path` clips every descendant, positioned or not, so the
+        // clips above it are scoped out of its subtree like a positioned
+        // box's: an absolute descendant popping them would pop this one.
+        let shape_clip = self.clip_path_clip(layout_box);
         let positioned = layout_box.position != Position::Static
-            || layout_box.style.position != rustkit_css::Position::Static;
+            || layout_box.style.position != rustkit_css::Position::Static
+            || shape_clip.is_some();
         let escapes = matches!(layout_box.position, Position::Absolute | Position::Fixed);
         let outer_escapable = if positioned {
             let outer = std::mem::take(&mut self.escapable_clips);
@@ -6712,6 +8788,18 @@ impl DisplayList {
             None
         };
 
+        // A fixed box is held against the page's scroll with everything
+        // it paints. The run opens after the clips it escapes are popped
+        // and closes before they are pushed again: those belong to boxes
+        // that scroll.
+        let viewport_fixed = layout_box.position == Position::Fixed
+            && !self.in_viewport_fixed
+            && self.transformed_ancestors == 0;
+        if viewport_fixed {
+            self.in_viewport_fixed = true;
+            self.commands.push(DisplayCommand::PushViewportFixed);
+        }
+
         // Check if this creates a new stacking context
         let creates_context = layout_box
             .stacking_context
@@ -6724,6 +8812,33 @@ impl DisplayList {
                 z_index,
                 rect: layout_box.dimensions.border_box(),
             });
+        }
+
+        let fades = opacity < 1.0;
+        if fades {
+            self.commands.push(DisplayCommand::PushOpacity(opacity));
+        }
+
+        // `filter` applies before opacity (Filter Effects 1 §5), so its
+        // group sits inside the opacity scope.
+        //
+        // TODO(filter blur/drop-shadow): the filter group is opened outside
+        // the transform and the `clip-path` clip below, so today the clip
+        // runs on the content first and the filter after. For the colour
+        // matrices supported now that paints the same as Chrome, which
+        // filters first and then clips (filter -> clip -> mask -> opacity,
+        // in the element's transformed space), because a matrix is per
+        // pixel. Once `blur()` or `drop-shadow()` paint, the clip must wrap
+        // the filter: they bleed past the box, and Chrome clips that bleed
+        // away. Pinned by
+        // `rustkit_engine::filter_pins::filter_with_clip_path_clips_inside_the_filter_group`.
+        let filter_matrix = if layout_box.style.filter.is_empty() {
+            None
+        } else {
+            filter_color_matrix(&layout_box.style.filter)
+        };
+        if let Some(matrix) = filter_matrix {
+            self.commands.push(DisplayCommand::PushFilter(matrix));
         }
 
         // Check if this box has a transform
@@ -6750,6 +8865,19 @@ impl DisplayList {
                 matrix,
                 origin: (origin_x, origin_y),
             });
+            self.transformed_ancestors += 1;
+        }
+
+        // `clip-path` clips the box's own painting too, so it opens before
+        // the box's content, inside its transform, and closes after its
+        // subtree.
+        if let Some((rect, radius)) = shape_clip {
+            if radius.is_zero() {
+                self.commands.push(DisplayCommand::PushClip(rect));
+            } else {
+                self.commands
+                    .push(DisplayCommand::PushClipRounded { rect, radius });
+            }
         }
 
         // Render this box
@@ -6848,14 +8976,31 @@ impl DisplayList {
         if let Some(outer) = outer_ellipsis {
             self.ellipsis = outer;
         }
+        if shape_clip.is_some() {
+            self.commands.push(DisplayCommand::PopClip);
+        }
 
         // Pop transform if we pushed one
         if has_transform {
             self.commands.push(DisplayCommand::PopTransform);
+            self.transformed_ancestors -= 1;
+        }
+
+        if filter_matrix.is_some() {
+            self.commands.push(DisplayCommand::PopFilter);
+        }
+
+        if fades {
+            self.commands.push(DisplayCommand::PopOpacity);
         }
 
         if creates_context {
             self.commands.push(DisplayCommand::PopStackingContext);
+        }
+
+        if viewport_fixed {
+            self.commands.push(DisplayCommand::PopViewportFixed);
+            self.in_viewport_fixed = false;
         }
 
         // Restore the clips this box's subtree was scoped out of; an escaping
@@ -6873,6 +9018,31 @@ impl DisplayList {
                 }
             }
             self.escapable_clips = outer;
+        }
+    }
+
+    /// The `opacity` this box fades its subtree by. A text run is not an
+    /// element: its style is its parent's, copied (a pseudo-element's text
+    /// child clones the whole pseudo style), so the value on it is the
+    /// parent's own and applying it would fade the text twice.
+    fn group_opacity(layout_box: &LayoutBox) -> f32 {
+        if matches!(layout_box.box_type, BoxType::Text(_)) {
+            return 1.0;
+        }
+        // Keyframe animations are parsed and not run. The fade-in idiom
+        // (`opacity: 0; animation: appear 1s forwards`) would leave its
+        // content invisible for good, so a box that names an animation is
+        // not faded, as no box was before opacity was painted. Remove when
+        // the engine runs animations.
+        let animation = layout_box.style.animation_name.trim();
+        if !animation.is_empty() && !animation.eq_ignore_ascii_case("none") {
+            return 1.0;
+        }
+        let opacity = layout_box.style.opacity;
+        if opacity.is_nan() {
+            1.0
+        } else {
+            opacity.clamp(0.0, 1.0)
         }
     }
 
@@ -6957,7 +9127,11 @@ impl DisplayList {
 
     /// Render box shadows (must be called before background).
     fn render_box_shadows(&mut self, layout_box: &LayoutBox) {
+        if layout_box.style.box_shadows.is_empty() {
+            return;
+        }
         let box_rect = layout_box.dimensions.border_box();
+        let border_radius = self.border_radius_px(layout_box);
 
         // Render outer shadows first (in order, first shadow is top-most)
         for shadow in &layout_box.style.box_shadows {
@@ -6969,6 +9143,7 @@ impl DisplayList {
                     spread_radius: shadow.spread_radius,
                     color: shadow.color,
                     rect: box_rect,
+                    border_radius,
                     inset: false,
                 });
             }
@@ -6977,7 +9152,11 @@ impl DisplayList {
 
     /// Render inset box shadows (called after background).
     fn render_inset_shadows(&mut self, layout_box: &LayoutBox) {
+        if layout_box.style.box_shadows.is_empty() {
+            return;
+        }
         let box_rect = layout_box.dimensions.border_box();
+        let border_radius = self.border_radius_px(layout_box);
 
         for shadow in &layout_box.style.box_shadows {
             if shadow.is_visible() && shadow.inset {
@@ -6988,6 +9167,7 @@ impl DisplayList {
                     spread_radius: shadow.spread_radius,
                     color: shadow.color,
                     rect: box_rect,
+                    border_radius,
                     inset: true,
                 });
             }
@@ -6997,13 +9177,12 @@ impl DisplayList {
     /// Render background.
     /// Supports multiple background layers painted bottom-to-top.
     /// Respects background-clip property (border-box, padding-box, content-box).
-    /// The box's border-box corner radii, resolved to pixels.
+    /// The box's border-box corner radii as used: resolved to pixels per
+    /// axis and reduced so adjacent corners do not overlap.
     ///
-    /// Percentages resolve against the border box WIDTH for every corner. That
-    /// is not what CSS says (the vertical radius resolves against height), but
-    /// it is what the background painter has always done, and the overflow clip
-    /// has to round exactly where the background rounds or the two disagree by
-    /// a pixel and the clip cuts into the paint it is supposed to contain.
+    /// The background, the border and the overflow clip all start from this
+    /// one value, so they round in the same place; if they resolved radii
+    /// separately the clip could cut into the paint it is meant to contain.
     fn border_radius_px(&self, layout_box: &LayoutBox) -> BorderRadius {
         let s = &layout_box.style;
         let border_rect = layout_box.dimensions.border_box();
@@ -7012,26 +9191,223 @@ impl DisplayList {
             _ => 16.0,
         };
         let root_font_size = self.root_font_size;
-        BorderRadius {
-            top_left: s
-                .border_top_left_radius
+        // A percentage is of the border box's width for the horizontal
+        // radius and of its height for the vertical one (§5.1).
+        let corner = |c: &rustkit_css::CornerRadius| CornerRadius {
+            h: c.horizontal
                 .to_px(font_size, root_font_size, border_rect.width),
-            top_right: s.border_top_right_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
-            bottom_right: s.border_bottom_right_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
-            bottom_left: s.border_bottom_left_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
+            v: c.vertical
+                .to_px(font_size, root_font_size, border_rect.height),
+        };
+        BorderRadius {
+            top_left: corner(&s.border_top_left_radius),
+            top_right: corner(&s.border_top_right_radius),
+            bottom_right: corner(&s.border_bottom_right_radius),
+            bottom_left: corner(&s.border_bottom_left_radius),
         }
+        .fitted(border_rect.width, border_rect.height)
+    }
+
+    /// The clip a `clip-path` basic shape puts on the box and everything it
+    /// paints, as the rounded rect the painter already clips to (CSS Masking
+    /// 1 §5.1). `inset()` (with `round`), `circle()` and `ellipse()` are all
+    /// exactly a rounded rect; the reference box is the border box unless a
+    /// `padding-box`, `content-box` or `margin-box` keyword names another.
+    ///
+    /// `None` (paint unclipped, as before) for `none`, for shapes that are not
+    /// a rounded rect (`polygon()`, `path()`, `url()`), for a bare box keyword,
+    /// and for any value this does not read. A text run, an inline box or an
+    /// anonymous block is never clipped on its own: a text run carries its
+    /// parent's style, and the parent's clip already covers all three.
+    fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
+        if !matches!(layout_box.box_type, BoxType::Block | BoxType::Image { .. }) {
+            return None;
+        }
+        let raw = layout_box.style.clip_path.trim().to_ascii_lowercase();
+        if raw.is_empty() || raw == "none" {
+            return None;
+        }
+        let open = raw.find('(')?;
+        let close = raw.rfind(')')?;
+        if close < open {
+            return None;
+        }
+        // `<basic-shape> <geometry-box>?` in either order.
+        let mut head: Vec<&str> = raw[..open].split_whitespace().collect();
+        let name = head.pop()?;
+        let args = raw[open + 1..close].trim();
+        let keywords: Vec<&str> = head
+            .into_iter()
+            .chain(raw[close + 1..].split_whitespace())
+            .collect();
+        let keyword = match keywords.as_slice() {
+            [] => "",
+            [k] => *k,
+            _ => return None,
+        };
+        let d = &layout_box.dimensions;
+        let reference = match keyword {
+            "" | "border-box" => d.border_box(),
+            "padding-box" => d.padding_box(),
+            "content-box" => d.content,
+            "margin-box" => d.margin_box(),
+            _ => return None,
+        };
+        let font_size = match layout_box.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let root = self.root_font_size;
+        let px = |token: &str, basis: f32| -> Option<f32> {
+            if token == "0" {
+                return Some(0.0);
+            }
+            rustkit_css::parse_length(token).map(|l| l.to_px(font_size, root, basis))
+        };
+        let (w, h) = (reference.width, reference.height);
+
+        // `at <position>`: one or two keywords or lengths, centre by default.
+        let (shape, at) = match args.find(" at ").or_else(|| args.strip_prefix("at ").map(|_| 0)) {
+            Some(i) => (args[..i].trim(), Some(args[i..].trim().trim_start_matches("at").trim())),
+            None => (args, None),
+        };
+        let centre = |at: Option<&str>| -> Option<(f32, f32)> {
+            let Some(at) = at else {
+                return Some((w / 2.0, h / 2.0));
+            };
+            let t: Vec<&str> = at.split_whitespace().collect();
+            let horizontal = |s: &str| matches!(s, "left" | "right");
+            let vertical = |s: &str| matches!(s, "top" | "bottom");
+            let (xs, ys) = match t.as_slice() {
+                [a] if vertical(a) => ("center", *a),
+                [a] => (*a, "center"),
+                [a, b] if vertical(a) || horizontal(b) => (*b, *a),
+                [a, b] => (*a, *b),
+                _ => return None,
+            };
+            let x = match xs {
+                "left" => 0.0,
+                "center" => w / 2.0,
+                "right" => w,
+                v => px(v, w)?,
+            };
+            let y = match ys {
+                "top" => 0.0,
+                "center" => h / 2.0,
+                "bottom" => h,
+                v => px(v, h)?,
+            };
+            Some((x, y))
+        };
+        // A shape radius: a length, a percentage of `basis`, or the distance
+        // to the closest or farthest side along the axes given.
+        let radius = |token: &str, basis: f32, near: f32, far: f32| -> Option<f32> {
+            match token {
+                "closest-side" => Some(near),
+                "farthest-side" => Some(far),
+                v => px(v, basis).map(|r| r.max(0.0)),
+            }
+        };
+
+        let (rect, radii) = match name {
+            "inset" => {
+                let (offsets, round) = match shape.find("round") {
+                    Some(i) => (shape[..i].trim(), Some(shape[i + 5..].trim())),
+                    None => (shape, None),
+                };
+                let o: Vec<&str> = offsets.split_whitespace().collect();
+                let (t, r, b, l) = match o.as_slice() {
+                    [a] => (*a, *a, *a, *a),
+                    [a, b] => (*a, *b, *a, *b),
+                    [a, b, c] => (*a, *b, *c, *b),
+                    [a, b, c, d] => (*a, *b, *c, *d),
+                    _ => return None,
+                };
+                let (t, r, b, l) = (px(t, h)?, px(r, w)?, px(b, h)?, px(l, w)?);
+                let rect = Rect::new(
+                    reference.x + l,
+                    reference.y + t,
+                    (w - l - r).max(0.0),
+                    (h - t - b).max(0.0),
+                );
+                let radii = match round {
+                    None => BorderRadius::default(),
+                    Some(round) => {
+                        // The `border-radius` shorthand: 1–4 horizontal radii,
+                        // optionally `/` and 1–4 vertical ones.
+                        let (hs, vs) = match round.split_once('/') {
+                            Some((a, b)) => (a.trim(), b.trim()),
+                            None => (round, round),
+                        };
+                        let four = |list: &str, basis: f32| -> Option<[f32; 4]> {
+                            let v = list
+                                .split_whitespace()
+                                .map(|s| px(s, basis).map(|r| r.max(0.0)))
+                                .collect::<Option<Vec<f32>>>()?;
+                            Some(match v.as_slice() {
+                                [a] => [*a, *a, *a, *a],
+                                [a, b] => [*a, *b, *a, *b],
+                                [a, b, c] => [*a, *b, *c, *b],
+                                [a, b, c, d] => [*a, *b, *c, *d],
+                                _ => return None,
+                            })
+                        };
+                        let hr = four(hs, rect.width)?;
+                        let vr = four(vs, rect.height)?;
+                        let c = |i: usize| CornerRadius { h: hr[i], v: vr[i] };
+                        BorderRadius {
+                            top_left: c(0),
+                            top_right: c(1),
+                            bottom_right: c(2),
+                            bottom_left: c(3),
+                        }
+                        .fitted(rect.width, rect.height)
+                    }
+                };
+                (rect, radii)
+            }
+            "circle" | "ellipse" => {
+                let (cx, cy) = centre(at)?;
+                let (near_x, far_x) = (cx.abs().min((w - cx).abs()), cx.abs().max((w - cx).abs()));
+                let (near_y, far_y) = (cy.abs().min((h - cy).abs()), cy.abs().max((h - cy).abs()));
+                let t: Vec<&str> = shape.split_whitespace().collect();
+                let (rx, ry) = if name == "circle" {
+                    // A percentage is of the reference box's normalised
+                    // diagonal, sqrt(w² + h²) / sqrt(2).
+                    let diagonal = (w * w + h * h).sqrt() / std::f32::consts::SQRT_2;
+                    let r = match t.as_slice() {
+                        [] => near_x.min(near_y),
+                        [a] => radius(a, diagonal, near_x.min(near_y), far_x.max(far_y))?,
+                        _ => return None,
+                    };
+                    (r, r)
+                } else {
+                    match t.as_slice() {
+                        [] => (near_x, near_y),
+                        [a, b] => (radius(a, w, near_x, far_x)?, radius(b, h, near_y, far_y)?),
+                        _ => return None,
+                    }
+                };
+                let rect = Rect::new(
+                    reference.x + cx - rx,
+                    reference.y + cy - ry,
+                    2.0 * rx,
+                    2.0 * ry,
+                );
+                let corner = CornerRadius { h: rx, v: ry };
+                (
+                    rect,
+                    BorderRadius {
+                        top_left: corner,
+                        top_right: corner,
+                        bottom_right: corner,
+                        bottom_left: corner,
+                    },
+                )
+            }
+            _ => return None,
+        };
+        Some((rect, radii))
     }
 
     /// The rounded clip a box imposes on its descendants, if any.
@@ -7081,24 +9457,23 @@ impl DisplayList {
             return None;
         }
 
-        // Each corner shrinks by the THICKER of its two borders. BorderRadius
-        // is one scalar per corner, so an elliptical inner radius cannot be
-        // expressed; taking the thicker border rounds less than Chrome would,
-        // which errs toward clipping too little rather than eating paint that
-        // belongs on screen. With no border — every case this currently fires
-        // on — it is exact.
-        let inset = |r: f32, a: f32, b: f32| (r - a.max(b)).max(0.0);
+        // Each corner's horizontal radius shrinks by the vertical border it
+        // meets and its vertical radius by the horizontal one, so unequal
+        // borders give an elliptical padding edge (§5.2).
         let inner = BorderRadius {
-            top_left: inset(radius.top_left, d.border.left, d.border.top),
-            top_right: inset(radius.top_right, d.border.right, d.border.top),
-            bottom_right: inset(radius.bottom_right, d.border.right, d.border.bottom),
-            bottom_left: inset(radius.bottom_left, d.border.left, d.border.bottom),
+            top_left: radius.top_left.inset(d.border.left, d.border.top),
+            top_right: radius.top_right.inset(d.border.right, d.border.top),
+            bottom_right: radius.bottom_right.inset(d.border.right, d.border.bottom),
+            bottom_left: radius.bottom_left.inset(d.border.left, d.border.bottom),
         };
 
         Some((padding_rect, inner))
     }
 
     fn render_background(&mut self, layout_box: &LayoutBox) {
+        if self.render_masked_background(layout_box) {
+            return;
+        }
         let d = &layout_box.dimensions;
         let border_rect = d.border_box();
         let s = &layout_box.style;
@@ -7209,6 +9584,83 @@ impl DisplayList {
         if needs_clip {
             self.commands.push(DisplayCommand::PopClip);
         }
+    }
+
+    /// CSS Masking 1 §6: a box with a mask image paints its background
+    /// colour through each `url()` mask layer, one `MaskedColor` per layer,
+    /// bottom layer first. Painting the same colour through each layer in
+    /// turn, source-over, is the `add` composite of the layers' alphas, the
+    /// initial `mask-composite`.
+    ///
+    /// Returns false, painting nothing, when the box has no `url()` mask
+    /// layer; the ordinary background then paints, unmasked, as before.
+    /// Also false when the box has a background image: only a colour is
+    /// painted through a mask so far, and an image would otherwise vanish.
+    ///
+    /// Not masked yet (stated, not hidden): borders, shadows, text and
+    /// descendants of a masked box, gradient mask layers and `url(#id)`
+    /// references to an SVG `<mask>` element; `mask-mode: luminance`.
+    fn render_masked_background(&mut self, layout_box: &LayoutBox) -> bool {
+        let s = &layout_box.style;
+        if !s.mask.has_image() || s.background_layers.iter().any(|l| l.has_image()) {
+            return false;
+        }
+        let layers: Vec<rustkit_css::BackgroundLayer> = s
+            .mask
+            .layers()
+            .into_iter()
+            .filter(|l| matches!(&l.image, rustkit_css::BackgroundImage::Url(u) if !u.starts_with('#')))
+            .collect();
+        if layers.is_empty() {
+            return false;
+        }
+        let color = s.background_color;
+        if color.a <= 0.0 {
+            return true;
+        }
+        let d = &layout_box.dimensions;
+        let content = d.content;
+        let padding = d.padding_box();
+        let border = d.border_box();
+        for layer in &layers {
+            let rustkit_css::BackgroundImage::Url(url) = &layer.image else {
+                continue;
+            };
+            let origin = match layer.origin {
+                rustkit_css::BackgroundOrigin::BorderBox => border,
+                rustkit_css::BackgroundOrigin::PaddingBox => padding,
+                rustkit_css::BackgroundOrigin::ContentBox => content,
+            };
+            let clip = match layer.clip {
+                rustkit_css::BackgroundClip::PaddingBox => padding,
+                rustkit_css::BackgroundClip::ContentBox => content,
+                _ => border,
+            };
+            if clip.width <= 0.0 || clip.height <= 0.0 || origin.width <= 0.0 || origin.height <= 0.0 {
+                continue;
+            }
+            let clipped = (clip.x, clip.y, clip.width, clip.height)
+                != (origin.x, origin.y, origin.width, origin.height);
+            if clipped {
+                self.commands.push(DisplayCommand::PushClip(clip));
+            }
+            let size = self.convert_background_size(&layer.size, origin);
+            let (position, offset) = self.convert_background_position(&layer.position);
+            let repeat = self.convert_background_repeat(layer.repeat);
+            self.commands.push(DisplayCommand::MaskedColor {
+                color,
+                url: url.clone(),
+                rect: origin,
+                size,
+                position,
+                offset,
+                repeat,
+            });
+            if clipped {
+                self.commands.push(DisplayCommand::PopClip);
+            }
+        }
+        true
     }
 
     /// Render a single background layer.
@@ -7388,8 +9840,8 @@ impl DisplayList {
                 // For URL backgrounds, emit a BackgroundImage command
                 // The actual image dimensions would come from the image cache
                 // For now, use container size as fallback
-                let size = self.convert_background_size(&layer.size);
-                let position = self.convert_background_position(&layer.position);
+                let size = self.convert_background_size(&layer.size, container);
+                let (position, offset) = self.convert_background_position(&layer.position);
                 let repeat = self.convert_background_repeat(layer.repeat);
 
                 self.commands.push(DisplayCommand::BackgroundImage {
@@ -7397,6 +9849,7 @@ impl DisplayList {
                     rect: container,
                     size,
                     position,
+                    offset,
                     repeat,
                 });
             }
@@ -7499,29 +9952,37 @@ impl DisplayList {
     }
 
     /// Convert rustkit_css::BackgroundSize to layout BackgroundSize.
-    fn convert_background_size(&self, size: &rustkit_css::BackgroundSize) -> BackgroundSize {
+    ///
+    /// A percentage rides the css `Explicit` variant as a negative value
+    /// and is resolved here against `container`, as
+    /// `calculate_background_rect` does for gradients: the painter knows
+    /// only px.
+    fn convert_background_size(&self, size: &rustkit_css::BackgroundSize, container: Rect) -> BackgroundSize {
+        let resolve = |v: f32, extent: f32| if v < 0.0 { extent * (-v / 100.0) } else { v };
         match size {
             rustkit_css::BackgroundSize::Auto => BackgroundSize::Auto,
             rustkit_css::BackgroundSize::Cover => BackgroundSize::Cover,
             rustkit_css::BackgroundSize::Contain => BackgroundSize::Contain,
             rustkit_css::BackgroundSize::Explicit { width, height } => BackgroundSize::Explicit {
-                width: *width,
-                height: *height,
+                width: width.map(|w| resolve(w, container.width)),
+                height: height.map(|h| resolve(h, container.height)),
             },
         }
     }
 
-    /// Convert rustkit_css::BackgroundPosition to (f32, f32) tuple.
-    fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> (f32, f32) {
-        let x = match &pos.x {
-            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
-            rustkit_css::BackgroundPositionValue::Px(_) => 0.0, // Will be handled in rendering
+    /// Convert rustkit_css::BackgroundPosition to the command's
+    /// `(position, offset)`: a percentage is the 0-1 position with no
+    /// offset, a length is position 0 with that many px of offset, and a
+    /// far-edge offset or `calc()` is both.
+    fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> ((f32, f32), (f32, f32)) {
+        let axis = |v: &rustkit_css::BackgroundPositionValue| match v {
+            rustkit_css::BackgroundPositionValue::Percent(p) => (*p, 0.0),
+            rustkit_css::BackgroundPositionValue::Px(px) => (0.0, *px),
+            rustkit_css::BackgroundPositionValue::Calc { percent, px } => (*percent, *px),
         };
-        let y = match &pos.y {
-            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
-            rustkit_css::BackgroundPositionValue::Px(_) => 0.0,
-        };
-        (x, y)
+        let (x, offset_x) = axis(&pos.x);
+        let (y, offset_y) = axis(&pos.y);
+        ((x, y), (offset_x, offset_y))
     }
 
     /// Convert rustkit_css::BackgroundRepeat to layout BackgroundRepeat.
@@ -7642,6 +10103,10 @@ impl DisplayList {
                 Length::Px(px) => *px,
                 _ => 16.0,
             };
+            // Text at `font-size: 0` has no glyphs to paint.
+            if font_size <= 0.0 {
+                return;
+            }
 
             let x = layout_box.dimensions.content.x;
             let content_y = layout_box.dimensions.content.y;
@@ -7739,7 +10204,14 @@ impl DisplayList {
                 // (GradientText was skipped by the old continue-before-shape
                 // and re-owned pitch + baseline in paint — the last dual
                 // text path.)
-                let mut advances = shape_line_advances(&text, style, font_size);
+                let shaped = shape_line(&text, style, font_size);
+                let mut advances = shaped.as_ref().and_then(char_advances_of);
+                // SHAPED-RUN CONTRACT (S0): the same shape call, frozen with
+                // the justification slack in it. `advances` above is its
+                // projection onto characters and stays for the old path.
+                let line_run = shaped
+                    .as_ref()
+                    .and_then(|shaped| GlyphRun::freeze(shaped, justify_space));
                 // A justified line widens each word separator by the slack
                 // layout distributed (TextLine::justify_space). Only the
                 // per-char advance path can carry it: when shaping fell back
@@ -7759,7 +10231,7 @@ impl DisplayList {
                 // edge and paint `…` in the run's own font. Without per-char
                 // advances there is nothing to cut against — the run paints
                 // as laid out and the clip alone applies.
-                let (text, advances, text_width) = match (self.ellipsis.as_mut(), &advances) {
+                let (text, advances, text_width, line_run) = match (self.ellipsis.as_mut(), &advances) {
                     (Some(scope), Some(adv)) => {
                         let ellipsis_advance = shape_line_advances("\u{2026}", style, font_size)
                             .and_then(|a| a.first().copied())
@@ -7776,16 +10248,27 @@ impl DisplayList {
                                 .width
                             });
                         match scope.cut(&text, x, line_top, adv, ellipsis_advance) {
-                            TextOverflowCut::Keep => (text, advances, text_width),
+                            TextOverflowCut::Keep => (text, advances, text_width, line_run),
                             TextOverflowCut::Hide => continue,
                             TextOverflowCut::Cut {
                                 text,
                                 advances,
                                 width,
-                            } => (text, Some(advances), width),
+                            } => {
+                                // The run is cut where the characters were:
+                                // the kept glyphs, then the ellipsis shaped
+                                // alone in the same face (as its advance was).
+                                let kept = advances.len().saturating_sub(1);
+                                let line_run = line_run.and_then(|run| {
+                                    shape_line("\u{2026}", style, font_size)
+                                        .and_then(|tail| GlyphRun::freeze(&tail, 0.0))
+                                        .and_then(|tail| run.cut_with_tail(kept, &tail))
+                                });
+                                (text, Some(advances), width, line_run)
+                            }
                         }
                     }
-                    _ => (text, advances, text_width),
+                    _ => (text, advances, text_width, line_run),
                 };
 
                 // Check if this is gradient text (background-clip: text with gradient and transparent fill)
@@ -7832,6 +10315,7 @@ impl DisplayList {
                     },
                     advances,
                     ascent: Some(seat_ascent),
+                    run: line_run.map(std::sync::Arc::new),
                 });
 
                 // Draw text decorations
@@ -7976,8 +10460,6 @@ impl DisplayList {
                     _ => ObjectFit::Fill,
                 };
 
-                let (pos_x, pos_y) = layout_box.style.object_position;
-
                 // Generate image display command
                 let cmd = crate::images::render_image(
                     url,
@@ -7985,12 +10467,37 @@ impl DisplayList {
                     *natural_width,
                     *natural_height,
                     object_fit,
-                    (pos_x, pos_y),
+                    layout_box.style.object_position,
+                    layout_box.style.object_position_offset,
                     layout_box.style.opacity,
                     layout_box.style.color,
                 );
 
-                self.commands.push(cmd);
+                // Replaced content is trimmed to the content edge curve
+                // (CSS Backgrounds 3 §5.3): the border radius inset by the
+                // border and padding beside each corner. `img { border-radius:
+                // 50% }` is how most avatars are written, with no
+                // `overflow: hidden` box around them.
+                let radius = self.border_radius_px(layout_box);
+                let (b, p) = (&dims.border, &dims.padding);
+                let content_radius = BorderRadius {
+                    top_left: radius.top_left.inset(b.left + p.left, b.top + p.top),
+                    top_right: radius.top_right.inset(b.right + p.right, b.top + p.top),
+                    bottom_right: radius
+                        .bottom_right
+                        .inset(b.right + p.right, b.bottom + p.bottom),
+                    bottom_left: radius.bottom_left.inset(b.left + p.left, b.bottom + p.bottom),
+                };
+                if content_radius.is_zero() {
+                    self.commands.push(cmd);
+                } else {
+                    self.commands.push(DisplayCommand::PushClipRounded {
+                        rect: container,
+                        radius: content_radius,
+                    });
+                    self.commands.push(cmd);
+                    self.commands.push(DisplayCommand::PopClip);
+                }
             }
             BoxType::FormControl(control) => {
                 self.render_form_control(layout_box, control);
@@ -8051,11 +10558,26 @@ impl DisplayList {
 
         match control {
             FormControlType::TextInput {
-                value, placeholder, ..
+                value,
+                placeholder,
+                input_type,
             } => {
+                // A password paints one bullet per character. Masked HERE,
+                // so the value is in no display command, dump or frame.
+                let password = input_type.eq_ignore_ascii_case("password");
+                let value = if password {
+                    value.chars().map(|_| PASSWORD_MASK).collect()
+                } else {
+                    value.clone()
+                };
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
-                    value: value.clone(),
+                    kind: if password {
+                        TextControlKind::Password
+                    } else {
+                        TextControlKind::Text
+                    },
+                    value,
                     placeholder: placeholder.clone(),
                     font_size,
                     font_family: font_family.clone(),
@@ -8085,6 +10607,7 @@ impl DisplayList {
             } => {
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
+                    kind: TextControlKind::TextArea,
                     value: value.clone(),
                     placeholder: placeholder.clone(),
                     font_size,
@@ -8201,10 +10724,35 @@ impl DisplayList {
             }
             FormControlType::Select {
                 options,
+                selected,
+                size,
+                ..
+            } if *size > 1 => {
+                self.commands.push(DisplayCommand::ListBox {
+                    rect,
+                    options: options.clone(),
+                    selected: selected.clone(),
+                    row_height: list_box_row_height(font_size),
+                    font_size,
+                    font_family: font_family.clone(),
+                    font_weight,
+                    text_color,
+                    background_color: bg_color,
+                    border_color: if border_color.a > 0.0 {
+                        border_color
+                    } else {
+                        Color::new(200, 200, 200, 1.0)
+                    },
+                    border_width,
+                });
+            }
+            FormControlType::Select {
+                options,
                 selected_index,
                 ..
             } => {
-                // Draw as a text input with dropdown arrow
+                // A drop-down: the selected option's label, and the arrow
+                // the painter draws for `MenuList`.
                 let display_text = selected_index
                     .and_then(|i| options.get(i))
                     .cloned()
@@ -8212,6 +10760,7 @@ impl DisplayList {
 
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
+                    kind: TextControlKind::MenuList,
                     value: display_text,
                     placeholder: String::new(),
                     font_size,
@@ -8388,15 +10937,13 @@ fn shape_text_metrics(
     }
 }
 
-/// Per-CHAR advances from the layout shaper, letter/word-spacing applied
-/// (ADVANCE CONTRACT, text-stack unification 2026-07-11). Returns None when
-/// shaping fails or when glyph count != char count (ligature clusters) — the
-/// renderer then falls back to its own advances instead of misaligning.
-pub fn shape_line_advances(
+/// One line of `text` shaped in `style`, letter/word-spacing applied: the
+/// single shape call behind `shape_line_advances` and `shape_line_run`.
+fn shape_line(
     text: &str,
     style: &rustkit_css::ComputedStyle,
     font_size: f32,
-) -> Option<Vec<f32>> {
+) -> Option<ShapedRun> {
     let letter_spacing = match style.letter_spacing {
         Length::Px(px) => px,
         Length::Em(em) => em * font_size,
@@ -8422,10 +10969,46 @@ pub fn shape_line_advances(
         )
         .ok()?;
     run.apply_spacing(letter_spacing, word_spacing);
-    if run.glyphs.len() != text.chars().count() {
+    Some(run)
+}
+
+/// The per-character projection of a shaped line: `None` when a glyph is
+/// not one character (the vector cannot describe it).
+fn char_advances_of(run: &ShapedRun) -> Option<Vec<f32>> {
+    if run.glyphs.len() != run.text.chars().count() {
         return None;
     }
     Some(run.glyphs.iter().map(|g| g.advance).collect())
+}
+
+/// Per-CHAR advances from the layout shaper, letter/word-spacing applied
+/// (ADVANCE CONTRACT, text-stack unification 2026-07-11). Returns None when
+/// shaping fails or when glyph count != char count (ligature clusters) — the
+/// renderer then falls back to its own advances instead of misaligning.
+pub fn shape_line_advances(
+    text: &str,
+    style: &rustkit_css::ComputedStyle,
+    font_size: f32,
+) -> Option<Vec<f32>> {
+    shape_line(text, style, font_size)
+        .as_ref()
+        .and_then(char_advances_of)
+}
+
+/// The frozen run for one line of `text` in `style` (SHAPED-RUN CONTRACT,
+/// slice S0): the shape `shape_line_advances` projects, kept whole.
+/// `justify_space` is added to each word separator before the freeze.
+/// `None` when shaping fails or the run is outside the slice
+/// (`GlyphRun::freeze`).
+pub fn shape_line_run(
+    text: &str,
+    style: &rustkit_css::ComputedStyle,
+    font_size: f32,
+    justify_space: f32,
+) -> Option<GlyphRun> {
+    shape_line(text, style, font_size)
+        .as_ref()
+        .and_then(|run| GlyphRun::freeze(run, justify_space))
 }
 
 /// Simple text measurement (fallback when shaping is unavailable).
@@ -8652,6 +11235,132 @@ mod tests {
         assert_eq!(blink_baseline_offset(16.0, 15.46875, 3.375), 14.0);
     }
 
+    /// The one tile a no-repeat url background paints in a 300x200 box,
+    /// for a 240x210 image.
+    fn url_background_tile(size: rustkit_css::BackgroundSize) -> Rect {
+        url_background_tile_at(size, rustkit_css::BackgroundPosition::default())
+    }
+
+    fn url_background_tile_at(
+        size: rustkit_css::BackgroundSize,
+        position: rustkit_css::BackgroundPosition,
+    ) -> Rect {
+        let mut style = ComputedStyle::new();
+        style.background_layers = vec![rustkit_css::BackgroundLayer {
+            image: rustkit_css::BackgroundImage::Url("dinosaur.png".to_string()),
+            size,
+            position,
+            repeat: rustkit_css::BackgroundRepeat::NoRepeat,
+            ..Default::default()
+        }];
+        let mut card = LayoutBox::new(BoxType::Block, style);
+        card.dimensions.content = Rect::new(10.0, 20.0, 300.0, 200.0);
+
+        let list = DisplayList::build(&card);
+        let (rect, size, position, offset, repeat) = list
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::BackgroundImage { rect, size, position, offset, repeat, .. } => {
+                    Some((*rect, size.clone(), *position, *offset, *repeat))
+                }
+                _ => None,
+            })
+            .expect("a url background must emit a BackgroundImage command");
+        let tiles = background_tiles(rect, &size, position, offset, repeat, 240.0, 210.0);
+        assert_eq!(tiles.len(), 1, "{tiles:?}");
+        tiles[0]
+    }
+
+    #[test]
+    fn test_url_background_percentage_size_resolves_against_its_box() {
+        // Percentages ride the Explicit variant as negative values. The
+        // gradient lane resolves them (calculate_background_rect); the url
+        // lane passed them through, so `background-size: 50% auto` reached
+        // the painter as a -50px image and painted nothing (Chrome paints
+        // it 150 wide, 131.25 tall in a 300x200 box).
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: Some(-50.0),
+            height: None,
+        });
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (10.0, 20.0, 150.0, 131.25));
+
+        // `auto 100%`: the height is the box's, the width keeps the ratio.
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: None,
+            height: Some(-100.0),
+        });
+        assert_eq!((tile.y, tile.height), (20.0, 200.0));
+        assert!((tile.width - 200.0 * 240.0 / 210.0).abs() < 0.01, "{tile:?}");
+
+        // Control: a px size is not a percentage.
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        });
+        assert_eq!((tile.width, tile.height), (100.0, 50.0));
+    }
+
+    #[test]
+    fn test_url_background_px_position_offsets_the_image() {
+        // `background-position: 10px 20px` reached the painter as 0 0 (the
+        // px arm was "handled in rendering", which never happened), so a
+        // sprite sheet always showed its top-left cell.
+        let px = rustkit_css::BackgroundPositionValue::Px;
+        let size = rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        };
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: px(10.0), y: px(20.0) },
+        );
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (20.0, 40.0, 100.0, 50.0));
+
+        // A sprite cell: negative offsets pull the image up and left.
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: px(-40.0), y: px(-30.0) },
+        );
+        assert_eq!((tile.x, tile.y), (-30.0, -10.0));
+
+        // Mixed: px on one axis, a percentage on the other.
+        let tile = url_background_tile_at(
+            size,
+            rustkit_css::BackgroundPosition {
+                x: px(10.0),
+                y: rustkit_css::BackgroundPositionValue::Percent(1.0),
+            },
+        );
+        assert_eq!((tile.x, tile.y), (20.0, 170.0));
+    }
+
+    #[test]
+    fn test_url_background_far_edge_offset_is_a_percentage_plus_px() {
+        // `right 5px bottom 10px`: on the far edges, then back by the
+        // offsets. 100x50 image in the 300x200 box at 10,20.
+        let calc = |percent, px| rustkit_css::BackgroundPositionValue::Calc { percent, px };
+        let size = rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        };
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: calc(1.0, -5.0), y: calc(1.0, -10.0) },
+        );
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (205.0, 160.0, 100.0, 50.0));
+
+        // `calc(50% + 4px)` on one axis.
+        let tile = url_background_tile_at(
+            size,
+            rustkit_css::BackgroundPosition {
+                x: calc(0.5, 4.0),
+                y: rustkit_css::BackgroundPositionValue::Percent(0.0),
+            },
+        );
+        assert_eq!((tile.x, tile.y), (114.0, 20.0));
+    }
+
     #[test]
     fn test_oversized_gradient_paint_is_clipped_to_its_box() {
         // The gradient-backgrounds "-45deg Rainbow" card: `background-size:
@@ -8785,10 +11494,14 @@ mod tests {
     fn scaled_gradient_card(radius_px: f32) -> LayoutBox {
         let mut style = ComputedStyle::new();
         if radius_px > 0.0 {
-            style.border_top_left_radius = Length::Px(radius_px);
-            style.border_top_right_radius = Length::Px(radius_px);
-            style.border_bottom_right_radius = Length::Px(radius_px);
-            style.border_bottom_left_radius = Length::Px(radius_px);
+            style.border_top_left_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+            style.border_top_right_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+            style.border_bottom_right_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+            style.border_bottom_left_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
         }
         style.background_layers = vec![rustkit_css::BackgroundLayer {
             image: rustkit_css::BackgroundImage::Gradient(rustkit_css::Gradient::Linear(
@@ -8858,7 +11571,12 @@ mod tests {
                 radius.bottom_right,
                 radius.bottom_left
             ),
-            (16.0, 16.0, 16.0, 16.0),
+            (
+                CornerRadius::circular(16.0),
+                CornerRadius::circular(16.0),
+                CornerRadius::circular(16.0),
+                CornerRadius::circular(16.0)
+            ),
             "the clip must carry the box's own radius on all four corners"
         );
         assert!(
@@ -9273,10 +11991,12 @@ mod tests {
 
     fn rounded_overflow_parent(radius_px: f32, hidden: bool) -> LayoutBox {
         let mut style = ComputedStyle::new();
-        style.border_top_left_radius = Length::Px(radius_px);
-        style.border_top_right_radius = Length::Px(radius_px);
-        style.border_bottom_right_radius = Length::Px(radius_px);
-        style.border_bottom_left_radius = Length::Px(radius_px);
+        style.border_top_left_radius = rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+        style.border_top_right_radius = rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+        style.border_bottom_right_radius =
+            rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+        style.border_bottom_left_radius =
+            rustkit_css::CornerRadius::circular(Length::Px(radius_px));
         if hidden {
             style.overflow_x = rustkit_css::Overflow::Hidden;
             style.overflow_y = rustkit_css::Overflow::Hidden;
@@ -9332,7 +12052,7 @@ mod tests {
         assert_eq!(rect.width, 237.0, "the border box");
         assert_eq!(widths, [5.0; 4]);
         assert_eq!(colors[0], Color::BLACK);
-        assert_eq!(radius.bottom_left, 12.0);
+        assert_eq!(radius.bottom_left, CornerRadius::circular(12.0));
         assert!(
             !list.commands.iter().any(|c| matches!(c, DisplayCommand::SolidColor(col, _) if *col == Color::BLACK)),
             "the square strips must not also paint"
@@ -9370,7 +12090,7 @@ mod tests {
         let (rect, radius) = rounded_clip(&list).expect(
             "a rounded box that clips its overflow must push a rounded clip for its children",
         );
-        assert_eq!(radius.top_left, 12.0);
+        assert_eq!(radius.top_left, CornerRadius::circular(12.0));
         assert_eq!(rect.width, 227.0);
 
         let push = list
@@ -9696,9 +12416,125 @@ mod tests {
         assert_eq!(rect.x, border_box.x + 4.0);
         assert_eq!(rect.width, border_box.width - 8.0);
         assert_eq!(
-            radius.top_left, 8.0,
+            radius.top_left,
+            CornerRadius::circular(8.0),
             "12px radius inside a 4px border is 8px"
         );
+    }
+
+    #[test]
+    fn unequal_borders_give_the_overflow_clip_an_elliptical_radius() {
+        // CSS Backgrounds 3 §5.2: the padding edge's horizontal radius is the
+        // outer one less the vertical border beside it, and its vertical
+        // radius the outer one less the horizontal border. One scalar per
+        // corner could only take the thicker border off both.
+        let mut parent = rounded_overflow_parent(12.0, true);
+        parent.dimensions.border = EdgeSizes {
+            top: 10.0,
+            right: 2.0,
+            bottom: 14.0,
+            left: 4.0,
+        };
+
+        let list = DisplayList::build(&under_root(parent));
+        let (_, radius) = rounded_clip(&list).expect("must still clip");
+        assert_eq!(radius.top_left, CornerRadius { h: 8.0, v: 2.0 });
+        assert_eq!(radius.top_right, CornerRadius { h: 10.0, v: 2.0 });
+        assert_eq!(
+            radius.bottom_right,
+            CornerRadius::default(),
+            "a 14px border swallows the 12px vertical radius: that corner is square"
+        );
+        assert_eq!(radius.bottom_left, CornerRadius::default());
+    }
+
+    /// CSS Backgrounds 3 §6.1.1: a shadow's corner radius is the box's plus
+    /// the spread, less for a radius smaller than the spread, and a square
+    /// corner stays square.
+    #[test]
+    fn a_shadows_corner_radius_grows_with_the_spread() {
+        let corner = CornerRadius { h: 20.0, v: 10.0 };
+        assert_eq!(corner.spread(6.0), CornerRadius { h: 26.0, v: 16.0 });
+        assert_eq!(corner.spread(0.0), corner);
+        assert_eq!(CornerRadius::default().spread(6.0), CornerRadius::default());
+
+        // r = 2 under a 10px spread: 2 + 10 * (1 + (0.2 - 1)^3) = 6.88.
+        let small = CornerRadius::circular(2.0).spread(10.0);
+        assert!((small.h - 6.88).abs() < 1e-4 && (small.v - 6.88).abs() < 1e-4, "{small:?}");
+
+        // A negative spread shrinks the curve, and squares it at zero.
+        assert_eq!(corner.spread(-4.0), CornerRadius { h: 16.0, v: 6.0 });
+        assert_eq!(corner.spread(-10.0), CornerRadius::default());
+
+        let all = BorderRadius::uniform(8.0).spread(4.0);
+        assert_eq!(all, BorderRadius::uniform(12.0));
+    }
+
+    #[test]
+    fn fitting_scales_every_radius_by_one_factor() {
+        // §5.5. 200x400: the top side holds 150 + 150, so f = 200/300.
+        let fitted = BorderRadius {
+            top_left: CornerRadius::circular(150.0),
+            top_right: CornerRadius::circular(150.0),
+            bottom_right: CornerRadius { h: 30.0, v: 15.0 },
+            bottom_left: CornerRadius::default(),
+        }
+        .fitted(200.0, 400.0);
+        assert_eq!(fitted.top_left, CornerRadius::circular(100.0));
+        assert_eq!(fitted.bottom_right, CornerRadius { h: 20.0, v: 10.0 });
+        assert_eq!(fitted.bottom_left, CornerRadius::default());
+
+        // Nothing overlaps: unchanged, even with a radius past half the box.
+        let lone = BorderRadius {
+            top_left: CornerRadius { h: 180.0, v: 90.0 },
+            ..BorderRadius::default()
+        };
+        assert_eq!(lone.fitted(200.0, 100.0), lone);
+
+        // The vertical sides count too. 200x100: the right side holds
+        // 150 + 15 and is the tightest, f = 100/165.
+        let fitted = BorderRadius {
+            top_left: CornerRadius::circular(150.0),
+            top_right: CornerRadius::circular(150.0),
+            bottom_right: CornerRadius { h: 30.0, v: 15.0 },
+            bottom_left: CornerRadius::default(),
+        }
+        .fitted(200.0, 100.0);
+        assert!((fitted.top_right.v - 150.0 * 100.0 / 165.0).abs() < 1e-3);
+        assert!((fitted.top_right.v + fitted.bottom_right.v - 100.0).abs() < 1e-3);
+
+        // Four equal circular radii: exactly half the shorter side, as
+        // before, whatever the radius and the side are.
+        assert_eq!(
+            BorderRadius::uniform(9999.0).fitted(200.0, 100.0),
+            BorderRadius::uniform(50.0)
+        );
+        for (r, w, h) in [
+            (9999.0_f32, 311.59375_f32, 37.59375_f32),
+            (1e6, 73.3, 1280.7),
+            (24.0, 40.1, 31.9),
+        ] {
+            assert_eq!(
+                BorderRadius::uniform(r).fitted(w, h),
+                BorderRadius::uniform(w.min(h) / 2.0),
+                "uniform {r} on {w}x{h}"
+            );
+        }
+
+        // One zero axis makes the corner square, so it takes no room.
+        let half_zero = BorderRadius {
+            top_left: CornerRadius { h: 500.0, v: 0.0 },
+            top_right: CornerRadius::circular(40.0),
+            ..BorderRadius::default()
+        };
+        let fitted = half_zero.fitted(200.0, 100.0);
+        assert_eq!(fitted.top_left, CornerRadius::default());
+        assert_eq!(fitted.top_right, CornerRadius::circular(40.0));
+        assert!(BorderRadius {
+            top_left: CornerRadius { h: 5.0, v: 0.0 },
+            ..BorderRadius::default()
+        }
+        .is_zero());
     }
 
     #[test]
@@ -11230,6 +14066,95 @@ mod tests {
         assert_eq!(frame(none), 0.0);
     }
 
+    #[test]
+    fn a_password_control_paints_one_bullet_per_character() {
+        let mut field = n53_control(FormControlType::TextInput {
+            value: "pässword".to_string(),
+            placeholder: "Password".to_string(),
+            input_type: "password".to_string(),
+        });
+        field.dimensions.content = Rect::new(0.0, 0.0, 149.0, 19.0);
+        field.focused_caret = Some(3);
+        let list = DisplayList::build(&field);
+        let (value, placeholder, kind, caret) = list
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::TextInput {
+                    value,
+                    placeholder,
+                    kind,
+                    caret_position,
+                    ..
+                } => Some((value.clone(), placeholder.clone(), *kind, *caret_position)),
+                _ => None,
+            })
+            .expect("a TextInput command");
+        // Per character, not per byte: the caret index (in characters)
+        // still lands between the right two bullets.
+        assert_eq!(value, "\u{2022}".repeat(8));
+        assert_eq!(kind, TextControlKind::Password);
+        assert_eq!(caret, Some(3));
+        assert_eq!(placeholder, "Password");
+    }
+
+    #[test]
+    fn a_list_box_command_carries_its_rows_and_a_drop_down_does_not_become_one() {
+        let select = |size: u32, selected: Vec<usize>| {
+            let mut b = n53_control(FormControlType::Select {
+                options: ["Item 1", "Item 2", "Item 3", "Item 4"]
+                    .map(String::from)
+                    .to_vec(),
+                selected_index: Some(0),
+                size,
+                selected,
+            });
+            let mut cb = Dimensions::default();
+            cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+            b.layout(&cb);
+            DisplayList::build(&b).commands
+        };
+        // Three visible rows of 16px in the 50px box layout builds (Chrome
+        // CfT-148: options at +1, +17, +33; the fourth is scrolled out).
+        let commands = select(3, vec![1, 2]);
+        let list_box = commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::ListBox {
+                    rect,
+                    options,
+                    selected,
+                    row_height,
+                    ..
+                } => Some((*rect, options.len(), selected.clone(), *row_height)),
+                _ => None,
+            })
+            .expect("a ListBox command");
+        assert!((list_box.0.height - 50.0).abs() < 0.01, "{:?}", list_box.0);
+        assert!(
+            (list_box.3 - 16.0).abs() < 0.01,
+            "row height {}",
+            list_box.3
+        );
+        assert_eq!((list_box.1, list_box.2), (4, vec![1, 2]));
+        assert!(!commands
+            .iter()
+            .any(|c| matches!(c, DisplayCommand::TextInput { .. })));
+
+        // size 0 / 1 is a drop-down: its selected label, kind MenuList.
+        for size in [0, 1] {
+            let commands = select(size, Vec::new());
+            assert!(commands.iter().any(|c| matches!(
+                c,
+                DisplayCommand::TextInput { value, kind: TextControlKind::MenuList, .. }
+                    if value == "Item 1"
+            )));
+            assert!(!commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::ListBox { .. })));
+        }
+    }
+
     fn n53_text_input() -> LayoutBox {
         n53_control(FormControlType::TextInput {
             value: String::new(),
@@ -11568,6 +14493,7 @@ mod tests {
                 options: options.iter().map(|o| o.to_string()).collect(),
                 selected_index: None,
                 size,
+                selected: Vec::new(),
             })
         };
         let listbox = width(sel(&["Item 1", "Item 2", "Item 3", "Item 4"], 3));
@@ -11585,6 +14511,76 @@ mod tests {
             (short - 60.0).abs() <= 3.0,
             "dropdown 'Select': Chrome 60, got {short}"
         );
+    }
+
+    #[test]
+    fn a_shrink_to_fit_box_is_as_wide_as_its_spaced_text() {
+        // new_tab's logo: "HIWAVE" at 48px with `letter-spacing: 0.5rem`
+        // inside an inline-block. The intrinsic width left the spacing out,
+        // so the box was 48px narrower than the line laid out in it
+        // (165.66 against Chrome's 214.80).
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 1280.0, 0.0);
+
+        // The box is an inline-block in a block, or an item of a flex row,
+        // through `layout()` or the collapse path the engine's page layout
+        // runs.
+        for flex_item in [false, true] {
+            for collapse_path in [false, true] {
+                let width_with = |letter_spacing: Length, word_spacing: Length, text: &str| {
+                    let mut text_style = ComputedStyle::new();
+                    text_style.font_family = "Helvetica".to_string();
+                    text_style.font_size = Length::Px(48.0);
+                    text_style.letter_spacing = letter_spacing;
+                    text_style.word_spacing = word_spacing;
+
+                    let mut wrapper_style = text_style.clone();
+                    let mut parent_style = ComputedStyle::new();
+                    if flex_item {
+                        parent_style.display = rustkit_css::Display::Flex;
+                    } else {
+                        wrapper_style.display = rustkit_css::Display::InlineBlock;
+                    }
+                    let mut wrapper = LayoutBox::new(BoxType::Block, wrapper_style);
+                    wrapper
+                        .children
+                        .push(LayoutBox::new(BoxType::Text(text.to_string()), text_style));
+
+                    let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+                    parent.children.push(wrapper);
+                    if collapse_path {
+                        let mut mc = MarginCollapseContext::new();
+                        let mut fc = FloatContext::new();
+                        parent.layout_with_collapse(&cb, &mut mc, &mut fc);
+                    } else {
+                        parent.layout(&cb);
+                    }
+                    parent.children[0].dimensions.content.width
+                };
+                let case = format!("flex_item={flex_item} collapse_path={collapse_path}");
+
+                let plain = width_with(Length::Zero, Length::Zero, "HIWAVE");
+                assert!(plain > 100.0, "{case}: sanity: {plain}");
+                // Six letters, 8px after each.
+                let px = width_with(Length::Px(8.0), Length::Zero, "HIWAVE");
+                assert!(
+                    (px - (plain + 48.0)).abs() < 0.01,
+                    "{case}: px: {px} vs {plain} + 48"
+                );
+                let rem = width_with(Length::Rem(0.5), Length::Zero, "HIWAVE");
+                assert!(
+                    (rem - (plain + 48.0)).abs() < 0.01,
+                    "{case}: rem: {rem} vs {plain} + 48"
+                );
+                // `word-spacing` widens each space.
+                let words = width_with(Length::Zero, Length::Zero, "HI WAVE");
+                let spaced = width_with(Length::Zero, Length::Px(10.0), "HI WAVE");
+                assert!(
+                    (spaced - (words + 10.0)).abs() < 0.01,
+                    "{case}: word: {spaced} vs {words} + 10"
+                );
+            }
+        }
     }
 
     #[test]
@@ -12583,6 +15579,7 @@ mod tests {
                 size: 1,
                 options: vec!["A longer option text".to_string(), "Short".to_string()],
                 selected_index: None,
+                selected: Vec::new(),
             },
             FormControlType::TextArea {
                 rows: 2,
@@ -12829,7 +15826,7 @@ mod tests {
         // Width so the line has content and flushes; inline width is not
         // spec-honored but the advance mechanism under test does not care.
         a_style.width = Length::Px(50.0);
-        let mut a = LayoutBox::new(BoxType::Inline, a_style);
+        let a = LayoutBox::new(BoxType::Inline, a_style);
         let (content, half) = a.inline_content_area();
         assert!(
             content < 23.0,
@@ -15022,6 +18019,204 @@ mod object_fit_default_tests {
 }
 
 #[cfg(test)]
+mod object_fit_paint_quad_tests {
+    //! CSS Images 3 §5.5/§5.6: the fitted object box, clipped to the
+    //! content box, and the texture coordinates of the part that shows.
+    use super::*;
+
+    const CENTER: (f32, f32) = (0.5, 0.5);
+    const NO_OFFSET: (f32, f32) = (0.0, 0.0);
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    fn assert_quad(got: Option<(Rect, [f32; 4])>, rect: [f32; 4], uv: [f32; 4]) {
+        let (r, t) = got.expect("a visible quad");
+        let got_rect = [r.x, r.y, r.width, r.height];
+        assert!(
+            got_rect.iter().zip(rect).all(|(a, b)| close(*a, b)),
+            "rect {got_rect:?} != {rect:?}"
+        );
+        assert!(t.iter().zip(uv).all(|(a, b)| close(*a, b)), "uv {t:?} != {uv:?}");
+    }
+
+    /// A 1.4:1 box at (10, 20), the shape of eBay's hero slot.
+    fn box_1_4() -> Rect {
+        Rect::new(10.0, 20.0, 140.0, 100.0)
+    }
+
+    #[test]
+    fn fill_stretches_the_whole_image_over_the_box() {
+        assert_quad(
+            ObjectFit::Fill.paint_quad(box_1_4(), 290.0, 100.0, CENTER, NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn contain_letterboxes_a_2_9_to_1_image_in_a_1_4_to_1_box() {
+        let h = 140.0 / 2.9;
+        assert_quad(
+            ObjectFit::Contain.paint_quad(box_1_4(), 290.0, 100.0, CENTER, NO_OFFSET),
+            [10.0, 20.0 + (100.0 - h) / 2.0, 140.0, h],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn cover_crops_a_2_9_to_1_image_into_a_1_4_to_1_box() {
+        // Scaled to 290x100, centred: 75px fall off each side.
+        assert_quad(
+            ObjectFit::Cover.paint_quad(box_1_4(), 290.0, 100.0, CENTER, NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [75.0 / 290.0, 0.0, 215.0 / 290.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn cover_keeps_the_aspect_ratio_at_the_natural_size_of_the_ebay_hero() {
+        // 1600x552 into 1395x392: the scale is set by the height.
+        let (rect, uv) = ObjectFit::Cover
+            .paint_quad(Rect::new(0.0, 0.0, 1395.0, 392.0), 1600.0, 552.0, CENTER, NO_OFFSET)
+            .expect("a visible quad");
+        assert!(close(rect.width, 1395.0) && close(rect.height, 392.0));
+        let shown_w = (uv[2] - uv[0]) * 1600.0;
+        let shown_h = (uv[3] - uv[1]) * 552.0;
+        assert!(close(shown_w / shown_h, 1395.0 / 392.0), "{shown_w}x{shown_h}");
+    }
+
+    #[test]
+    fn cover_follows_object_position() {
+        assert_quad(
+            ObjectFit::Cover.paint_quad(box_1_4(), 290.0, 100.0, (0.0, 0.0), NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [0.0, 0.0, 140.0 / 290.0, 1.0],
+        );
+        assert_quad(
+            ObjectFit::Cover.paint_quad(box_1_4(), 290.0, 100.0, (1.0, 0.0), NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [150.0 / 290.0, 0.0, 1.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn cover_of_a_tall_image_into_a_taller_box_crops_the_sides() {
+        // 640x960 (0.667:1) into 245x375 (0.653:1), eBay's video cards:
+        // scaled to 250x375, so 2.5px fall off each side.
+        assert_quad(
+            ObjectFit::Cover.paint_quad(Rect::new(0.0, 0.0, 245.0, 375.0), 640.0, 960.0, CENTER, NO_OFFSET),
+            [0.0, 0.0, 245.0, 375.0],
+            [2.5 / 250.0, 0.0, 247.5 / 250.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn cover_of_a_tall_image_into_a_wide_box_crops_top_and_bottom() {
+        // 100x200 into 140x100: scaled to 140x280, 90px off top and bottom.
+        assert_quad(
+            ObjectFit::Cover.paint_quad(box_1_4(), 100.0, 200.0, CENTER, NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [0.0, 90.0 / 280.0, 1.0, 190.0 / 280.0],
+        );
+    }
+
+    #[test]
+    fn none_paints_at_natural_size_and_crops_what_overflows() {
+        assert_quad(
+            ObjectFit::None.paint_quad(box_1_4(), 40.0, 20.0, CENTER, NO_OFFSET),
+            [10.0 + 50.0, 20.0 + 40.0, 40.0, 20.0],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+        assert_quad(
+            ObjectFit::None.paint_quad(box_1_4(), 280.0, 200.0, CENTER, NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [0.25, 0.25, 0.75, 0.75],
+        );
+    }
+
+    #[test]
+    fn scale_down_is_none_when_smaller_and_contain_when_larger() {
+        assert_quad(
+            ObjectFit::ScaleDown.paint_quad(box_1_4(), 40.0, 20.0, CENTER, NO_OFFSET),
+            [60.0, 60.0, 40.0, 20.0],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+        let h = 140.0 / 2.9;
+        assert_quad(
+            ObjectFit::ScaleDown.paint_quad(box_1_4(), 290.0, 100.0, CENTER, NO_OFFSET),
+            [10.0, 20.0 + (100.0 - h) / 2.0, 140.0, h],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn object_position_offset_moves_the_object_and_clips_it() {
+        // `object-position: 10px 5px` on a natural-size 40x20 image.
+        assert_quad(
+            ObjectFit::None.paint_quad(box_1_4(), 40.0, 20.0, (0.0, 0.0), (10.0, 5.0)),
+            [20.0, 25.0, 40.0, 20.0],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+        // `right -20px`: half of a 40px-wide image hangs out of the box.
+        assert_quad(
+            ObjectFit::None.paint_quad(box_1_4(), 40.0, 20.0, (1.0, 0.0), (20.0, 0.0)),
+            [130.0, 20.0, 20.0, 20.0],
+            [0.0, 0.0, 0.5, 1.0],
+        );
+    }
+
+    #[test]
+    fn nothing_paints_for_an_empty_box_or_image() {
+        let fit = ObjectFit::Cover;
+        assert!(fit.paint_quad(Rect::new(0.0, 0.0, 0.0, 10.0), 10.0, 10.0, CENTER, NO_OFFSET).is_none());
+        assert!(fit.paint_quad(box_1_4(), 0.0, 10.0, CENTER, NO_OFFSET).is_none());
+        // Pushed entirely out of the box.
+        assert!(ObjectFit::None
+            .paint_quad(box_1_4(), 40.0, 20.0, (0.0, 0.0), (500.0, 0.0))
+            .is_none());
+    }
+
+    #[test]
+    fn the_image_command_carries_the_box_and_the_position_to_the_painter() {
+        // Layout's natural size can be a placeholder (the image had not
+        // decoded); the painter re-fits against the texture, so it needs
+        // the content box and position, not just the pre-fitted rect.
+        let cmd = crate::images::render_image(
+            "a.webp",
+            box_1_4(),
+            150.0,
+            150.0,
+            ObjectFit::Cover,
+            (0.25, 1.0),
+            (3.0, -4.0),
+            1.0,
+            Color::BLACK,
+        );
+        match cmd {
+            DisplayCommand::Image {
+                content_box,
+                object_fit,
+                object_position,
+                object_position_offset,
+                ..
+            } => {
+                let b = box_1_4();
+                assert_eq!(
+                    (content_box.x, content_box.y, content_box.width, content_box.height),
+                    (b.x, b.y, b.width, b.height)
+                );
+                assert_eq!(object_fit, ObjectFit::Cover);
+                assert_eq!(object_position, (0.25, 1.0));
+                assert_eq!(object_position_offset, (3.0, -4.0));
+            }
+            other => panic!("expected an Image command, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod w3_zero_width_wrap_tests {
     use super::*;
     use rustkit_css::{Display, WhiteSpace, WordBreak};
@@ -15806,10 +19001,10 @@ mod border_radius_emit_tests {
     fn box_with(radius: Length, bg: Color) -> LayoutBox {
         let mut s = ComputedStyle::new();
         s.background_color = bg;
-        s.border_top_left_radius = radius.clone();
-        s.border_top_right_radius = radius.clone();
-        s.border_bottom_right_radius = radius.clone();
-        s.border_bottom_left_radius = radius;
+        s.border_top_left_radius = rustkit_css::CornerRadius::circular(radius.clone());
+        s.border_top_right_radius = rustkit_css::CornerRadius::circular(radius.clone());
+        s.border_bottom_right_radius = rustkit_css::CornerRadius::circular(radius.clone());
+        s.border_bottom_left_radius = rustkit_css::CornerRadius::circular(radius);
         let mut b = LayoutBox::new(BoxType::Block, s);
         b.dimensions.content.width = 80.0;
         b.dimensions.content.height = 40.0;
@@ -15949,5 +19144,291 @@ mod seam_kern_tests {
             span.dimensions.margin_box().x,
             abc_w
         );
+    }
+}
+
+#[cfg(test)]
+mod mask_paint_tests {
+    //! CSS Masking 1 §6 at the display-list boundary: the board repro is a
+    //! 50x50 red box at (8, 8) masked by a data: SVG circle, which Chrome
+    //! paints as a red circle and RustKit painted as a red square.
+    use super::*;
+    use rustkit_css::{BackgroundImage, BackgroundLayer, Mask};
+
+    const CIRCLE: &str = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>";
+
+    fn xywh(r: Rect) -> (f32, f32, f32, f32) {
+        (r.x, r.y, r.width, r.height)
+    }
+
+    fn red() -> Color {
+        Color { r: 255, g: 0, b: 0, a: 1.0 }
+    }
+
+    fn masked_box(mask: Mask) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        style.background_color = red();
+        style.mask = mask;
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.dimensions.content = Rect::new(8.0, 8.0, 50.0, 50.0);
+        b
+    }
+
+    fn mask_of(images: Vec<BackgroundImage>) -> Mask {
+        Mask { images, ..Default::default() }
+    }
+
+    fn masked_commands(list: &DisplayList) -> Vec<&DisplayCommand> {
+        list.commands
+            .iter()
+            .filter(|c| matches!(c, DisplayCommand::MaskedColor { .. }))
+            .collect()
+    }
+
+    fn paints_red_square(list: &DisplayList) -> bool {
+        list.commands.iter().any(|c| match c {
+            DisplayCommand::SolidColor(color, _) | DisplayCommand::RoundedRect { color, .. } => {
+                *color == red()
+            }
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn a_masked_box_paints_its_background_colour_through_the_mask() {
+        let b = masked_box(mask_of(vec![BackgroundImage::Url(CIRCLE.to_string())]));
+        let list = DisplayList::build(&b);
+        let masked = masked_commands(&list);
+        assert_eq!(masked.len(), 1, "{:?}", list.commands);
+        match masked[0] {
+            DisplayCommand::MaskedColor { color, url, rect, size, position, offset, repeat } => {
+                assert_eq!(*color, red());
+                assert_eq!(url, CIRCLE);
+                assert_eq!(xywh(*rect), (8.0, 8.0, 50.0, 50.0), "border box: mask-origin's initial");
+                assert_eq!(*size, BackgroundSize::Auto);
+                assert_eq!((*position, *offset), ((0.0, 0.0), (0.0, 0.0)));
+                assert_eq!(*repeat, BackgroundRepeat::Repeat);
+            }
+            _ => unreachable!(),
+        }
+        assert!(!paints_red_square(&list), "the unmasked square must not paint: {:?}", list.commands);
+    }
+
+    #[test]
+    fn the_mask_rect_is_the_origin_box_and_its_size_and_position_resolve_there() {
+        let mut mask = mask_of(vec![BackgroundImage::Url("i.svg".into())]);
+        mask.origins = vec![rustkit_css::BackgroundOrigin::ContentBox];
+        mask.clips = vec![rustkit_css::BackgroundClip::ContentBox];
+        mask.sizes = vec![rustkit_css::BackgroundSize::Explicit { width: Some(-50.0), height: None }];
+        mask.positions = vec![rustkit_css::BackgroundPosition {
+            x: rustkit_css::BackgroundPositionValue::Percent(0.5),
+            y: rustkit_css::BackgroundPositionValue::Px(3.0),
+        }];
+        mask.repeats = vec![rustkit_css::BackgroundRepeat::NoRepeat];
+        let mut b = masked_box(mask);
+        b.dimensions.padding = EdgeSizes { top: 4.0, right: 4.0, bottom: 4.0, left: 4.0 };
+        b.dimensions.border = EdgeSizes { top: 1.0, right: 1.0, bottom: 1.0, left: 1.0 };
+        let list = DisplayList::build(&b);
+        let masked = masked_commands(&list);
+        assert_eq!(masked.len(), 1, "{:?}", list.commands);
+        let DisplayCommand::MaskedColor { rect, size, position, offset, repeat, .. } = masked[0] else {
+            unreachable!()
+        };
+        assert_eq!(xywh(*rect), (8.0, 8.0, 50.0, 50.0), "the content box");
+        let tiles = background_tiles(*rect, size, *position, *offset, *repeat, 10.0, 10.0);
+        let tiles: Vec<_> = tiles.into_iter().map(xywh).collect();
+        assert_eq!(tiles, vec![(20.5, 11.0, 25.0, 25.0)], "50% wide, centred, 3px down");
+    }
+
+    #[test]
+    fn a_clip_other_than_the_origin_box_is_pushed_around_the_mask() {
+        let mut mask = mask_of(vec![BackgroundImage::Url("i.svg".into())]);
+        mask.clips = vec![rustkit_css::BackgroundClip::ContentBox];
+        let mut b = masked_box(mask);
+        b.dimensions.padding = EdgeSizes { top: 5.0, right: 5.0, bottom: 5.0, left: 5.0 };
+        let list = DisplayList::build(&b);
+        let at = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::MaskedColor { .. }))
+            .expect("a MaskedColor");
+        assert!(matches!(list.commands[at - 1], DisplayCommand::PushClip(r) if xywh(r) == (8.0, 8.0, 50.0, 50.0)));
+        assert!(matches!(list.commands[at + 1], DisplayCommand::PopClip));
+    }
+
+    #[test]
+    fn mask_layers_paint_bottom_first_and_none_layers_paint_nothing() {
+        let b = masked_box(mask_of(vec![
+            BackgroundImage::Url("top.svg".into()),
+            BackgroundImage::None,
+            BackgroundImage::Url("bottom.svg".into()),
+        ]));
+        let list = DisplayList::build(&b);
+        let urls: Vec<&str> = masked_commands(&list)
+            .into_iter()
+            .map(|c| match c {
+                DisplayCommand::MaskedColor { url, .. } => url.as_str(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(urls, ["bottom.svg", "top.svg"]);
+    }
+
+    #[test]
+    fn an_unmasked_box_paints_as_before() {
+        for mask in [Mask::default(), mask_of(vec![BackgroundImage::None])] {
+            let list = DisplayList::build(&masked_box(mask));
+            assert!(masked_commands(&list).is_empty());
+            assert!(paints_red_square(&list));
+        }
+    }
+
+    #[test]
+    fn a_box_with_a_background_image_is_not_masked_yet() {
+        // Only a colour paints through a mask so far: an image under the
+        // mask keeps painting unmasked rather than vanishing.
+        let mut b = masked_box(mask_of(vec![BackgroundImage::Url("i.svg".into())]));
+        b.style.background_layers = vec![BackgroundLayer::from_url("sprite.png".into())];
+        let list = DisplayList::build(&b);
+        assert!(masked_commands(&list).is_empty());
+        assert!(list.commands.iter().any(|c| matches!(c, DisplayCommand::BackgroundImage { .. })));
+    }
+
+    #[test]
+    fn a_transparent_masked_box_paints_nothing() {
+        let mut b = masked_box(mask_of(vec![BackgroundImage::Url("i.svg".into())]));
+        b.style.background_color = Color::TRANSPARENT;
+        let list = DisplayList::build(&b);
+        assert!(masked_commands(&list).is_empty());
+        assert!(!paints_red_square(&list));
+    }
+
+    #[test]
+    fn tinting_recolours_a_vector_mask_and_keeps_its_alpha_as_coverage() {
+        let half_black = Color { r: 0, g: 0, b: 0, a: 0.5 };
+        let mut cmds = vec![
+            DisplayCommand::PushClip(Rect::new(0.0, 0.0, 10.0, 10.0)),
+            DisplayCommand::FillCircle { cx: 5.0, cy: 5.0, radius: 5.0, color: Color::BLACK },
+            DisplayCommand::FillPolygon { points: vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)], color: half_black },
+            DisplayCommand::StrokeRect { rect: Rect::new(0.0, 0.0, 2.0, 2.0), color: Color::WHITE, width: 1.0 },
+            DisplayCommand::PopClip,
+        ];
+        let colour = Color { r: 10, g: 20, b: 30, a: 0.8 };
+        tint_mask_commands(&mut cmds, colour);
+        let colours: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::FillCircle { color, .. }
+                | DisplayCommand::FillPolygon { color, .. }
+                | DisplayCommand::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            colours,
+            vec![
+                colour,
+                Color { a: 0.4, ..colour },
+                colour,
+            ]
+        );
+        assert!(matches!(cmds[0], DisplayCommand::PushClip(_)));
+    }
+}
+
+#[cfg(test)]
+mod overlay_hit_tests {
+    //! A click lands on what is drawn under it: a transformed box where it
+    //! is painted, and a fixed box wherever the window puts it, even
+    //! outside its fixed ancestor's box (consent dialogs, 2026-10-21).
+    use super::*;
+    use rustkit_css::{TransformList, TransformOp};
+
+    fn boxed(node: usize, x: f32, y: f32, w: f32, h: f32) -> LayoutBox {
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        b.dimensions.content = Rect::new(x, y, w, h);
+        b.node_id = Some(node);
+        b
+    }
+
+    fn page() -> LayoutBox {
+        boxed(1, 0.0, 0.0, 800.0, 600.0)
+    }
+
+    #[test]
+    fn a_translated_box_is_hit_where_it_is_painted() {
+        // `top: 50%; left: 50%; transform: translate(-50%, -50%)`.
+        let mut root = page();
+        let mut dialog = boxed(2, 400.0, 300.0, 400.0, 200.0);
+        dialog.position = Position::Fixed;
+        dialog.style.transform = TransformList {
+            ops: vec![TransformOp::Translate(Length::Percent(-50.0), Length::Percent(-50.0))],
+        };
+        dialog.children.push(boxed(3, 420.0, 440.0, 120.0, 40.0));
+        root.children.push(dialog);
+
+        let at = |x, y| root.hit_test_scrolled(x, y, (0.0, 0.0)).and_then(|h| h.node_id);
+        // The button is painted at (220, 340)..(340, 380).
+        assert_eq!(at(280.0, 360.0), Some(3));
+        // Where it is laid out, nothing of the dialog is drawn.
+        assert_eq!(at(480.0, 460.0), Some(1));
+        // The same with the paths the engine keeps.
+        let held = root.held_fixed_paths();
+        assert_eq!(
+            root.hit_test_scrolled_with(280.0, 360.0, (0.0, 0.0), &held).and_then(|h| h.node_id),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn hit_test_all_finds_a_translated_box_where_it_is_painted() {
+        let mut root = page();
+        let mut moved = boxed(2, 400.0, 300.0, 100.0, 100.0);
+        moved.style.transform = TransformList {
+            ops: vec![TransformOp::Translate(Length::Px(-300.0), Length::Px(-200.0))],
+        };
+        root.children.push(moved);
+        let nodes = |x, y| root.hit_test_all(x, y).iter().map(|h| h.node_id).collect::<Vec<_>>();
+        assert_eq!(nodes(150.0, 150.0), vec![Some(1), Some(2)]);
+        assert_eq!(nodes(450.0, 350.0), vec![Some(1)]);
+    }
+
+    #[test]
+    fn a_box_scaled_to_nothing_is_not_hit() {
+        let mut root = page();
+        let mut gone = boxed(2, 0.0, 0.0, 200.0, 200.0);
+        gone.style.transform = TransformList { ops: vec![TransformOp::Scale(0.0, 0.0)] };
+        root.children.push(gone);
+        assert_eq!(root.hit_test(50.0, 50.0).and_then(|h| h.node_id), Some(1));
+    }
+
+    #[test]
+    fn a_fixed_box_in_a_zero_size_fixed_box_is_hit() {
+        let mut root = page();
+        let mut container = boxed(2, 0.0, 100.0, 0.0, 0.0);
+        container.position = Position::Fixed;
+        container.z_index = 10;
+        let mut overlay = boxed(3, 0.0, 0.0, 800.0, 600.0);
+        overlay.position = Position::Fixed;
+        overlay.children.push(boxed(4, 300.0, 280.0, 120.0, 40.0));
+        container.children.push(overlay);
+        // Page content under the overlay, painted before it.
+        root.children.push(boxed(5, 0.0, 0.0, 800.0, 600.0));
+        root.children.push(container);
+
+        let held = root.held_fixed_paths();
+        assert_eq!(held, vec![vec![1], vec![1, 0]]);
+        for hit in [
+            root.hit_test_scrolled(350.0, 300.0, (0.0, 200.0)),
+            root.hit_test_scrolled_with(350.0, 300.0, (0.0, 200.0), &held),
+        ] {
+            let hit = hit.expect("a hit");
+            assert_eq!(hit.node_id, Some(4));
+            assert!(hit.viewport_fixed);
+            // Its path runs through the overlay and the container.
+            assert_eq!(hit.ancestors.len(), 3);
+        }
+        // Elsewhere on the overlay: the overlay, not the page under it.
+        assert_eq!(root.hit_test_scrolled(10.0, 10.0, (0.0, 0.0)).and_then(|h| h.node_id), Some(3));
     }
 }

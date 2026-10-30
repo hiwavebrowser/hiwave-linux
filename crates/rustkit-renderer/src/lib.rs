@@ -43,12 +43,18 @@
 use bytemuck::{Pod, Zeroable};
 use hashbrown::HashMap;
 use rustkit_css::Color;
-use rustkit_layout::{BackgroundRepeat, BackgroundSize, DisplayCommand, Rect};
+use rustkit_layout::{BackgroundRepeat, BackgroundSize, DisplayCommand, ObjectFit, Rect};
 use std::sync::Arc;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 pub mod dither;
+mod cull;
+mod frame_stats;
+mod glyph_grid;
+#[cfg(test)]
+mod scroll_cost_tests;
+pub use frame_stats::FrameStats;
 mod glyph;
 mod pipeline;
 pub mod screenshot;
@@ -86,8 +92,28 @@ pub enum RendererError {
 
 // ==================== Constants ====================
 
-/// Maximum GPU buffer size (256 MB) - prevents OOM on pathological inputs
+/// Maximum GPU buffer size (256 MB) - prevents OOM on pathological inputs.
+/// A batch past it (or past the device's own limit) is drawn in pieces
+/// (`Renderer::draw_split`), so no page fails the frame.
 const MAX_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
+/// A batch is flushed once one of its buffers reaches this size, which
+/// bounds the memory a frame holds. A single command can still go past it
+/// (2.3 M characters on one line is 294 MB of glyph quads); the draw splits
+/// that.
+const MAX_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+
+fn is_decoration(cmd: &DisplayCommand) -> bool {
+    matches!(cmd, DisplayCommand::TextDecoration { .. })
+}
+
+/// True when the decoration at `commands[i]` belongs to a `Text`: the
+/// first command before it that is not a decoration is text.
+fn follows_text(commands: &[DisplayCommand], i: usize) -> bool {
+    matches!(
+        commands[..i].iter().rev().find(|c| !is_decoration(c)),
+        Some(DisplayCommand::Text { .. })
+    )
+}
 
 // ==================== Vertex Types ====================
 
@@ -170,6 +196,58 @@ pub struct CachedTexture {
     pub height: u32,
 }
 
+/// The screen rect and texture coordinates `[u0, v0, u1, v1]` a replaced
+/// image paints with: `object-fit`/`object-position` (CSS Images 3 §5.5,
+/// §5.6) resolved against the texture's intrinsic size, clipped to the
+/// content box. `cover` therefore crops by UV instead of squashing the
+/// whole texture into the box.
+pub(crate) fn image_paint_quad(
+    content_box: Rect,
+    natural: (u32, u32),
+    object_fit: ObjectFit,
+    object_position: (f32, f32),
+    object_position_offset: (f32, f32),
+) -> Option<(Rect, [f32; 4])> {
+    object_fit.paint_quad(
+        content_box,
+        natural.0 as f32,
+        natural.1 as f32,
+        object_position,
+        object_position_offset,
+    )
+}
+
+/// Shrink an RGBA image so neither side exceeds `limit`, keeping its aspect.
+/// Box filter: each output pixel is the mean of the source pixels it covers.
+/// Returns `(width, height, pixels)`.
+pub(crate) fn downscale_rgba_to_fit(width: u32, height: u32, data: &[u8], limit: u32) -> (u32, u32, Vec<u8>) {
+    let limit = limit.max(1);
+    let scale = (limit as f64 / width as f64).min(limit as f64 / height as f64).min(1.0);
+    let out_w = ((width as f64 * scale).floor() as u32).clamp(1, limit);
+    let out_h = ((height as f64 * scale).floor() as u32).clamp(1, limit);
+    let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
+    for oy in 0..out_h {
+        let y0 = (oy as u64 * height as u64 / out_h as u64) as u32;
+        let y1 = (((oy + 1) as u64 * height as u64 / out_h as u64) as u32).max(y0 + 1).min(height);
+        for ox in 0..out_w {
+            let x0 = (ox as u64 * width as u64 / out_w as u64) as u32;
+            let x1 = (((ox + 1) as u64 * width as u64 / out_w as u64) as u32).max(x0 + 1).min(width);
+            let mut acc = [0u64; 4];
+            for y in y0..y1 {
+                let row = (y as usize * width as usize + x0 as usize) * 4;
+                for px in data[row..row + (x1 - x0) as usize * 4].chunks_exact(4) {
+                    for c in 0..4 {
+                        acc[c] += px[c] as u64;
+                    }
+                }
+            }
+            let n = ((y1 - y0) as u64 * (x1 - x0) as u64).max(1);
+            out.extend(acc.iter().map(|&v| ((v + n / 2) / n) as u8));
+        }
+    }
+    (out_w, out_h, out)
+}
+
 /// Texture cache for images.
 pub struct TextureCache {
     textures: HashMap<String, CachedTexture>,
@@ -208,11 +286,27 @@ impl TextureCache {
         data: &[u8],
     ) -> &CachedTexture {
         if !self.textures.contains_key(key) {
+            // An image larger than the device allows in either direction
+            // (8192 under wgpu's default limits; hulu ships an 11501 px
+            // sprite) is downscaled to fit. `create_texture` would otherwise
+            // raise a validation error that takes the whole page down. The
+            // cache entry keeps the intrinsic size: background sizing reads
+            // it, and drawing samples by UV so the smaller texture is
+            // stretched back over the same rect.
+            let limit = device.limits().max_texture_dimension_2d;
+            let scaled;
+            let (tex_w, tex_h, data) = if width > limit || height > limit {
+                let (w, h, px) = downscale_rgba_to_fit(width, height, data, limit);
+                scaled = px;
+                (w, h, scaled.as_slice())
+            } else {
+                (width, height, data)
+            };
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(key),
                 size: wgpu::Extent3d {
-                    width,
-                    height,
+                    width: tex_w,
+                    height: tex_h,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -237,12 +331,12 @@ impl TextureCache {
                 data,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * width),
-                    rows_per_image: Some(height),
+                    bytes_per_row: Some(4 * tex_w),
+                    rows_per_image: Some(tex_h),
                 },
                 wgpu::Extent3d {
-                    width,
-                    height,
+                    width: tex_w,
+                    height: tex_h,
                     depth_or_array_layers: 1,
                 },
             );
@@ -313,6 +407,10 @@ pub struct Renderer {
     // Blit pipeline for copying RGBA textures (unlike texture_pipeline which treats R as alpha)
     blit_pipeline: wgpu::RenderPipeline,
     color_glyph_pipeline: wgpu::RenderPipeline,
+    // CSS `filter` colour-matrix layer composite
+    filter_matrix_pipeline: pipeline::FilterMatrixPipeline,
+    // Image pipeline: the blit shader composited source-over (straight alpha)
+    image_pipeline: wgpu::RenderPipeline,
     // Blit pipeline for Rgba8Unorm targets (for blitting to filter textures)
     blit_pipeline_rgba: wgpu::RenderPipeline,
 
@@ -362,6 +460,35 @@ pub struct Renderer {
     /// Stack of 2D transform matrices and their origins.
     /// Each entry is (matrix [a,b,c,d,e,f], origin (x,y)).
     transform_stack: Vec<([f32; 6], (f32, f32))>,
+    /// The page's scroll offset, applied while a list is executed (see
+    /// `set_scroll_offset`).
+    scroll_offset: (f32, f32),
+    /// Address and length of the last list `execute` drew, so a test can
+    /// tell the list it handed over was drawn in place and not copied.
+    last_list: (usize, usize),
+    /// Counters of the frame being drawn (see `FrameStats`).
+    stats: FrameStats,
+    submits: frame_stats::SubmitCounter,
+    /// `set_measure`: time the overlap check and count off-screen quads.
+    measure: bool,
+    /// The batched glyph quads, by screen cell, for the overlap check.
+    glyph_grid: glyph_grid::GlyphGrid,
+    /// The largest vertex or index buffer a batch draw creates: the
+    /// device's `max_buffer_size`, at most `MAX_BUFFER_SIZE`. A larger
+    /// batch is drawn in pieces (`draw_split`).
+    max_buffer_bytes: u64,
+    /// A batch is flushed between commands once one of its buffers reaches
+    /// this (`MAX_BATCH_BYTES`; tests lower it).
+    max_batch_bytes: u64,
+    /// Tests: draw without culling and answer the order check by a linear
+    /// scan, the reference the fast path is compared against.
+    #[cfg(test)]
+    reference: bool,
+    /// Open `PushOpacity` scopes on the paths that fade per command.
+    opacity_scopes: OpacityScopes,
+    /// Layer textures for opacity scopes, by nesting depth.
+    opacity_layer_pool: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    opacity_layer_size: (u32, u32),
 
     // Caches
     texture_cache: TextureCache,
@@ -381,6 +508,10 @@ pub struct Renderer {
 
     // Surface format for creating compatible textures
     surface_format: wgpu::TextureFormat,
+    /// What `flush_to` clears to. The page's canvas colour; white until a
+    /// frame sets it. The display list covers the viewport it was laid out
+    /// for, and this colour is what a larger surface shows past that.
+    clear_color: wgpu::Color,
 }
 
 /// A stacking context for z-ordering.
@@ -534,6 +665,21 @@ impl Renderer {
             &texture_bind_group_layout,
         );
 
+        let filter_matrix_pipeline = pipeline::create_filter_matrix_pipeline(
+            &device,
+            surface_format,
+            &uniform_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
+        // Image pipeline: blit shader + source-over blend for straight alpha.
+        let image_pipeline = pipeline::create_image_pipeline(
+            &device,
+            surface_format,
+            &uniform_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
         // Create blit pipeline for Rgba8Unorm targets (blitting to filter textures)
         let blit_pipeline_rgba = pipeline::create_blit_pipeline(
             &device,
@@ -588,6 +734,7 @@ impl Renderer {
             );
         }
         let gpu_gradients_enabled = false;
+        let max_buffer_bytes = device.limits().max_buffer_size.min(MAX_BUFFER_SIZE);
 
         Ok(Self {
             device,
@@ -597,6 +744,8 @@ impl Renderer {
             _texture_pipeline_rgba: texture_pipeline_rgba,
             blit_pipeline,
             color_glyph_pipeline,
+            filter_matrix_pipeline,
+            image_pipeline,
             blit_pipeline_rgba,
             backdrop_filter_pipelines,
             gradient_pipeline,
@@ -620,6 +769,19 @@ impl Renderer {
             clip_pieces: Vec::new(),
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
+            scroll_offset: (0.0, 0.0),
+            last_list: (0, 0),
+            stats: FrameStats::default(),
+            submits: Default::default(),
+            measure: false,
+            glyph_grid: Default::default(),
+            max_buffer_bytes,
+            max_batch_bytes: MAX_BATCH_BYTES,
+            #[cfg(test)]
+            reference: false,
+            opacity_scopes: OpacityScopes::default(),
+            opacity_layer_pool: Vec::new(),
+            opacity_layer_size: (0, 0),
             texture_cache,
             glyph_cache,
             texture_bind_group_layout,
@@ -628,22 +790,19 @@ impl Renderer {
             intermediate_size: (0, 0),
             filter_sampler,
             surface_format,
+            clear_color: wgpu::Color::WHITE,
         })
     }
 
-    /// Validate buffer size to prevent GPU memory exhaustion.
-    /// Returns Ok(size) if size is within limits, Err otherwise.
-    fn validate_buffer_size(&self, size: u64, label: &str) -> Result<u64, RendererError> {
-        if size > MAX_BUFFER_SIZE {
-            tracing::error!(
-                "Buffer '{}' size {} bytes exceeds maximum {} bytes",
-                label,
-                size,
-                MAX_BUFFER_SIZE
-            );
-            return Err(RendererError::BufferTooLarge(size, MAX_BUFFER_SIZE));
-        }
-        Ok(size)
+    /// The colour a frame clears to. The page's canvas, so a surface that
+    /// is wider than the layout shows that colour rather than white.
+    pub fn set_clear_color(&mut self, rgba: [f64; 4]) {
+        self.clear_color = wgpu::Color {
+            r: rgba[0],
+            g: rgba[1],
+            b: rgba[2],
+            a: rgba[3],
+        };
     }
 
     /// Set the viewport size.
@@ -670,7 +829,7 @@ impl Renderer {
                 label: Some("Screenshot Copy Encoder"),
             });
         readback.copy_from_texture(&mut encoder, &texture);
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
 
         let mut pixels = readback
             .read_data_sync(&self.device)
@@ -793,6 +952,8 @@ impl Renderer {
     /// Flush current batched vertices to the target without clearing.
     /// Used for incremental rendering when backdrop filters are present.
     fn flush_batches_to(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
+        self.settle_opacity();
+        self.tally_flush();
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
@@ -829,30 +990,15 @@ impl Renderer {
 
             // Draw solid colors
             if !self.color_vertices.is_empty() {
-                // Validate buffer sizes before allocation
-                let vertex_size = (self.color_vertices.len() * std::mem::size_of::<ColorVertex>()) as u64;
-                let index_size = (self.color_indices.len() * std::mem::size_of::<u32>()) as u64;
-
-                self.validate_buffer_size(vertex_size, "Color Vertex Buffer")?;
-                self.validate_buffer_size(index_size, "Color Index Buffer")?;
-
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.color_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Color",
+                    &self.color_vertices,
+                    &self.color_indices,
+                    0..self.color_indices.len(),
+                );
             }
 
             // Draw images (own textures) between backgrounds and text
@@ -860,38 +1006,23 @@ impl Renderer {
 
             // Draw textured quads
             if !self.texture_vertices.is_empty() {
-                // Validate buffer sizes before allocation
-                let vertex_size = (self.texture_vertices.len() * std::mem::size_of::<TextureVertex>()) as u64;
-                let index_size = (self.texture_indices.len() * std::mem::size_of::<u32>()) as u64;
-
-                self.validate_buffer_size(vertex_size, "Texture Vertex Buffer")?;
-                self.validate_buffer_size(index_size, "Texture Index Buffer")?;
-
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.texture_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 render_pass.set_bind_group(1, self.glyph_cache.bind_group(), &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Texture",
+                    &self.texture_vertices,
+                    &self.texture_indices,
+                    0..self.texture_indices.len(),
+                );
             }
 
             // Color glyphs (emoji) drawn on top via the RGBA atlas + blit pipeline.
             self.draw_color_glyph_batch(&mut render_pass);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
 
         // Clear batches after flushing
         self.color_vertices.clear();
@@ -900,15 +1031,19 @@ impl Renderer {
         self.texture_indices.clear();
         self.color_glyph_vertices.clear();
         self.color_glyph_indices.clear();
+        self.glyph_grid.clear();
         self.image_vertices.clear();
         self.image_indices.clear();
         self.image_runs.clear();
+        self.opacity_scopes.rebase();
         Ok(())
     }
 
     /// Flush batched vertices before rendering a GPU gradient.
     /// This ensures correct z-order: batched content renders before the gradient.
     fn flush_batches_for_gradient(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
+        self.settle_opacity();
+        self.tally_flush();
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
@@ -934,7 +1069,7 @@ impl Renderer {
                         occlusion_query_set: None,
                     });
                 }
-                self.queue.submit(std::iter::once(encoder.finish()));
+                self.submit(encoder);
             }
             return Ok(());
         }
@@ -967,30 +1102,15 @@ impl Renderer {
 
             // Draw solid colors
             if !self.color_vertices.is_empty() {
-                // Validate buffer sizes before allocation
-                let vertex_size = (self.color_vertices.len() * std::mem::size_of::<ColorVertex>()) as u64;
-                let index_size = (self.color_indices.len() * std::mem::size_of::<u32>()) as u64;
-
-                self.validate_buffer_size(vertex_size, "Color Vertex Buffer")?;
-                self.validate_buffer_size(index_size, "Color Index Buffer")?;
-
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.color_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Color",
+                    &self.color_vertices,
+                    &self.color_indices,
+                    0..self.color_indices.len(),
+                );
             }
 
             // Draw images (own textures) between backgrounds and text
@@ -998,38 +1118,23 @@ impl Renderer {
 
             // Draw textured quads
             if !self.texture_vertices.is_empty() {
-                // Validate buffer sizes before allocation
-                let vertex_size = (self.texture_vertices.len() * std::mem::size_of::<TextureVertex>()) as u64;
-                let index_size = (self.texture_indices.len() * std::mem::size_of::<u32>()) as u64;
-
-                self.validate_buffer_size(vertex_size, "Texture Vertex Buffer")?;
-                self.validate_buffer_size(index_size, "Texture Index Buffer")?;
-
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.texture_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 render_pass.set_bind_group(1, self.glyph_cache.bind_group(), &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Texture",
+                    &self.texture_vertices,
+                    &self.texture_indices,
+                    0..self.texture_indices.len(),
+                );
             }
 
             // Color glyphs (emoji) drawn on top via the RGBA atlas + blit pipeline.
             self.draw_color_glyph_batch(&mut render_pass);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
 
         // Clear batches after flushing
         self.color_vertices.clear();
@@ -1038,9 +1143,11 @@ impl Renderer {
         self.texture_indices.clear();
         self.color_glyph_vertices.clear();
         self.color_glyph_indices.clear();
+        self.glyph_grid.clear();
         self.image_vertices.clear();
         self.image_indices.clear();
         self.image_runs.clear();
+        self.opacity_scopes.rebase();
         Ok(())
     }
 
@@ -1133,7 +1240,7 @@ impl Renderer {
             render_pass.draw_indexed(0..6, 0, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
     }
 
     /// Create a bind group for backdrop filter compute shader operations.
@@ -1222,7 +1329,7 @@ impl Renderer {
             pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
     }
 
     /// Run a color filter (grayscale, sepia, brightness) on a texture.
@@ -1271,11 +1378,175 @@ impl Renderer {
             pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
         }
 
+        self.submit(encoder);
+    }
+
+    /// Draw the lists that follow scrolled by `offset`: the list stays in
+    /// document coordinates and the whole of it is drawn inside one
+    /// translate by `-offset`, except a `position: fixed` run
+    /// (`PushViewportFixed` to `PopViewportFixed`), which is drawn inside
+    /// the opposite translate so it stays put in the window. Kept until
+    /// changed, like the viewport size; `(0, 0)` draws the list as it is.
+    ///
+    /// Before this, the engine built that list itself (`scrolled_commands`):
+    /// a copy of every command on every scrolled frame, 2.2M of them on
+    /// the Wikipedia portal.
+    pub fn set_scroll_offset(&mut self, offset: (f32, f32)) {
+        self.scroll_offset = offset;
+    }
+
+    /// Address and length of the last list `execute` drew.
+    pub fn last_executed_list(&self) -> (*const DisplayCommand, usize) {
+        (self.last_list.0 as *const DisplayCommand, self.last_list.1)
+    }
+
+    /// Counters of the last `execute` (see `FrameStats`).
+    pub fn last_frame_stats(&self) -> FrameStats {
+        self.stats
+    }
+
+    /// Turn on the costlier counters of `FrameStats` (overlap time,
+    /// off-screen quads). Off by default.
+    pub fn set_measure(&mut self, on: bool) {
+        self.measure = on;
+    }
+
+    /// True when `cmd` paints nothing inside the viewport where the current
+    /// transform puts it, so it can be skipped (see `cull`).
+    fn culled(&mut self, cmd: &DisplayCommand) -> bool {
+        let out = self.off_screen(cmd);
+        self.stats.culled += out as u64;
+        out
+    }
+
+    /// `culled` without the count.
+    fn off_screen(&self, cmd: &DisplayCommand) -> bool {
+        #[cfg(test)]
+        if self.reference {
+            return false;
+        }
+        let Some(bounds) = cull::paint_bounds(cmd) else {
+            return false;
+        };
+        let (w, h) = (self.viewport_size.0 as f32, self.viewport_size.1 as f32);
+        cull::outside(self.current_transform(), bounds, w, h)
+    }
+
+    /// Whether `commands[i]` must wait for a flush to keep paint order
+    /// (`occludes_batched`), given whether it is culled.
+    ///
+    /// A text decoration is drawn with the batch of the text it follows,
+    /// under that text's glyphs: layout relies on it (an underline below
+    /// the descenders), and no flush ever falls between the two. So the
+    /// decorations after a `Text` are ordered against what was batched
+    /// before it, when the text comes up and whether or not the text itself
+    /// is culled, and not again at the decoration. A decoration that does
+    /// not follow text is ordered like any fill. Either way the answer
+    /// depends only on the list and on what is batched, never on which
+    /// other commands culling dropped.
+    fn order_flush_needed(&mut self, commands: &[DisplayCommand], i: usize, culled: bool) -> bool {
+        let cmd = &commands[i];
+        if is_decoration(cmd) && follows_text(commands, i) {
+            return false;
+        }
+        if !culled && self.occludes_batched(cmd) {
+            return true;
+        }
+        if matches!(cmd, DisplayCommand::Text { .. }) {
+            for d in commands[i + 1..].iter().take_while(|c| is_decoration(c)) {
+                if !self.off_screen(d) && self.occludes_batched(d) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn submit(&self, encoder: wgpu::CommandEncoder) {
+        self.submits.bump();
         self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Count a flush of the batches as they stand, before it clears them.
+    fn tally_flush(&mut self) {
+        if !self.has_batched() {
+            return;
+        }
+        self.stats.batch_flushes += 1;
+        let quads = |n: usize| (n / 4) as u64;
+        self.stats.quads += quads(self.color_vertices.len())
+            + quads(self.texture_vertices.len())
+            + quads(self.color_glyph_vertices.len())
+            + quads(self.image_vertices.len());
+        if self.measure {
+            let (w, h) = (self.viewport_size.0 as f32, self.viewport_size.1 as f32);
+            use frame_stats::offscreen_quads as off;
+            let tex = |v: &TextureVertex| v.position;
+            self.stats.quads_offscreen += off(&self.color_vertices, |v| v.position, w, h)
+                + off(&self.texture_vertices, tex, w, h)
+                + off(&self.color_glyph_vertices, tex, w, h)
+                + off(&self.image_vertices, tex, w, h);
+        }
+    }
+
+    /// The translate a scrolled list is drawn in, as `set_scroll_offset`
+    /// describes it: `sign` -1 for the page, +1 for a fixed run.
+    fn scroll_translate(&mut self, sign: f32) {
+        let (x, y) = self.scroll_offset;
+        self.push_transform([1.0, 0.0, 0.0, 1.0, sign * x, sign * y], (0.0, 0.0));
+    }
+
+    fn scrolled(&self) -> bool {
+        self.scroll_offset != (0.0, 0.0)
     }
 
     /// Execute a display list and render to a target.
     pub fn execute(
+        &mut self,
+        commands: &[DisplayCommand],
+        target: &wgpu::TextureView,
+    ) -> Result<(), RendererError> {
+        self.last_list = (commands.as_ptr() as usize, commands.len());
+        #[cfg(test)]
+        {
+            self.glyph_grid.scan_only = self.reference;
+        }
+        self.stats = FrameStats {
+            commands: commands.len() as u64,
+            ..FrameStats::default()
+        };
+        self.submits.take();
+        let resets = self.glyph_cache.resets();
+        let drawn = self.execute_once(commands, target);
+        self.stats.submits = self.submits.take();
+        drawn?;
+        if self.glyph_cache.resets() == resets {
+            return Ok(());
+        }
+        // The glyph atlas filled up and started over while this frame was
+        // being built. Text batched before that samples the glyphs written
+        // over its own since: "static" over a page opened after others.
+        // Build the frame again: every glyph it needs is now placed after
+        // the reset, as long as one frame's glyphs fit in the atlas.
+        // The stats describe the frame that is shown: the second pass.
+        self.stats = FrameStats {
+            commands: commands.len() as u64,
+            ..FrameStats::default()
+        };
+        let resets = self.glyph_cache.resets();
+        let drawn = self.execute_once(commands, target);
+        self.stats.submits = self.submits.take();
+        drawn?;
+        if self.glyph_cache.resets() != resets {
+            tracing::warn!(
+                commands = commands.len(),
+                "One frame's glyphs do not fit in the glyph atlas: some of its text is drawn wrong"
+            );
+        }
+        Ok(())
+    }
+
+    fn execute_once(
         &mut self,
         commands: &[DisplayCommand],
         target: &wgpu::TextureView,
@@ -1287,6 +1558,7 @@ impl Renderer {
         self.texture_indices.clear();
         self.color_glyph_vertices.clear();
         self.color_glyph_indices.clear();
+        self.glyph_grid.clear();
         self.image_vertices.clear();
         self.image_indices.clear();
         self.image_runs.clear();
@@ -1296,6 +1568,10 @@ impl Renderer {
         self.clip_stack.clear();
         self.stacking_contexts.clear();
         self.transform_stack.clear();
+        self.opacity_scopes.clear();
+        if self.scrolled() {
+            self.scroll_translate(-1.0);
+        }
 
         // Check if there are any blur backdrop filters that need GPU processing
         let has_blur_filters = commands.iter().any(|cmd| {
@@ -1327,15 +1603,63 @@ impl Renderer {
             // painting above in-flow text per CSS 2.1 Appendix E — would be
             // drawn UNDER that text. Flush first so paint follows command
             // order (same discipline as the GPU-gradient path).
-            let mut flushed_mid_stream = false;
-            for cmd in commands {
-                if self.solid_fill_occludes_batched_glyphs(cmd) {
-                    self.flush_batches_to(target, !flushed_mid_stream)?;
-                    flushed_mid_stream = true;
+            //
+            // An opacity scope is drawn into a layer of its own and the
+            // layer is laid over what is under it, faded: the group is
+            // faded as one picture (CSS Color 4 §4), so a child over its
+            // parent's background does not show the background through.
+            // A filter group is a layer the same way, composited through its
+            // colour matrix. Opacity and filter scopes share the budget:
+            // past `MAX_OPACITY_LAYERS` of them in one list, all of them fall
+            // back to `process_command`, which applies each scope to the
+            // vertices batched inside it (see `OpacityScopes`). So does the
+            // backdrop-blur path, which never layers.
+            let layered = commands
+                .iter()
+                .filter(|cmd| {
+                    matches!(cmd, DisplayCommand::PushOpacity(_) | DisplayCommand::PushFilter(_))
+                })
+                .count()
+                <= MAX_OPACITY_LAYERS;
+            let mut cleared = false;
+            let mut layers: Vec<(wgpu::TextureView, LayerEffect)> = Vec::new();
+            for (i, cmd) in commands.iter().enumerate() {
+                if layered {
+                    match cmd {
+                        DisplayCommand::PushOpacity(alpha) => {
+                            let fade = LayerEffect::Fade(alpha.clamp(0.0, 1.0));
+                            self.begin_opacity_layer(target, &mut layers, fade, &mut cleared)?;
+                            continue;
+                        }
+                        DisplayCommand::PushFilter(matrix) => {
+                            let effect = LayerEffect::ColorMatrix(*matrix);
+                            self.begin_opacity_layer(target, &mut layers, effect, &mut cleared)?;
+                            continue;
+                        }
+                        DisplayCommand::PopOpacity | DisplayCommand::PopFilter => {
+                            self.end_opacity_layer(target, &mut layers, &mut cleared)?;
+                            continue;
+                        }
+                        _ => {}
+                    }
                 }
-                self.process_command(cmd);
+                let culled = self.culled(cmd);
+                if self.order_flush_needed(commands, i, culled) {
+                    self.stats.overlap_flushes += 1;
+                    self.flush_mid_stream(target, &layers, &mut cleared)?;
+                } else if !culled && self.batches_full() && !is_decoration(cmd) {
+                    self.flush_mid_stream(target, &layers, &mut cleared)?;
+                }
+                if !culled {
+                    self.process_command(cmd);
+                }
             }
-            if flushed_mid_stream {
+            self.end_scroll_translate();
+            // A list that ends inside a scope still shows what it drew.
+            while !layers.is_empty() {
+                self.end_opacity_layer(target, &mut layers, &mut cleared)?;
+            }
+            if cleared {
                 self.flush_batches_to(target, false)?;
             } else {
                 self.flush_to(target)?;
@@ -1345,41 +1669,87 @@ impl Renderer {
         Ok(())
     }
 
-    /// True when `cmd` is a solid fill whose rect overlaps a glyph quad
-    /// already sitting in the batch — the case where flush order (colors
-    /// before glyphs) would contradict command order. Batched glyph
-    /// positions are already transformed, so the rect's corners get the
-    /// same transform before the overlap test.
-    fn solid_fill_occludes_batched_glyphs(&self, cmd: &DisplayCommand) -> bool {
-        if self.texture_vertices.is_empty() && self.color_glyph_vertices.is_empty() {
+    /// The pop of the page translate `execute_once` pushed, after the
+    /// list's last command (where the old `scrolled_commands` list had it).
+    fn end_scroll_translate(&mut self) {
+        if self.scrolled() {
+            self.pop_transform();
+        }
+    }
+
+    /// True when `cmd` would be drawn under something batched before it
+    /// that it overlaps: a flush draws the color batch, then images, then
+    /// glyphs, then color glyphs, so a fill over batched text or an image,
+    /// or an image over batched text, has to wait for a flush to land on
+    /// top (CSS 2.1 Appendix E puts positioned boxes over in-flow text).
+    /// `cull::order_probe` says which batches count and where `cmd` paints.
+    /// Batched positions are already transformed, so the rect's corners get
+    /// the same transform before the overlap test.
+    ///
+    /// The batched quads are looked up in `glyph_grid` rather than scanned:
+    /// the scan compared every fill with every glyph batched since the last
+    /// flush, 1.3 billion comparisons and 10 s for a 20,000-command table
+    /// on lavapipe (`scroll_cost_tests`). The answer is the same.
+    fn occludes_batched(&mut self, cmd: &DisplayCommand) -> bool {
+        match cull::order_probe(cmd) {
+            Some((from, rect)) => self.probe_occludes_batched(from, rect),
+            None => false,
+        }
+    }
+
+    fn probe_occludes_batched(&mut self, from: glyph_grid::Batch, rect: Option<Rect>) -> bool {
+        if self.texture_vertices.is_empty()
+            && self.color_glyph_vertices.is_empty()
+            && self.image_vertices.is_empty()
+        {
             return false;
         }
-        let rect = match cmd {
-            DisplayCommand::SolidColor(color, rect) if color.a > 0.0 => rect,
-            DisplayCommand::RoundedRect { color, rect, .. } if color.a > 0.0 => rect,
-            _ => return false,
-        };
-        let (ax, ay) = self.transform_point(rect.x, rect.y);
-        let (bx, by) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
-        let (rx0, rx1) = (ax.min(bx), ax.max(bx));
-        let (ry0, ry1) = (ay.min(by), ay.max(by));
-
-        let overlaps = |verts: &[TextureVertex]| {
-            verts.chunks_exact(4).any(|quad| {
-                let mut qx0 = f32::MAX;
-                let mut qy0 = f32::MAX;
-                let mut qx1 = f32::MIN;
-                let mut qy1 = f32::MIN;
-                for v in quad {
-                    qx0 = qx0.min(v.position[0]);
-                    qy0 = qy0.min(v.position[1]);
-                    qx1 = qx1.max(v.position[0]);
-                    qy1 = qy1.max(v.position[1]);
+        let started = self.measure.then(std::time::Instant::now);
+        use glyph_grid::Batch;
+        self.glyph_grid.extend(Batch::Image, &self.image_vertices, |v| v.position);
+        self.glyph_grid.extend(Batch::Glyph, &self.texture_vertices, |v| v.position);
+        self.glyph_grid.extend(Batch::ColorGlyph, &self.color_glyph_vertices, |v| v.position);
+        let mut compared = 0u64;
+        let hit = match rect {
+            Some(rect) => {
+                let m = self.current_transform();
+                let map = |x: f32, y: f32| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+                let (x1, y1) = (rect.x + rect.width, rect.y + rect.height);
+                let corners = [map(rect.x, rect.y), map(x1, rect.y), map(rect.x, y1), map(x1, y1)];
+                let mut r = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                for (x, y) in corners {
+                    r = [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)];
                 }
-                rx0 < qx1 && rx1 > qx0 && ry0 < qy1 && ry1 > qy0
-            })
+                self.glyph_grid.overlaps(r, from, &mut compared)
+            }
+            None => self.glyph_grid.any_from(from),
         };
-        overlaps(&self.texture_vertices) || overlaps(&self.color_glyph_vertices)
+        self.stats.overlap_checks += 1;
+        self.stats.overlap_comparisons += compared;
+        if let Some(started) = started {
+            self.stats.overlap_ns += started.elapsed().as_nanos() as u64;
+        }
+        hit
+    }
+
+    /// True when a batch has grown to `max_batch_bytes`: the execute loops
+    /// flush it before the next command rather than build a buffer past
+    /// wgpu's limit (an 80,000-command text page used to panic in
+    /// `flush_to`). Never before a text decoration, which is drawn with
+    /// the batch of the text it follows (see `cull::order_probe`).
+    fn batches_full(&self) -> bool {
+        use std::mem::size_of;
+        let bytes = [
+            self.color_vertices.len() * size_of::<ColorVertex>(),
+            self.texture_vertices.len() * size_of::<TextureVertex>(),
+            self.color_glyph_vertices.len() * size_of::<TextureVertex>(),
+            self.image_vertices.len() * size_of::<TextureVertex>(),
+            self.color_indices.len() * size_of::<u32>(),
+            self.texture_indices.len() * size_of::<u32>(),
+            self.color_glyph_indices.len() * size_of::<u32>(),
+            self.image_indices.len() * size_of::<u32>(),
+        ];
+        bytes.iter().any(|&b| b as u64 >= self.max_batch_bytes)
     }
 
     /// Execute commands with GPU blur support for backdrop filters.
@@ -1394,7 +1764,7 @@ impl Renderer {
 
         let mut is_first_flush = true;
 
-        for cmd in commands {
+        for (i, cmd) in commands.iter().enumerate() {
             // Check if this is a blur backdrop filter
             if let DisplayCommand::BackdropFilter {
                 rect,
@@ -1414,9 +1784,24 @@ impl Renderer {
                 }
             }
 
-            // Process command normally (including non-blur backdrop filters)
-            self.process_command(cmd);
+            // Process command normally (including non-blur backdrop filters).
+            // The order check as in the fast path: a flush for the size cap
+            // falls wherever culling leaves the batch full, so paint order
+            // must not depend on where flushes fall.
+            let culled = self.culled(cmd);
+            if self.order_flush_needed(commands, i, culled) {
+                self.stats.overlap_flushes += 1;
+                self.flush_batches_to(&intermediate_view, is_first_flush)?;
+                is_first_flush = false;
+            } else if !culled && self.batches_full() && !is_decoration(cmd) {
+                self.flush_batches_to(&intermediate_view, is_first_flush)?;
+                is_first_flush = false;
+            }
+            if !culled {
+                self.process_command(cmd);
+            }
         }
+        self.end_scroll_translate();
 
         // Flush remaining batches to intermediate
         if !self.color_vertices.is_empty()
@@ -1443,7 +1828,7 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         let mut is_first_flush = true;
 
-        for cmd in commands {
+        for (i, cmd) in commands.iter().enumerate() {
             // Check if this is a GPU gradient command
             let is_gpu_gradient = matches!(cmd,
                 DisplayCommand::LinearGradient { .. } |
@@ -1460,10 +1845,23 @@ impl Renderer {
                 // Render the gradient directly (inline, not queued)
                 self.render_gpu_gradient_inline(cmd, target);
             } else {
-                // Process command normally (batched)
-                self.process_command(cmd);
+                // Process command normally (batched), ordered as in the
+                // blur path.
+                let culled = self.culled(cmd);
+                if self.order_flush_needed(commands, i, culled) {
+                    self.stats.overlap_flushes += 1;
+                    self.flush_batches_for_gradient(target, is_first_flush)?;
+                    is_first_flush = false;
+                } else if !culled && self.batches_full() && !is_decoration(cmd) {
+                    self.flush_batches_for_gradient(target, is_first_flush)?;
+                    is_first_flush = false;
+                }
+                if !culled {
+                    self.process_command(cmd);
+                }
             }
         }
+        self.end_scroll_translate();
 
         // Flush any remaining batched content
         if !self.color_vertices.is_empty()
@@ -1856,7 +2254,7 @@ impl Renderer {
             render_pass.draw_indexed(0..6, 0, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
     }
 
     /// Apply GPU Gaussian blur to a region of the intermediate texture.
@@ -1888,6 +2286,239 @@ impl Renderer {
 
         // Draw the blurred result back to the render target at the specified rect
         self.draw_filtered_texture_to(&filter_view_a, render_target, rect);
+    }
+
+    fn has_batched(&self) -> bool {
+        !(self.color_vertices.is_empty()
+            && self.texture_vertices.is_empty()
+            && self.image_vertices.is_empty()
+            && self.color_glyph_vertices.is_empty())
+    }
+
+    /// Draw the batches now, into the innermost open opacity layer or, with
+    /// none open, into `base` (cleared to the page's white the first time).
+    fn flush_mid_stream(
+        &mut self,
+        base: &wgpu::TextureView,
+        layers: &[(wgpu::TextureView, LayerEffect)],
+        cleared: &mut bool,
+    ) -> Result<(), RendererError> {
+        match layers.last() {
+            Some((layer, _)) => {
+                let layer = layer.clone();
+                self.flush_batches_to(&layer, false)
+            }
+            None => {
+                let had = self.has_batched();
+                self.flush_batches_to(base, !*cleared)?;
+                *cleared |= had;
+                Ok(())
+            }
+        }
+    }
+
+    /// `PushOpacity` / `PushFilter`: what is batched belongs under the
+    /// group, so it is drawn first; then the group draws into a fresh
+    /// transparent layer.
+    fn begin_opacity_layer(
+        &mut self,
+        base: &wgpu::TextureView,
+        layers: &mut Vec<(wgpu::TextureView, LayerEffect)>,
+        effect: LayerEffect,
+        cleared: &mut bool,
+    ) -> Result<(), RendererError> {
+        self.flush_mid_stream(base, layers, cleared)?;
+        let layer = self.opacity_layer_view(layers.len());
+        self.clear_transparent(&layer);
+        layers.push((layer, effect));
+        Ok(())
+    }
+
+    /// `PopOpacity` / `PopFilter`: finish the group's layer and lay it,
+    /// faded or filtered, over the layer below it or over `base`.
+    fn end_opacity_layer(
+        &mut self,
+        base: &wgpu::TextureView,
+        layers: &mut Vec<(wgpu::TextureView, LayerEffect)>,
+        cleared: &mut bool,
+    ) -> Result<(), RendererError> {
+        let Some((layer, effect)) = layers.pop() else {
+            return Ok(());
+        };
+        self.flush_batches_to(&layer, false)?;
+        match layers.last() {
+            Some((below, _)) => self.composite_opacity_layer(&layer, below, effect, false),
+            None => {
+                self.composite_opacity_layer(&layer, base, effect, !*cleared);
+                *cleared = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// The layer texture for the opacity scope at nesting `depth`, the size
+    /// of the viewport and in the surface format so every pipeline draws
+    /// into it. Kept between frames; all are dropped when the size changes.
+    fn opacity_layer_view(&mut self, depth: usize) -> wgpu::TextureView {
+        if self.opacity_layer_size != self.viewport_size {
+            self.opacity_layer_pool.clear();
+            self.opacity_layer_size = self.viewport_size;
+        }
+        while self.opacity_layer_pool.len() <= depth {
+            let (width, height) = self.viewport_size;
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Opacity Layer Texture"),
+                size: wgpu::Extent3d {
+                    width: width.max(1),
+                    height: height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.surface_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.opacity_layer_pool.push((texture, view));
+        }
+        self.opacity_layer_pool[depth].1.clone()
+    }
+
+    fn clear_transparent(&self, target: &wgpu::TextureView) {
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Opacity Layer Clear Encoder"),
+        });
+        {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Opacity Layer Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        self.submit(encoder);
+    }
+
+    /// Lay `layer` over `target`, faded by `alpha` or through a filter's
+    /// colour matrix. Drawing source-over into a transparent layer leaves
+    /// premultiplied colour in it, so a faded layer goes through the
+    /// premultiplied pipeline with every channel scaled, and a filtered one
+    /// through the matrix pipeline, which unpremultiplies first.
+    fn composite_opacity_layer(
+        &self,
+        layer: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        effect: LayerEffect,
+        clear: bool,
+    ) {
+        let (alpha, matrix_bind_group) = match effect {
+            LayerEffect::Fade(alpha) => (alpha, None),
+            LayerEffect::ColorMatrix(m) => {
+                // Rows of the first four columns, then the offsets column.
+                let mut packed = [0.0f32; 20];
+                for row in 0..4 {
+                    packed[row * 4..row * 4 + 4].copy_from_slice(&m[row * 5..row * 5 + 4]);
+                    packed[16 + row] = m[row * 5 + 4];
+                }
+                let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Filter Matrix Buffer"),
+                    contents: bytemuck::cast_slice(&packed),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Filter Matrix Bind Group"),
+                    layout: &self.filter_matrix_pipeline.matrix_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                });
+                (1.0, Some(group))
+            }
+        };
+        let (vw, vh) = self.viewport_size;
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Opacity Layer Bind Group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(layer),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
+                },
+            ],
+        });
+
+        let color = [alpha; 4];
+        let vertices = [
+            TextureVertex { position: [0.0, 0.0], tex_coords: [0.0, 0.0], color },
+            TextureVertex { position: [vw as f32, 0.0], tex_coords: [1.0, 0.0], color },
+            TextureVertex { position: [vw as f32, vh as f32], tex_coords: [1.0, 1.0], color },
+            TextureVertex { position: [0.0, vh as f32], tex_coords: [0.0, 1.0], color },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Opacity Layer Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Opacity Layer Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Opacity Layer Composite Encoder"),
+        });
+        {
+            let load = if clear {
+                wgpu::LoadOp::Clear(wgpu::Color::WHITE)
+            } else {
+                wgpu::LoadOp::Load
+            };
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Opacity Layer Composite Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            match &matrix_bind_group {
+                Some(group) => {
+                    render_pass.set_pipeline(&self.filter_matrix_pipeline.pipeline);
+                    render_pass.set_bind_group(2, group, &[]);
+                }
+                None => render_pass.set_pipeline(&self.color_glyph_pipeline),
+            }
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+        self.submit(encoder);
     }
 
     /// Copy the intermediate texture to the final target.
@@ -1964,7 +2595,7 @@ impl Renderer {
             render_pass.draw_indexed(0..6, 0, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
     }
 
     /// Process a single display command.
@@ -2009,19 +2640,29 @@ impl Renderer {
                 font_style,
                 advances,
                 ascent,
+                run,
             } => {
-                self.draw_text_with_metrics(
-                    text,
-                    *x,
-                    *y,
-                    *color,
-                    *font_size,
-                    font_family,
-                    *font_weight,
-                    *font_style,
-                    advances.as_deref(),
-                    *ascent,
-                );
+                // SHAPED-RUN CONTRACT (S0): a command that carries its run
+                // is painted from the run. The family-list path below is
+                // for commands without one, and for a run whose face the
+                // rasterizer no longer holds.
+                let painted_from_run = run
+                    .as_deref()
+                    .is_some_and(|run| self.draw_glyph_run(run, *x, *y, *color, *ascent));
+                if !painted_from_run {
+                    self.draw_text_with_metrics(
+                        text,
+                        *x,
+                        *y,
+                        *color,
+                        *font_size,
+                        font_family,
+                        *font_weight,
+                        *font_style,
+                        advances.as_deref(),
+                        *ascent,
+                    );
+                }
             }
 
             DisplayCommand::TextDecoration {
@@ -2042,12 +2683,21 @@ impl Renderer {
             DisplayCommand::Image {
                 url,
                 src_rect: _,
-                dest_rect,
-                object_fit: _,
+                dest_rect: _,
+                object_fit,
+                content_box,
+                object_position,
+                object_position_offset,
                 opacity: _,
                 current_color: _,
             } => {
-                self.draw_image(url, *dest_rect);
+                self.draw_image(
+                    url,
+                    *content_box,
+                    *object_fit,
+                    *object_position,
+                    *object_position_offset,
+                );
             }
 
             DisplayCommand::BackgroundImage {
@@ -2055,9 +2705,22 @@ impl Renderer {
                 rect,
                 size,
                 position,
+                offset,
                 repeat,
             } => {
-                self.draw_background_image(url, *rect, size, *position, repeat);
+                self.draw_background_image(url, *rect, size, *position, *offset, repeat);
+            }
+
+            DisplayCommand::MaskedColor {
+                color,
+                url,
+                rect,
+                size,
+                position,
+                offset,
+                repeat,
+            } => {
+                self.draw_masked_color(url, *color, *rect, size, *position, *offset, *repeat);
             }
 
             DisplayCommand::BoxShadow {
@@ -2067,10 +2730,12 @@ impl Renderer {
                 spread_radius,
                 color,
                 rect,
+                border_radius,
                 inset,
             } => {
                 self.draw_box_shadow(
                     *rect,
+                    *border_radius,
                     *offset_x,
                     *offset_y,
                     *blur_radius,
@@ -2111,6 +2776,7 @@ impl Renderer {
                 font_family,
                 font_weight,
                 padding,
+                kind,
             } => {
                 self.draw_text_input(
                     *rect,
@@ -2127,6 +2793,35 @@ impl Renderer {
                     font_family,
                     *font_weight,
                     *padding,
+                    *kind,
+                );
+            }
+
+            DisplayCommand::ListBox {
+                rect,
+                options,
+                selected,
+                row_height,
+                font_size,
+                font_family,
+                font_weight,
+                text_color,
+                background_color,
+                border_color,
+                border_width,
+            } => {
+                self.draw_list_box(
+                    *rect,
+                    options,
+                    selected,
+                    *row_height,
+                    *font_size,
+                    font_family,
+                    *font_weight,
+                    *text_color,
+                    *background_color,
+                    *border_color,
+                    *border_width,
                 );
             }
 
@@ -2224,7 +2919,13 @@ impl Renderer {
             }
 
             DisplayCommand::Line { x1, y1, x2, y2, color, width } => {
-                // Draw as thin rectangle
+                // Draw as thin rectangle, in screen space: the ends go
+                // through the transform on the stack (the page's scroll is
+                // one) and the width grows by its scale.
+                let m = self.current_transform();
+                let (x1, y1) = (m[0] * x1 + m[2] * y1 + m[4], m[1] * x1 + m[3] * y1 + m[5]);
+                let (x2, y2) = (m[0] * x2 + m[2] * y2 + m[4], m[1] * x2 + m[3] * y2 + m[5]);
+                let width = width * (m[0] * m[3] - m[1] * m[2]).abs().sqrt();
                 let dx = x2 - x1;
                 let dy = y2 - y1;
                 let len = (dx * dx + dy * dy).sqrt();
@@ -2277,10 +2978,13 @@ impl Renderer {
                         color.a,
                     ];
                     
+                    // One matrix for the whole polygon: a path is flattened
+                    // into many of these.
+                    let m = self.current_transform();
                     let base = self.color_vertices.len() as u32;
                     for (x, y) in points {
                         self.color_vertices.push(ColorVertex {
-                            position: [*x, *y],
+                            position: [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]],
                             color: c,
                         });
                     }
@@ -2311,6 +3015,41 @@ impl Renderer {
 
             DisplayCommand::PopTransform => {
                 self.pop_transform();
+            }
+
+            // Reached only off the layered path: past `MAX_OPACITY_LAYERS`
+            // scopes, on the backdrop-blur path and on the GPU-gradient
+            // path. There the scope is applied to each vertex batched inside
+            // it (see `OpacityScopes`), a filter's matrix as well as a fade.
+            DisplayCommand::PushOpacity(alpha) => {
+                let lens = self.batch_lens();
+                self.opacity_scopes.push(LayerEffect::Fade(alpha.clamp(0.0, 1.0)), lens);
+            }
+
+            DisplayCommand::PushFilter(matrix) => {
+                let lens = self.batch_lens();
+                self.opacity_scopes.push(LayerEffect::ColorMatrix(*matrix), lens);
+            }
+
+            // A pop closes the innermost scope of either kind: the display
+            // list nests them, so the two never interleave.
+            DisplayCommand::PopOpacity | DisplayCommand::PopFilter => {
+                if let Some((effect, starts)) = self.opacity_scopes.pop() {
+                    self.apply_since(effect, starts);
+                }
+            }
+
+            // A fixed run undoes the page's scroll (`set_scroll_offset`);
+            // unscrolled, these are marks only.
+            DisplayCommand::PushViewportFixed => {
+                if self.scrolled() {
+                    self.scroll_translate(1.0);
+                }
+            }
+            DisplayCommand::PopViewportFixed => {
+                if self.scrolled() {
+                    self.pop_transform();
+                }
             }
 
             DisplayCommand::GradientText {
@@ -2454,51 +3193,84 @@ impl Renderer {
     }
 
     /// Draw a rounded rectangle using SDF-based rendering.
+    ///
+    /// Each corner is a quarter ellipse `(h, v)`; the interior is painted as
+    /// horizontal bands split wherever a corner starts or ends, so no two
+    /// quads overlap whatever the four corners are (a translucent fill must
+    /// not be painted twice).
     fn draw_rounded_rect(&mut self, rect: Rect, color: Color, radius: rustkit_layout::BorderRadius) {
         // For small radii or very small rects, fall back to solid rect
-        let max_radius = radius.top_left.max(radius.top_right).max(radius.bottom_left).max(radius.bottom_right);
+        let radius = radius.fitted(rect.width, rect.height);
+        let max_radius = radius.top_left.h.max(radius.top_right.h).max(radius.bottom_left.h).max(radius.bottom_right.h);
         if max_radius < 1.0 || rect.width < 4.0 || rect.height < 4.0 {
             self.draw_solid_rect(rect, color);
             return;
         }
 
-        // Clamp radii to half the rect dimensions
-        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
-        let r_tl = radius.top_left.min(max_r);
-        let r_tr = radius.top_right.min(max_r);
-        let r_br = radius.bottom_right.min(max_r);
-        let r_bl = radius.bottom_left.min(max_r);
+        // A corner under one pixel on either axis is painted square: it has
+        // no pixel of its own to antialias.
+        let square_if_tiny = |c: rustkit_layout::CornerRadius| {
+            if c.h < 1.0 || c.v < 1.0 {
+                rustkit_layout::CornerRadius::default()
+            } else {
+                c
+            }
+        };
+        // Quadrant order: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
+        let corners = [
+            square_if_tiny(radius.top_left),
+            square_if_tiny(radius.top_right),
+            square_if_tiny(radius.bottom_right),
+            square_if_tiny(radius.bottom_left),
+        ];
+        let [tl, tr, br, bl] = corners;
 
-        // Draw the interior (non-corner) regions as solid rects for efficiency
-        // Top edge (between corners)
-        if rect.width > r_tl + r_tr {
-            self.draw_solid_rect(
-                Rect::new(rect.x + r_tl, rect.y, rect.width - r_tl - r_tr, r_tl.max(r_tr)),
-                color,
-            );
-        }
-        // Bottom edge (between corners)
-        if rect.width > r_bl + r_br {
-            self.draw_solid_rect(
-                Rect::new(rect.x + r_bl, rect.y + rect.height - r_bl.max(r_br), rect.width - r_bl - r_br, r_bl.max(r_br)),
-                color,
-            );
-        }
-        // Middle section (full width, between top and bottom corner rows)
-        let top_corner_height = r_tl.max(r_tr);
-        let bottom_corner_height = r_bl.max(r_br);
-        if rect.height > top_corner_height + bottom_corner_height {
-            self.draw_solid_rect(
-                Rect::new(rect.x, rect.y + top_corner_height, rect.width, rect.height - top_corner_height - bottom_corner_height),
-                color,
-            );
+        // Interior bands between the corner boxes.
+        let mut cuts = [
+            0.0,
+            tl.v,
+            tr.v,
+            rect.height - bl.v,
+            rect.height - br.v,
+            rect.height,
+        ];
+        cuts.sort_by(|a, b| a.total_cmp(b));
+        for band in cuts.windows(2) {
+            let (y0, y1) = (band[0], band[1]);
+            if y1 <= y0 {
+                continue;
+            }
+            let left = if y1 <= tl.v {
+                tl.h
+            } else if y0 >= rect.height - bl.v {
+                bl.h
+            } else {
+                0.0
+            };
+            let right = if y1 <= tr.v {
+                tr.h
+            } else if y0 >= rect.height - br.v {
+                br.h
+            } else {
+                0.0
+            };
+            if rect.width > left + right {
+                self.draw_solid_rect(
+                    Rect::new(
+                        rect.x + left,
+                        rect.y + y0,
+                        rect.width - left - right,
+                        y1 - y0,
+                    ),
+                    color,
+                );
+            }
         }
 
         // Draw corners using SDF
-        self.draw_rounded_corner(rect.x, rect.y, r_tl, color, 0); // top-left
-        self.draw_rounded_corner(rect.x + rect.width - r_tr, rect.y, r_tr, color, 1); // top-right
-        self.draw_rounded_corner(rect.x + rect.width - r_br, rect.y + rect.height - r_br, r_br, color, 2); // bottom-right
-        self.draw_rounded_corner(rect.x, rect.y + rect.height - r_bl, r_bl, color, 3); // bottom-left
+        for quadrant in 0..4u8 {
+            self.draw_rounded_corner(rect, corners, quadrant, color);
+        }
     }
 
     /// Smoothstep interpolation function matching WGSL's smoothstep.
@@ -2529,81 +3301,70 @@ impl Renderer {
             return 1.0;
         }
 
-        // Clamp radii to half the rect dimensions
-        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
-        let r_tl = radius.top_left.min(max_r);
-        let r_tr = radius.top_right.min(max_r);
-        let r_br = radius.bottom_right.min(max_r);
-        let r_bl = radius.bottom_left.min(max_r);
+        let radius = radius.fitted(rect.width, rect.height);
 
-        // Check each corner
+        // Distance of the point from each of the rect's four edges
         let local_x = px - rect.x;
         let local_y = py - rect.y;
         let right_x = rect.width - local_x;
         let bottom_y = rect.height - local_y;
 
-        // Top-left corner: use smoothstep SDF antialiasing to match GPU shader
-        if local_x < r_tl && local_y < r_tl {
-            let dx = r_tl - local_x;
-            let dy = r_tl - local_y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let sdf = dist - r_tl;
-            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
+        // Each corner the point falls in: smoothstep SDF antialiasing to
+        // match the GPU shader. Two diagonally opposite corners can both
+        // hold the point when their boxes overlap; it must be inside both.
+        let mut coverage = 1.0_f32;
+        for (corner, ex, ey) in [
+            (radius.top_left, local_x, local_y),
+            (radius.top_right, right_x, local_y),
+            (radius.bottom_right, right_x, bottom_y),
+            (radius.bottom_left, local_x, bottom_y),
+        ] {
+            if ex < corner.h && ey < corner.v {
+                let sdf = -ellipse_edge_distance(corner.h - ex, corner.v - ey, corner.h, corner.v);
+                coverage = coverage.min(1.0 - Self::smoothstep(-0.5, 0.5, sdf));
+            }
         }
-
-        // Top-right corner: use smoothstep SDF antialiasing to match GPU shader
-        if right_x < r_tr && local_y < r_tr {
-            let dx = r_tr - right_x;
-            let dy = r_tr - local_y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let sdf = dist - r_tr;
-            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
-        }
-
-        // Bottom-right corner: use smoothstep SDF antialiasing to match GPU shader
-        if right_x < r_br && bottom_y < r_br {
-            let dx = r_br - right_x;
-            let dy = r_br - bottom_y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let sdf = dist - r_br;
-            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
-        }
-
-        // Bottom-left corner: use smoothstep SDF antialiasing to match GPU shader
-        if local_x < r_bl && bottom_y < r_bl {
-            let dx = r_bl - local_x;
-            let dy = r_bl - bottom_y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let sdf = dist - r_bl;
-            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
-        }
-
-        // Inside the rect, not in a corner region
-        1.0
+        coverage
     }
 
-    /// Draw a single rounded corner using pixel-based SDF with anti-aliasing.
-    /// quadrant: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
-    fn draw_rounded_corner(&mut self, x: f32, y: f32, radius: f32, color: Color, quadrant: u8) {
-        if radius < 1.0 {
+    /// Draw one corner of a rounded rect, pixel by pixel, with anti-aliasing.
+    ///
+    /// `corners` are the fitted radii in quadrant order (0=top-left,
+    /// 1=top-right, 2=bottom-right, 3=bottom-left). The corner's box is
+    /// `h` x `v` and its curve is the quarter ellipse centred on the box's
+    /// inner corner.
+    fn draw_rounded_corner(
+        &mut self,
+        rect: Rect,
+        corners: [rustkit_layout::CornerRadius; 4],
+        quadrant: u8,
+        color: Color,
+    ) {
+        let corner = corners[quadrant as usize];
+        if corner.is_zero() {
             return;
         }
+        let (h, v) = (corner.h, corner.v);
+        let (x, y) = corner_box_origin(rect, corner, quadrant);
 
-        // Calculate center of the corner circle
+        // Calculate center of the corner ellipse
         let (cx, cy) = match quadrant {
-            0 => (x + radius, y + radius), // top-left: center is inside
-            1 => (x, y + radius),          // top-right: center is to the left
-            2 => (x, y),                   // bottom-right: center is up-left
-            3 => (x + radius, y),          // bottom-left: center is up
+            0 => (x + h, y + v), // top-left: center is inside
+            1 => (x, y + v),     // top-right: center is to the left
+            2 => (x, y),         // bottom-right: center is up-left
+            3 => (x + h, y),     // bottom-left: center is up
             _ => return,
         };
+        // Only the diagonally opposite corner's box can reach into this one
+        // (adjacent corners are fitted not to).
+        let opposite = (quadrant + 2) % 4;
+        let overlaps_opposite = corner_boxes_overlap(rect, corner, corners[opposite as usize]);
 
         // Draw corner using small rectangles with AA
         let step = 1.0;
-        let mut py = y;
-        while py < y + radius {
-            let mut px = x;
-            while px < x + radius {
+        let columns = corner_cells(x, h, quadrant == 0 || quadrant == 3);
+        for (py, cell_y, cell_h) in corner_cells(y, v, quadrant == 0 || quadrant == 1) {
+            for &(px, cell_x, cell_w) in &columns {
                 // Calculate distance from pixel center to corner center
                 let dx = match quadrant {
                     0 | 3 => cx - (px + step / 2.0), // left corners: measure from right edge
@@ -2613,35 +3374,34 @@ impl Renderer {
                     0 | 1 => cy - (py + step / 2.0), // top corners: measure from bottom edge
                     _ => (py + step / 2.0) - cy,    // bottom corners: measure from top edge
                 };
-                
-                let dist = (dx * dx + dy * dy).sqrt();
-                
+
                 // Use signed distance field for anti-aliasing
                 // Distance to edge (positive = inside, negative = outside)
-                let signed_dist = radius - dist;
-                
-                if signed_dist >= 1.0 {
-                    // Fully inside
-                    self.draw_solid_rect(Rect::new(px, py, step, step), color);
-                } else if signed_dist > -1.0 {
-                    // Edge pixel - apply anti-aliasing
-                    // Coverage is 0.5 + signed_dist * 0.5 (clamped to 0-1)
-                    let coverage = (signed_dist * 0.5 + 0.5).clamp(0.0, 1.0);
-                    if coverage > 0.01 {
-                        let aa_color = Color::new(
-                            color.r,
-                            color.g,
-                            color.b,
-                            color.a * coverage,
-                        );
-                        self.draw_solid_rect(Rect::new(px, py, step, step), aa_color);
+                let signed_dist = ellipse_edge_distance(dx, dy, h, v);
+                let mut coverage = corner_coverage(signed_dist);
+
+                if overlaps_opposite {
+                    let (pcx, pcy) = (px + step / 2.0, py + step / 2.0);
+                    match corner_distance_at(rect, corners[opposite as usize], opposite, pcx, pcy) {
+                        // The pixel is in both boxes. The lower quadrant
+                        // paints it, with the smaller of the two coverages.
+                        Some(_) if opposite < quadrant => coverage = 0.0,
+                        Some(other) => coverage = coverage.min(corner_coverage(other)),
+                        None => {}
                     }
                 }
+
+                let cell = Rect::new(cell_x, cell_y, cell_w, cell_h);
+                if coverage >= 1.0 {
+                    // Fully inside
+                    self.draw_solid_rect(cell, color);
+                } else if coverage > 0.01 {
+                    // Edge pixel - apply anti-aliasing
+                    let aa_color = Color::new(color.r, color.g, color.b, color.a * coverage);
+                    self.draw_solid_rect(cell, aa_color);
+                }
                 // else: outside, don't draw
-                
-                px += step;
             }
-            py += step;
         }
     }
 
@@ -2825,13 +3585,13 @@ impl Renderer {
     
     /// Draw solid borders whose corners are rounded.
     ///
-    /// `widths`/`colors` are `[top, right, bottom, left]`. Radii are clamped
-    /// exactly as `draw_rounded_rect` clamps the background, so the ring and
+    /// `widths`/`colors` are `[top, right, bottom, left]`. Radii are fitted
+    /// exactly as `draw_rounded_rect` fits the background, so the ring and
     /// the fill it sits on share one outer curve. Each corner box is
     /// `max(radius, side width)` on each axis and is painted per pixel:
-    /// coverage = outer curve − inner (padding-edge) curve, where the inner
-    /// curve is the ellipse `(r − vertical width, r − horizontal width)`
-    /// about the same centre (CSS Backgrounds 3 §5.2), square when either
+    /// coverage = outer curve − inner (padding-edge) curve, where the outer
+    /// curve is the corner's ellipse `(h, v)` and the inner one the ellipse
+    /// `(h − vertical width, v − horizontal width)` about the same centre (CSS Backgrounds 3 §5.2), square when either
     /// is ≤ 0. Between corner boxes each side is a plain strip. A corner
     /// pixel takes the colour of the side on its half of the line from the
     /// outer corner to the inner corner.
@@ -2858,20 +3618,22 @@ impl Renderer {
             return;
         }
 
-        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
+        let radius = radius.fitted(rect.width, rect.height);
         let half_w = rect.width / 2.0;
         let half_h = rect.height / 2.0;
-        // (radius, vertical side width, horizontal side width,
+        // (radii, vertical side width, horizontal side width,
         //  vertical colour, horizontal colour, corner index)
         let corners = [
-            (radius.top_left.min(max_r), l, t, colors[3], colors[0], 0u8),
-            (radius.top_right.min(max_r), r, t, colors[1], colors[0], 1u8),
-            (radius.bottom_right.min(max_r), r, b, colors[1], colors[2], 2u8),
-            (radius.bottom_left.min(max_r), l, b, colors[3], colors[2], 3u8),
+            (radius.top_left, l, t, colors[3], colors[0], 0u8),
+            (radius.top_right, r, t, colors[1], colors[0], 1u8),
+            (radius.bottom_right, r, b, colors[1], colors[2], 2u8),
+            (radius.bottom_left, l, b, colors[3], colors[2], 3u8),
         ];
-        // Corner box extents: width along x, height along y.
-        let cw = |rad: f32, vw: f32| rad.max(vw).min(half_w);
-        let ch = |rad: f32, hw: f32| rad.max(hw).min(half_h);
+        // Corner box extents: width along x, height along y. A side wider
+        // than half the box stops at the middle; a fitted radius is already
+        // kept clear of its neighbour.
+        let cw = |rad: rustkit_layout::CornerRadius, vw: f32| rad.h.max(vw.min(half_w));
+        let ch = |rad: rustkit_layout::CornerRadius, hw: f32| rad.v.max(hw.min(half_h));
         let (tl_w, tl_h) = (cw(corners[0].0, l), ch(corners[0].0, t));
         let (tr_w, tr_h) = (cw(corners[1].0, r), ch(corners[1].0, t));
         let (br_w, br_h) = (cw(corners[2].0, r), ch(corners[2].0, b));
@@ -2912,26 +3674,23 @@ impl Renderer {
             }
             let box_x = if q == 0 || q == 3 { rect.x } else { right - bw };
             let box_y = if q == 0 || q == 1 { rect.y } else { bottom - bh };
-            let (rx, ry) = (rad - vw, rad - hw);
-            let mut py = box_y;
-            while py < box_y + bh - 0.001 {
-                let ph = (box_y + bh - py).min(1.0);
-                let mut px = box_x;
-                while px < box_x + bw - 0.001 {
-                    let pw = (box_x + bw - px).min(1.0);
+            let (rx, ry) = (rad.h - vw, rad.v - hw);
+            let columns = corner_cells(box_x, bw, q == 0 || q == 3);
+            for (_, py, ph) in corner_cells(box_y, bh, q == 0 || q == 1) {
+                for &(_, px, pw) in &columns {
                     let (cx, cy) = (px + pw * 0.5, py + ph * 0.5);
                     // Distances from the corner's two outer edges.
                     let ex = if q == 0 || q == 3 { cx - rect.x } else { right - cx };
                     let ey = if q == 0 || q == 1 { cy - rect.y } else { bottom - cy };
 
-                    let outer = if rad > 0.0 && ex < rad && ey < rad {
-                        let d = ((rad - ex).powi(2) + (rad - ey).powi(2)).sqrt();
-                        ((rad - d) * 0.5 + 0.5).clamp(0.0, 1.0)
+                    let outer = if !rad.is_zero() && ex < rad.h && ey < rad.v {
+                        let d = ellipse_edge_distance(rad.h - ex, rad.v - ey, rad.h, rad.v);
+                        (d * 0.5 + 0.5).clamp(0.0, 1.0)
                     } else {
                         1.0
                     };
-                    let inner = if rx > 0.0 && ry > 0.0 && ex < rad && ey < rad {
-                        let k = (((rad - ex) / rx).powi(2) + ((rad - ey) / ry).powi(2)).sqrt();
+                    let inner = if rx > 0.0 && ry > 0.0 && ex < rad.h && ey < rad.v {
+                        let k = (((rad.h - ex) / rx).powi(2) + ((rad.v - ey) / ry).powi(2)).sqrt();
                         ((1.0 - k) * rx.min(ry) * 0.5 + 0.5).clamp(0.0, 1.0)
                     } else {
                         (ex - vw + 0.5).clamp(0.0, 1.0) * (ey - hw + 0.5).clamp(0.0, 1.0)
@@ -2947,9 +3706,7 @@ impl Renderer {
                             Color::new(c.r, c.g, c.b, c.a * coverage),
                         );
                     }
-                    px += 1.0;
                 }
-                py += 1.0;
             }
         }
     }
@@ -2960,9 +3717,14 @@ impl Renderer {
     /// - Outer shadows: semi-transparent rectangles with increasing offsets,
     ///   clipped to outside the border box (`outer_shadow_paint_rects`)
     /// - Inset shadows: Draw gradient-like rectangles inside the box
+    ///
+    /// `radius` is the box's border-box corner radii. An outer shadow takes
+    /// its shape from them; an inset shadow does not use them yet.
+    #[allow(clippy::too_many_arguments)]
     fn draw_box_shadow(
         &mut self,
         rect: Rect,
+        radius: rustkit_layout::BorderRadius,
         offset_x: f32,
         offset_y: f32,
         blur_radius: f32,
@@ -2998,7 +3760,15 @@ impl Renderer {
         }
 
         if !inset {
-            for (r, alpha) in Self::outer_shadow_paint_rects(rect, shadow_rect, blur_radius, color.a) {
+            let shadow_radius = radius.spread(spread_radius);
+            for (r, alpha) in Self::outer_shadow_paint_rects(
+                rect,
+                radius,
+                shadow_rect,
+                shadow_radius,
+                blur_radius,
+                color.a,
+            ) {
                 self.draw_solid_rect(r, Color::new(color.r, color.g, color.b, alpha));
             }
             return;
@@ -3038,10 +3808,16 @@ impl Renderer {
     /// is approximated by expanding layers, outermost first. Each layer is
     /// clipped to outside the border box (CSS Backgrounds 3 §7.1), so a
     /// transparent box shows what is behind it, not its own shadow.
-    /// Rounded corners are not modelled: the hole is the square border box.
+    ///
+    /// `box_radius` is the border box's corner radii and `shadow_radius` the
+    /// shadow shape's (the box's, spread). The hole follows the box's curve
+    /// and each layer its own, grown with the layer; a square box gets
+    /// exactly the rects it always did.
     fn outer_shadow_paint_rects(
         border_box: Rect,
+        box_radius: rustkit_layout::BorderRadius,
         shadow_rect: Rect,
+        shadow_radius: rustkit_layout::BorderRadius,
         blur_radius: f32,
         alpha: f32,
     ) -> Vec<(Rect, f32)> {
@@ -3058,15 +3834,20 @@ impl Renderer {
                         shadow_rect.width + expansion * 2.0,
                         shadow_rect.height + expansion * 2.0,
                     ),
+                    shadow_radius.spread(expansion),
                     alpha / (steps as f32 * 1.5),
                 ));
             }
         } else {
-            layers.push((shadow_rect, alpha));
+            layers.push((shadow_rect, shadow_radius, alpha));
         }
         layers
             .into_iter()
-            .flat_map(|(r, a)| Self::rect_minus(r, border_box).into_iter().map(move |p| (p, a)))
+            .flat_map(|(r, radius, a)| {
+                rounded_difference_pieces(r, radius, border_box, box_radius)
+                    .into_iter()
+                    .map(move |(p, coverage)| (p, a * coverage))
+            })
             .collect()
     }
 
@@ -3260,10 +4041,10 @@ impl Renderer {
             repeating: if repeating { 1 } else { 0 },
             repeat_length,
             num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
-            radius_tl: border_radius.top_left,
-            radius_tr: border_radius.top_right,
-            radius_br: border_radius.bottom_right,
-            radius_bl: border_radius.bottom_left,
+            radius_tl: border_radius.top_left.h,
+            radius_tr: border_radius.top_right.h,
+            radius_br: border_radius.bottom_right.h,
+            radius_bl: border_radius.bottom_left.h,
             debug_mode: std::env::var("RUSTKIT_GPU_DEBUG")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
@@ -3352,7 +4133,7 @@ impl Renderer {
             render_pass.draw_indexed(0..6, 0, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
     }
 
     /// Render a linear gradient using the GPU shader with optional clear.
@@ -3393,10 +4174,10 @@ impl Renderer {
             repeating: if repeating { 1 } else { 0 },
             repeat_length,
             num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
-            radius_tl: border_radius.top_left,
-            radius_tr: border_radius.top_right,
-            radius_br: border_radius.bottom_right,
-            radius_bl: border_radius.bottom_left,
+            radius_tl: border_radius.top_left.h,
+            radius_tr: border_radius.top_right.h,
+            radius_br: border_radius.bottom_right.h,
+            radius_bl: border_radius.bottom_left.h,
             // Debug mode: 0=normal, 1=t-value, 2=direction, 3=position, 4=coverage, 5=raw-t
             //            6=first-stop, 7=num-stops, 8=interp-color
             // Set via RUSTKIT_GPU_DEBUG=N environment variable
@@ -3504,7 +4285,7 @@ impl Renderer {
             render_pass.draw_indexed(0..6, 0, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
     }
 
     /// Render a radial gradient using the GPU shader.
@@ -3544,10 +4325,10 @@ impl Renderer {
             repeating: if repeating { 1 } else { 0 },
             repeat_length,
             num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
-            radius_tl: border_radius.top_left,
-            radius_tr: border_radius.top_right,
-            radius_br: border_radius.bottom_right,
-            radius_bl: border_radius.bottom_left,
+            radius_tl: border_radius.top_left.h,
+            radius_tr: border_radius.top_right.h,
+            radius_br: border_radius.bottom_right.h,
+            radius_bl: border_radius.bottom_left.h,
             debug_mode: std::env::var("RUSTKIT_GPU_DEBUG")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
@@ -3635,7 +4416,7 @@ impl Renderer {
             render_pass.draw_indexed(0..6, 0, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
     }
 
     /// Render a conic gradient using the GPU shader.
@@ -3674,10 +4455,10 @@ impl Renderer {
             repeating: if repeating { 1 } else { 0 },
             repeat_length,
             num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
-            radius_tl: border_radius.top_left,
-            radius_tr: border_radius.top_right,
-            radius_br: border_radius.bottom_right,
-            radius_bl: border_radius.bottom_left,
+            radius_tl: border_radius.top_left.h,
+            radius_tr: border_radius.top_right.h,
+            radius_br: border_radius.bottom_right.h,
+            radius_bl: border_radius.bottom_left.h,
             debug_mode: std::env::var("RUSTKIT_GPU_DEBUG")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
@@ -3765,7 +4546,7 @@ impl Renderer {
             render_pass.draw_indexed(0..6, 0, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
     }
 
     /// Draw a linear gradient with optional border-radius clipping.
@@ -4523,7 +5304,10 @@ impl Renderer {
         font_family: &str,
         font_weight: u16,
         padding: [f32; 4],
+        kind: rustkit_layout::TextControlKind,
     ) {
+        let menu_list = kind == rustkit_layout::TextControlKind::MenuList;
+
         // Draw background
         self.draw_solid_rect(rect, background_color);
 
@@ -4550,12 +5334,24 @@ impl Renderer {
         // form_text_seat for what the old formula got wrong).
         let (text_x, text_top, ascent, descent) =
             Self::form_text_seat(rect, border_width, padding, font_family, font_size);
+        // A drop-down's label sits 4px inside its padding edge (Chrome
+        // CfT-148: "Option 1" at border + 4 on a bare select, at border +
+        // padding + 4 on a padded one).
+        let text_x = if menu_list {
+            text_x + MENU_LIST_LABEL_INSET
+        } else {
+            text_x
+        };
 
         let (display_text, display_color) = if value.is_empty() {
             (placeholder, placeholder_color)
         } else {
             (value, text_color)
         };
+
+        if menu_list {
+            self.draw_menu_list_arrow(rect, text_color);
+        }
 
         if !display_text.is_empty() {
             self.draw_text_with_metrics(
@@ -4588,6 +5384,87 @@ impl Renderer {
         }
     }
     
+    /// The drop-down arrow of a `<select>`: a chevron in the control's text
+    /// colour, centred vertically, at a fixed distance from the right edge.
+    /// Chrome CfT-148 measures the same at 13.333px and at 18px with
+    /// `padding: 8px 12px`: about 7.5 wide and 4 tall, its centre 8.75px
+    /// inside the border box, whatever the author padding or font size.
+    fn draw_menu_list_arrow(&mut self, rect: Rect, color: Color) {
+        let (cx, cy) = menu_list_arrow_centre(rect);
+        self.process_command(&DisplayCommand::Polyline {
+            points: vec![(cx - 3.75, cy - 2.0), (cx, cy + 2.0), (cx + 3.75, cy - 2.0)],
+            color,
+            width: 1.75,
+        });
+    }
+
+    /// Draw a list box: the frame, then one row per option, clipped to the
+    /// inside of the frame (a list box with more options than rows scrolls;
+    /// the rows past its height are not painted).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_list_box(
+        &mut self,
+        rect: Rect,
+        options: &[String],
+        selected: &[usize],
+        row_height: f32,
+        font_size: f32,
+        font_family: &str,
+        font_weight: u16,
+        text_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
+    ) {
+        self.draw_solid_rect(rect, background_color);
+        self.draw_border(
+            rect,
+            border_color,
+            border_width,
+            border_width,
+            border_width,
+            border_width,
+        );
+
+        let inner = Rect::new(
+            rect.x + border_width,
+            rect.y + border_width,
+            (rect.width - 2.0 * border_width).max(0.0),
+            (rect.height - 2.0 * border_width).max(0.0),
+        );
+        let (ascent, _descent) = Self::fallback_run_metrics(font_family, font_size);
+        self.push_clip(inner);
+        for (index, label) in options.iter().enumerate() {
+            let row = list_box_row_rect(inner, row_height, index);
+            if row.y >= inner.y + inner.height {
+                break;
+            }
+            // Chrome CfT-148, list box without focus: a selected row is
+            // rgb(206,206,206) with rgb(16,16,16) text.
+            let is_selected = selected.contains(&index);
+            if is_selected {
+                self.draw_solid_rect(row, LIST_BOX_SELECTED_ROW);
+            }
+            self.draw_text_with_metrics(
+                label,
+                row.x + LIST_BOX_OPTION_INSET,
+                row.y,
+                if is_selected {
+                    LIST_BOX_SELECTED_TEXT
+                } else {
+                    text_color
+                },
+                font_size,
+                font_family,
+                font_weight,
+                0,
+                None,
+                Some(ascent),
+            );
+        }
+        self.pop_clip();
+    }
+
     /// Draw a button.
     #[allow(clippy::too_many_arguments)]
     fn draw_button(
@@ -4799,6 +5676,7 @@ impl Renderer {
 
         let mut cursor_x = x;
         let atlas_size = self.glyph_cache.atlas_size() as f32;
+        let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
         // Glyph entries are baseline-relative (ADVANCE CONTRACT): layout's
         // ascent when shipped, one per-run fallback otherwise.
         let baseline = y
@@ -4813,6 +5691,7 @@ impl Renderer {
                 font_size: (font_size * 10.0) as u32,
                 font_weight,
                 font_style,
+                web_face,
             };
 
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
@@ -4935,6 +5814,106 @@ impl Renderer {
         (text_x, text_top, ascent, descent)
     }
 
+    /// Paint a shaped run (SHAPED-RUN CONTRACT, slice S0): the run's glyph
+    /// ids, from the run's face, at the run's advances and offsets. Nothing
+    /// here reads a character or a `font-family` list.
+    ///
+    /// Seating is the family-list path's: the baseline is `y` plus layout's
+    /// ascent, snapped to a whole device row (INTEGER-BASELINE CONTRACT),
+    /// and glyphs are rasterized at phase 0.
+    ///
+    /// Returns `false`, having drawn nothing, when the rasterizer does not
+    /// hold the run's face; the caller then paints the command the old way.
+    fn draw_glyph_run(
+        &mut self,
+        run: &rustkit_layout::GlyphRun,
+        x: f32,
+        y: f32,
+        color: Color,
+        layout_ascent: Option<f32>,
+    ) -> bool {
+        // FROZEN AT 0, as on the character path (GlyphKey::subpixel_phase).
+        let key_for = |glyph_id: u16| RunGlyphKey {
+            face: run.face.id,
+            glyph_id,
+            font_size: (run.font_size * 10.0) as u32,
+            subpixel_phase: 0,
+        };
+
+        // Every glyph's bitmap first, so a missing face is known before a
+        // single quad is emitted.
+        let mut entries = Vec::with_capacity(run.glyphs.len());
+        for glyph in &run.glyphs {
+            match self.glyph_cache.get_or_rasterize_run_glyph(
+                &self.queue,
+                &key_for(glyph.glyph_id),
+                run.font_size,
+            ) {
+                Some(entry) => entries.push(entry),
+                None => return false,
+            }
+        }
+
+        let c = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a,
+        ];
+        let baseline = (y + layout_ascent.unwrap_or(run.ascent)).round();
+        let atlas_size = self.glyph_cache.atlas_size() as f32;
+
+        for ((glyph, pen_x), entry) in run
+            .glyphs
+            .iter()
+            .zip(run.pen_positions(x))
+            .zip(entries)
+        {
+            let glyph_x = pen_x + glyph.x_offset + entry.offset[0];
+            let glyph_y = baseline + glyph.y_offset + entry.offset[1];
+            let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
+            let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
+
+            // `overflow: hidden` clips glyphs like everything else.
+            for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                .textured_pieces(
+                    Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                    entry.tex_coords,
+                )
+            {
+                let c = [c[0], c[1], c[2], c[3] * coverage];
+                let base = self.texture_vertices.len() as u32;
+                self.texture_vertices.extend_from_slice(&[
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [tex[0], tex[1]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [tex[2], tex[1]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [tex[2], tex[3]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [tex[0], tex[3]],
+                        color: c,
+                    },
+                ]);
+                self.texture_indices.extend_from_slice(&[
+                    base, base + 1, base + 2,
+                    base, base + 2, base + 3,
+                ]);
+            }
+        }
+        true
+    }
+
     /// Draw text honoring the ADVANCE CONTRACT: when layout ships per-char
     /// advances and an ascent, glyphs are placed at layout's advances and
     /// the baseline sits at y + layout_ascent — the renderer's own advance
@@ -4994,6 +5973,7 @@ impl Renderer {
 
         // Get atlas size before the loop to avoid borrow issues
         let atlas_size = self.glyph_cache.atlas_size() as f32;
+        let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
 
         for (char_idx, ch) in text.chars().enumerate() {
             let (pen_x, subpixel_phase) = glyph::pen_and_phase(cursor_x);
@@ -5004,6 +5984,7 @@ impl Renderer {
                 font_size: (font_size * 10.0) as u32,
                 font_weight,
                 font_style,
+                web_face,
             };
 
             // Color-glyph (emoji) path: paint the real color-bitmap artwork via
@@ -5011,11 +5992,11 @@ impl Renderer {
             // the normal path would tint into a flat blob. Falls through to the
             // grayscale path if the char isn't a color glyph or has no color
             // artwork (e.g. non-macOS).
-            #[cfg(target_os = "macos")]
-            let is_color = rustkit_text::macos::is_emoji(ch);
+            #[cfg(any(target_os = "macos", windows))]
+            let is_color = rustkit_text::is_emoji(ch);
             #[cfg(target_os = "linux")]
             let is_color = rustkit_text::linux::is_emoji(ch);
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
             let is_color = false;
             if is_color {
                 if let Some(entry) =
@@ -5032,30 +6013,30 @@ impl Renderer {
                         .and_then(|a| a.get(char_idx).copied())
                         .unwrap_or(entry.advance);
 
-                    let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) = self
-                        .textured_corners(
+                    for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                        .textured_pieces(
                             Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
                             entry.tex_coords,
                         )
-                    else {
-                        continue;
-                    };
-
-                    // White vertex color: the blit pipeline multiplies, so this
-                    // passes the emoji's own colors through untinted. Preserve
-                    // the run's alpha for opacity/fade.
-                    let cw = [1.0, 1.0, 1.0, color.a];
-                    let base = self.color_glyph_vertices.len() as u32;
-                    self.color_glyph_vertices.extend_from_slice(&[
-                        TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
-                        TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
-                        TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
-                        TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
-                    ]);
-                    self.color_glyph_indices.extend_from_slice(&[
-                        base, base + 1, base + 2,
-                        base, base + 2, base + 3,
-                    ]);
+                    {
+                        // White vertex color: the blit pipeline multiplies, so this
+                        // passes the emoji's own colors through untinted. Preserve
+                        // the run's alpha for opacity/fade. The emoji is
+                        // premultiplied, so a rounded clip's partial coverage
+                        // scales every channel.
+                        let cw = [coverage, coverage, coverage, color.a * coverage];
+                        let base = self.color_glyph_vertices.len() as u32;
+                        self.color_glyph_vertices.extend_from_slice(&[
+                            TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
+                            TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
+                            TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
+                            TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
+                        ]);
+                        self.color_glyph_indices.extend_from_slice(&[
+                            base, base + 1, base + 2,
+                            base, base + 2, base + 3,
+                        ]);
+                    }
                     continue;
                 }
             }
@@ -5089,44 +6070,43 @@ impl Renderer {
                     .unwrap_or(entry.advance);
 
                 // `overflow: hidden` clips glyphs like everything else.
-                let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) = self
-                    .textured_corners(
+                for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                    .textured_pieces(
                         Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
                         entry.tex_coords,
                     )
-                else {
-                    continue;
-                };
+                {
+                    let c = [c[0], c[1], c[2], c[3] * coverage];
+                    let base = self.texture_vertices.len() as u32;
 
-                let base = self.texture_vertices.len() as u32;
+                    self.texture_vertices.extend_from_slice(&[
+                        TextureVertex {
+                            position: [x0, y0],
+                            tex_coords: [tex[0], tex[1]],
+                            color: c,
+                        },
+                        TextureVertex {
+                            position: [x1, y1],
+                            tex_coords: [tex[2], tex[1]],
+                            color: c,
+                        },
+                        TextureVertex {
+                            position: [x2, y2],
+                            tex_coords: [tex[2], tex[3]],
+                            color: c,
+                        },
+                        TextureVertex {
+                            position: [x3, y3],
+                            tex_coords: [tex[0], tex[3]],
+                            color: c,
+                        },
+                    ]);
 
-                self.texture_vertices.extend_from_slice(&[
-                    TextureVertex {
-                        position: [x0, y0],
-                        tex_coords: [tex[0], tex[1]],
-                        color: c,
-                    },
-                    TextureVertex {
-                        position: [x1, y1],
-                        tex_coords: [tex[2], tex[1]],
-                        color: c,
-                    },
-                    TextureVertex {
-                        position: [x2, y2],
-                        tex_coords: [tex[2], tex[3]],
-                        color: c,
-                    },
-                    TextureVertex {
-                        position: [x3, y3],
-                        tex_coords: [tex[0], tex[3]],
-                        color: c,
-                    },
-                ]);
-
-                self.texture_indices.extend_from_slice(&[
-                    base, base + 1, base + 2,
-                    base, base + 2, base + 3,
-                ]);
+                    self.texture_indices.extend_from_slice(&[
+                        base, base + 1, base + 2,
+                        base, base + 2, base + 3,
+                    ]);
+                }
             } else {
                 // Fallback: advance by estimated width (or layout's, if given)
                 cursor_x += layout_advances
@@ -5137,42 +6117,65 @@ impl Renderer {
     }
 
     /// Draw an image.
-    fn draw_image(&mut self, url: &str, rect: Rect) {
-        if self.texture_cache.contains(url) {
-            // `overflow: hidden` clips replaced content like everything else.
-            let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) =
-                self.textured_corners(rect, [0.0, 0.0, 1.0, 1.0])
-            else {
-                return;
-            };
-
+    /// Draw an `<img>`-style replaced image into its content box, fitted
+    /// per `object-fit`/`object-position` against the texture's intrinsic
+    /// size (layout may only have had a placeholder size).
+    fn draw_image(
+        &mut self,
+        url: &str,
+        content_box: Rect,
+        object_fit: ObjectFit,
+        object_position: (f32, f32),
+        object_position_offset: (f32, f32),
+    ) {
+        let Some(natural) = self
+            .texture_cache
+            .get(url)
+            .map(|cached| (cached.width, cached.height))
+        else {
+            // If image not loaded, skip (async loading handled elsewhere)
+            return;
+        };
+        let Some((rect, uv)) = image_paint_quad(
+            content_box,
+            natural,
+            object_fit,
+            object_position,
+            object_position_offset,
+        ) else {
+            return;
+        };
+        // `overflow: hidden` clips replaced content like everything else.
+        for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in
+            self.textured_pieces(rect, uv)
+        {
+            let color = [1.0, 1.0, 1.0, coverage];
             self.push_image_quad(
                 url,
                 [
                     TextureVertex {
                         position: [x0, y0],
                         tex_coords: [tex[0], tex[1]],
-                        color: [1.0, 1.0, 1.0, 1.0],
+                        color,
                     },
                     TextureVertex {
                         position: [x1, y1],
                         tex_coords: [tex[2], tex[1]],
-                        color: [1.0, 1.0, 1.0, 1.0],
+                        color,
                     },
                     TextureVertex {
                         position: [x2, y2],
                         tex_coords: [tex[2], tex[3]],
-                        color: [1.0, 1.0, 1.0, 1.0],
+                        color,
                     },
                     TextureVertex {
                         position: [x3, y3],
                         tex_coords: [tex[0], tex[3]],
-                        color: [1.0, 1.0, 1.0, 1.0],
+                        color,
                     },
                 ],
             );
         }
-        // If image not loaded, skip (async loading handled elsewhere)
     }
 
     /// Append a quad to the image batch, extending the current run when the
@@ -5198,6 +6201,7 @@ impl Renderer {
         container: Rect,
         size: &BackgroundSize,
         position: (f32, f32),
+        offset: (f32, f32),
         repeat: &BackgroundRepeat,
     ) {
         // Get the texture to retrieve image dimensions
@@ -5212,195 +6216,105 @@ impl Renderer {
             return;
         }
 
-        // Calculate the background image size based on size property
-        let (bg_width, bg_height) = size.compute_size(container, image_width, image_height);
-
-        if bg_width == 0.0 || bg_height == 0.0 {
-            return;
-        }
-
-        // Calculate the starting position based on position property
-        let mut start_x = container.x + (container.width - bg_width) * position.0;
-        let mut start_y = container.y + (container.height - bg_height) * position.1;
-
-        // Adjust size and spacing for space/round modes
-        let mut adjusted_bg_width = bg_width;
-        let mut adjusted_bg_height = bg_height;
-        let mut spacing_x = 0.0_f32;
-        let mut spacing_y = 0.0_f32;
-
-        match repeat {
-            BackgroundRepeat::Space => {
-                // Calculate how many full images fit
-                let fit_count_x = (container.width / bg_width).floor().max(1.0);
-                let fit_count_y = (container.height / bg_height).floor().max(1.0);
-
-                // Calculate spacing to evenly distribute
-                if fit_count_x > 1.0 {
-                    let total_image_width = fit_count_x * bg_width;
-                    let remaining_space_x = container.width - total_image_width;
-                    spacing_x = remaining_space_x / (fit_count_x - 1.0);
-                }
-
-                if fit_count_y > 1.0 {
-                    let total_image_height = fit_count_y * bg_height;
-                    let remaining_space_y = container.height - total_image_height;
-                    spacing_y = remaining_space_y / (fit_count_y - 1.0);
-                }
-
-                // Start at container edge for space mode
-                start_x = container.x;
-                start_y = container.y;
-            }
-            BackgroundRepeat::Round => {
-                // Calculate integer repetitions by rounding
-                let repetitions_x = (container.width / bg_width).round().max(1.0);
-                let repetitions_y = (container.height / bg_height).round().max(1.0);
-
-                // Scale image to fit exactly
-                adjusted_bg_width = container.width / repetitions_x;
-                adjusted_bg_height = container.height / repetitions_y;
-
-                // Start at container edge for round mode
-                start_x = container.x;
-                start_y = container.y;
-            }
-            _ => {}
-        }
-
-        // Determine tiling based on repeat
-        let (tile_x, tile_y) = match repeat {
-            BackgroundRepeat::Repeat => (true, true),
-            BackgroundRepeat::RepeatX => (true, false),
-            BackgroundRepeat::RepeatY => (false, true),
-            BackgroundRepeat::NoRepeat => (false, false),
-            BackgroundRepeat::Space => (true, true),
-            BackgroundRepeat::Round => (true, true),
-        };
-
-        // Generate tile positions
-        if !tile_x && !tile_y {
-            // Single image - draw at the calculated position
-            self.draw_background_image_tile(url, Rect {
-                x: start_x,
-                y: start_y,
-                width: adjusted_bg_width,
-                height: adjusted_bg_height,
-            }, container);
-        } else {
-            // Tiled images
-            let x_start = if tile_x && *repeat != BackgroundRepeat::Space && *repeat != BackgroundRepeat::Round {
-                // Find the leftmost position that's visible (for repeat mode)
-                let tiles_left = ((start_x - container.x) / adjusted_bg_width).ceil() as i32;
-                start_x - (tiles_left as f32 * adjusted_bg_width)
-            } else {
-                start_x
-            };
-
-            let y_start = if tile_y && *repeat != BackgroundRepeat::Space && *repeat != BackgroundRepeat::Round {
-                let tiles_up = ((start_y - container.y) / adjusted_bg_height).ceil() as i32;
-                start_y - (tiles_up as f32 * adjusted_bg_height)
-            } else {
-                start_y
-            };
-
-            let mut y = y_start;
-            while y < container.y + container.height {
-                let mut x = x_start;
-                while x < container.x + container.width {
-                    let tile_rect = Rect {
-                        x,
-                        y,
-                        width: adjusted_bg_width,
-                        height: adjusted_bg_height,
-                    };
-
-                    // Only draw if visible within container
-                    if tile_rect.x + tile_rect.width > container.x
-                        && tile_rect.y + tile_rect.height > container.y
-                        && tile_rect.x < container.x + container.width
-                        && tile_rect.y < container.y + container.height
-                    {
-                        self.draw_background_image_tile(url, tile_rect, container);
-                    }
-
-                    if tile_x {
-                        x += adjusted_bg_width + spacing_x;
-                    } else {
-                        break;
-                    }
-                }
-
-                if tile_y {
-                    y += adjusted_bg_height + spacing_y;
-                } else {
-                    break;
-                }
-            }
+        for (draw_rect, tex) in background_tile_quads(
+            container,
+            size,
+            position,
+            offset,
+            *repeat,
+            image_width,
+            image_height,
+        ) {
+            self.draw_background_image_tile(url, draw_rect, tex, [1.0, 1.0, 1.0, 1.0]);
         }
     }
 
-    /// Draw a single tile of a background image, clipped to the container bounds.
-    fn draw_background_image_tile(&mut self, url: &str, tile_rect: Rect, container: Rect) {
+    /// Paint `color` through the alpha of the mask image at `url`, tiled in
+    /// `container` like a background (CSS Masking 1 §6). The mask texture
+    /// is the image with its colour channels made white (see
+    /// [`mask_alpha_rgba`]): the image pipeline multiplies texel by vertex
+    /// colour, so a white texel of alpha `m` paints `color` at alpha
+    /// `color.a * m`. A vector (SVG) mask never reaches here: the engine
+    /// splices it as recoloured commands.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_masked_color(
+        &mut self,
+        url: &str,
+        color: Color,
+        container: Rect,
+        size: &BackgroundSize,
+        position: (f32, f32),
+        offset: (f32, f32),
+        repeat: BackgroundRepeat,
+    ) {
+        let key = mask_texture_key(url);
+        let (image_width, image_height) = match self.texture_cache.get(&key) {
+            Some(cached) => (cached.width as f32, cached.height as f32),
+            // Not loaded (or not decodable): nothing paints, as Chrome
+            // paints nothing through a mask image that has not loaded.
+            None => return,
+        };
+        if image_width == 0.0 || image_height == 0.0 {
+            return;
+        }
+        let tint = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a,
+        ];
+        for (draw_rect, tex) in background_tile_quads(
+            container,
+            size,
+            position,
+            offset,
+            repeat,
+            image_width,
+            image_height,
+        ) {
+            self.draw_background_image_tile(&key, draw_rect, tex, tint);
+        }
+    }
+
+    /// Draw one tile of a background (or mask) image, already cut to its
+    /// container: `draw_rect` with texture coordinates `tex`, every texel
+    /// multiplied by `tint`.
+    fn draw_background_image_tile(&mut self, url: &str, draw_rect: Rect, tex: [f32; 4], tint: [f32; 4]) {
         if !self.texture_cache.contains(url) {
             return;
         }
 
-        // Clip tile to container bounds
-        let clip_left = (container.x - tile_rect.x).max(0.0);
-        let clip_top = (container.y - tile_rect.y).max(0.0);
-        let clip_right = (tile_rect.x + tile_rect.width - container.x - container.width).max(0.0);
-        let clip_bottom = (tile_rect.y + tile_rect.height - container.y - container.height).max(0.0);
-
-        let draw_rect = Rect {
-            x: tile_rect.x + clip_left,
-            y: tile_rect.y + clip_top,
-            width: tile_rect.width - clip_left - clip_right,
-            height: tile_rect.height - clip_top - clip_bottom,
-        };
-
-        if draw_rect.width <= 0.0 || draw_rect.height <= 0.0 {
-            return;
-        }
-
-        // Calculate texture coordinates for the clipped portion
-        let tex_left = clip_left / tile_rect.width;
-        let tex_top = clip_top / tile_rect.height;
-        let tex_right = 1.0 - clip_right / tile_rect.width;
-        let tex_bottom = 1.0 - clip_bottom / tile_rect.height;
-
         // Then the overflow clip on top of the container clip.
-        let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], [tex_left, tex_top, tex_right, tex_bottom])) =
-            self.textured_corners(draw_rect, [tex_left, tex_top, tex_right, tex_bottom])
-        else {
-            return;
-        };
-
-        self.push_image_quad(
-            url,
-            [
-                TextureVertex {
-                    position: [x0, y0],
-                    tex_coords: [tex_left, tex_top],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x1, y1],
-                    tex_coords: [tex_right, tex_top],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x2, y2],
-                    tex_coords: [tex_right, tex_bottom],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x3, y3],
-                    tex_coords: [tex_left, tex_bottom],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-            ],
-        );
+        for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], [tex_left, tex_top, tex_right, tex_bottom], coverage) in
+            self.textured_pieces(draw_rect, tex)
+        {
+            let color = [tint[0], tint[1], tint[2], tint[3] * coverage];
+            self.push_image_quad(
+                url,
+                [
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [tex_left, tex_top],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [tex_right, tex_top],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [tex_right, tex_bottom],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [tex_left, tex_bottom],
+                        color,
+                    },
+                ],
+            );
+        }
     }
 
     /// Upload an image to the texture cache.
@@ -5434,6 +6348,24 @@ impl Renderer {
         Ok(())
     }
     
+    /// Upload a decoded raster image (RGBA) for use as a mask image: it is
+    /// stored under [`mask_texture_key`] with its colour made white and its
+    /// alpha kept (`mask-mode: alpha`, the initial for an image).
+    pub fn upload_mask_image(
+        &mut self,
+        url: &str,
+        width: u32,
+        height: u32,
+        rgba_data: &[u8],
+    ) -> Result<(), RendererError> {
+        self.upload_image(&mask_texture_key(url), width, height, &mask_alpha_rgba(rgba_data))
+    }
+
+    /// Whether the mask texture for `url` is uploaded.
+    pub fn has_mask_image(&self, url: &str) -> bool {
+        self.texture_cache.contains(&mask_texture_key(url))
+    }
+
     /// Check if an image is already uploaded.
     pub fn has_image(&self, url: &str) -> bool {
         self.texture_cache.contains(url)
@@ -5482,26 +6414,87 @@ impl Renderer {
     /// the surviving part. `None` when nothing survives. One rule for every
     /// textured site so text, images and tiles are clipped under a transform
     /// exactly as color quads are.
-    fn textured_corners(&self, rect: Rect, tex: [f32; 4]) -> Option<([[f32; 2]; 4], [f32; 4])> {
-        let (g, tex, space) = clip_textured_under(self.current_transform(), self.current_clip(), rect, tex)?;
-        let corners = match space {
-            QuadSpace::Screen => [
-                [g.x, g.y],
-                [g.x + g.width, g.y],
-                [g.x + g.width, g.y + g.height],
-                [g.x, g.y + g.height],
-            ],
-            QuadSpace::Document => {
-                let (x0, y0) = self.transform_point(g.x, g.y);
-                let (x1, y1) = self.transform_point(g.x + g.width, g.y);
-                let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
-                let (x3, y3) = self.transform_point(g.x, g.y + g.height);
-                [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
-            }
-        };
-        Some((corners, tex))
+    ///
+    /// A quad that a rounded clip's corner cuts comes back as several
+    /// pieces, each with the coverage its vertices' alpha is to be scaled
+    /// by; any other quad is one piece with coverage 1. Empty when nothing
+    /// survives.
+    fn textured_pieces(&self, rect: Rect, tex: [f32; 4]) -> Vec<([[f32; 2]; 4], [f32; 4], f32)> {
+        let mut pieces = Vec::with_capacity(1);
+        let space = clip_textured_pieces_under(
+            self.current_transform(),
+            self.clip_stack.last(),
+            rect,
+            tex,
+            &mut pieces,
+        );
+        pieces
+            .into_iter()
+            .map(|(g, tex, coverage)| {
+                let corners = match space {
+                    QuadSpace::Screen => [
+                        [g.x, g.y],
+                        [g.x + g.width, g.y],
+                        [g.x + g.width, g.y + g.height],
+                        [g.x, g.y + g.height],
+                    ],
+                    QuadSpace::Document => {
+                        let (x0, y0) = self.transform_point(g.x, g.y);
+                        let (x1, y1) = self.transform_point(g.x + g.width, g.y);
+                        let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
+                        let (x3, y3) = self.transform_point(g.x, g.y + g.height);
+                        [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
+                    }
+                };
+                (corners, tex, coverage)
+            })
+            .collect()
     }
 
+
+    fn batch_lens(&self) -> BatchLens {
+        [
+            self.color_vertices.len(),
+            self.texture_vertices.len(),
+            self.color_glyph_vertices.len(),
+            self.image_vertices.len(),
+        ]
+    }
+
+    /// Apply `effect` to the vertices each batch has gained since `starts`.
+    /// The colour-glyph pipeline blends premultiplied; the others straight.
+    ///
+    /// A fade scales alpha. A filter's matrix runs on the colour of fills
+    /// and glyphs, the colour they paint; for images and colour glyphs the
+    /// vertex colour is a tint over the texture, so only the matrix's alpha
+    /// gain (`opacity()`) is applied there and their pixels stay unfiltered.
+    fn apply_since(&mut self, effect: LayerEffect, starts: BatchLens) {
+        match effect {
+            LayerEffect::Fade(alpha) => {
+                fade_straight(self.color_vertices.iter_mut().map(|v| &mut v.color), starts[0], alpha);
+                fade_straight(self.texture_vertices.iter_mut().map(|v| &mut v.color), starts[1], alpha);
+                fade_premultiplied(self.color_glyph_vertices.iter_mut().map(|v| &mut v.color), starts[2], alpha);
+                fade_straight(self.image_vertices.iter_mut().map(|v| &mut v.color), starts[3], alpha);
+            }
+            LayerEffect::ColorMatrix(m) => {
+                filter_straight(self.color_vertices.iter_mut().map(|v| &mut v.color), starts[0], &m);
+                filter_straight(self.texture_vertices.iter_mut().map(|v| &mut v.color), starts[1], &m);
+                let gain = m[18].clamp(0.0, 1.0);
+                fade_premultiplied(self.color_glyph_vertices.iter_mut().map(|v| &mut v.color), starts[2], gain);
+                fade_straight(self.image_vertices.iter_mut().map(|v| &mut v.color), starts[3], gain);
+            }
+        }
+    }
+
+    /// Apply what the open scopes have batched so far. Called before every
+    /// draw of the batches. Innermost first: a filter inside a filter runs
+    /// on the content before the outer one does.
+    fn settle_opacity(&mut self) {
+        let lens = self.batch_lens();
+        for (effect, starts) in self.opacity_scopes.settle(lens).into_iter().rev() {
+            self.apply_since(effect, starts);
+        }
+    }
 
     /// Push a 2D transform matrix onto the stack.
     fn push_transform(&mut self, matrix: [f32; 6], origin: (f32, f32)) {
@@ -5617,6 +6610,33 @@ impl Renderer {
             return;
         }
 
+        // image_pipeline, not texture_pipeline: the texture shader treats the
+        // sampled R channel as glyph-atlas alpha; the blit shader samples real
+        // RGBA. Not blit_pipeline either: its blend is REPLACE, which paints an
+        // image's transparent texels as their own colour (black, for most PNGs).
+        render_pass.set_pipeline(&self.image_pipeline);
+        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+
+        if !self.fits_one_buffer(&self.image_vertices, &self.image_indices) {
+            // Past the buffer limit: each run in as many draws as it takes.
+            let mut start = 0usize;
+            for (url, count) in &self.image_runs {
+                let end = start + *count as usize;
+                if let Some(cached) = self.texture_cache.get(url) {
+                    render_pass.set_bind_group(1, &cached.bind_group, &[]);
+                    self.draw_split(
+                        render_pass,
+                        "Image",
+                        &self.image_vertices,
+                        &self.image_indices,
+                        start..end.min(self.image_indices.len()),
+                    );
+                }
+                start = end;
+            }
+            return;
+        }
+
         let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Image Vertex Buffer"),
             contents: bytemuck::cast_slice(&self.image_vertices),
@@ -5627,11 +6647,6 @@ impl Renderer {
             contents: bytemuck::cast_slice(&self.image_indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-
-        // blit_pipeline, not texture_pipeline: the texture shader treats the
-        // sampled R channel as glyph-atlas alpha; blit samples real RGBA.
-        render_pass.set_pipeline(&self.blit_pipeline);
-        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
@@ -5645,6 +6660,78 @@ impl Renderer {
         }
     }
 
+    /// True when `verts` and `indices` each fit in one buffer of
+    /// `max_buffer_bytes`.
+    fn fits_one_buffer<V>(&self, verts: &[V], indices: &[u32]) -> bool {
+        let bytes = |n: usize, size: usize| (n as u64).saturating_mul(size as u64);
+        bytes(verts.len(), std::mem::size_of::<V>()) <= self.max_buffer_bytes
+            && bytes(indices.len(), 4) <= self.max_buffer_bytes
+    }
+
+    /// Draw the triangles `indices[range]` of a batch into `pass`, whose
+    /// pipeline and bind groups are set.
+    ///
+    /// A batch that fits takes one vertex and one index buffer. A larger
+    /// one (a page's worth of glyphs can pass 256 MB: 2.3 M characters on
+    /// one line, or 80k lines on screen) is drawn in as many draws as it
+    /// takes, each with buffers of its own slice of the vertices, so no
+    /// buffer passes the device's limit; wgpu would fail the frame with a
+    /// validation error, which panics. The draws go in batch order in the
+    /// same pass, so the pixels are those of one draw.
+    fn draw_split<V: bytemuck::Pod>(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        label: &str,
+        verts: &[V],
+        indices: &[u32],
+        range: std::ops::Range<usize>,
+    ) {
+        let cap = self.max_buffer_bytes as usize;
+        let max_verts = (cap / std::mem::size_of::<V>().max(1)).max(3);
+        let max_indices = (cap / 4 / 3 * 3).max(3);
+        let mut start = range.start;
+        while start + 3 <= range.end {
+            // As many whole triangles as fit, with the vertices they use.
+            let (mut lo, mut hi) = (u32::MAX, 0u32);
+            let mut end = start;
+            while end + 3 <= range.end && end - start < max_indices {
+                let tri = &indices[end..end + 3];
+                let tlo = lo.min(tri[0]).min(tri[1]).min(tri[2]);
+                let thi = hi.max(tri[0]).max(tri[1]).max(tri[2]);
+                if end > start && (thi - tlo) as usize >= max_verts {
+                    break;
+                }
+                (lo, hi) = (tlo, thi);
+                end += 3;
+            }
+            let first = (lo as usize).min(verts.len());
+            let last = (hi as usize).saturating_add(1).min(verts.len());
+            if first < last {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("{label} Vertex Buffer")),
+                    contents: bytemuck::cast_slice(&verts[first..last]),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let rebased: Vec<u32>;
+                let chunk = if lo == 0 {
+                    &indices[start..end]
+                } else {
+                    rebased = indices[start..end].iter().map(|i| i - lo).collect();
+                    &rebased
+                };
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("{label} Index Buffer")),
+                    contents: bytemuck::cast_slice(chunk),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..chunk.len() as u32, 0, 0..1);
+            }
+            start = end;
+        }
+    }
+
     /// Draw the color-glyph (emoji) batch: RGBA quads sampling the color atlas
     /// via the passthrough blit pipeline (blit samples real RGBA; the grayscale
     /// texture pipeline would treat R as alpha and mangle the artwork). Empty on
@@ -5653,22 +6740,16 @@ impl Renderer {
         if self.color_glyph_vertices.is_empty() {
             return;
         }
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Color Glyph Vertex Buffer"),
-            contents: bytemuck::cast_slice(&self.color_glyph_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Color Glyph Index Buffer"),
-            contents: bytemuck::cast_slice(&self.color_glyph_indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
         render_pass.set_pipeline(&self.color_glyph_pipeline);
         render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         render_pass.set_bind_group(1, self.glyph_cache.color_bind_group(), &[]);
-        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.draw_indexed(0..self.color_glyph_indices.len() as u32, 0, 0..1);
+        self.draw_split(
+            render_pass,
+            "Color Glyph",
+            &self.color_glyph_vertices,
+            &self.color_glyph_indices,
+            0..self.color_glyph_indices.len(),
+        );
     }
 
     fn flush_to(&mut self, target: &wgpu::TextureView) -> Result<(), RendererError> {
@@ -5687,13 +6768,7 @@ impl Renderer {
                 a: 1.0,
             }
         } else {
-            // Normal white background
-            wgpu::Color {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            }
+            self.clear_color
         };
 
         // Clear gradient queues (safety measure - they should already be empty)
@@ -5701,6 +6776,9 @@ impl Renderer {
         self.gradient_queue.clear();
         self.radial_gradient_queue.clear();
         self.conic_gradient_queue.clear();
+
+        self.settle_opacity();
+        self.tally_flush();
 
         // Render batched content
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -5753,30 +6831,15 @@ impl Renderer {
 
             // Draw solid colors
             if !self.color_vertices.is_empty() {
-                // Validate buffer sizes before allocation
-                let vertex_size = (self.color_vertices.len() * std::mem::size_of::<ColorVertex>()) as u64;
-                let index_size = (self.color_indices.len() * std::mem::size_of::<u32>()) as u64;
-
-                self.validate_buffer_size(vertex_size, "Color Vertex Buffer")?;
-                self.validate_buffer_size(index_size, "Color Index Buffer")?;
-
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.color_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Color",
+                    &self.color_vertices,
+                    &self.color_indices,
+                    0..self.color_indices.len(),
+                );
             }
 
             // Draw images (own textures) between backgrounds and text
@@ -5784,31 +6847,23 @@ impl Renderer {
 
             // Draw textured quads (glyphs)
             if !self.texture_vertices.is_empty() {
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.texture_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 render_pass.set_bind_group(1, self.glyph_cache.bind_group(), &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Texture",
+                    &self.texture_vertices,
+                    &self.texture_indices,
+                    0..self.texture_indices.len(),
+                );
             }
 
             // Color glyphs (emoji) drawn on top via the RGBA atlas + blit pipeline.
             self.draw_color_glyph_batch(&mut render_pass);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.submit(encoder);
 
         // Note: GPU gradients are now rendered inline via execute_with_gpu_gradients()
         // for correct z-order (gradients render in DOM order, not all-at-end)
@@ -5869,6 +6924,112 @@ struct ClipEntry {
     /// Rounded constraints still in force, outermost first. A point must be
     /// inside every one of them.
     rounded: Vec<(Rect, rustkit_layout::BorderRadius)>,
+}
+
+/// The most opacity scopes one display list may hold and still have each
+/// drawn as a layer of its own: a layer costs a pass over the viewport and
+/// two flushes of the batches.
+const MAX_OPACITY_LAYERS: usize = 256;
+
+/// How many vertices each of the four batches holds, in the order colour,
+/// glyph, colour glyph, image.
+type BatchLens = [usize; 4];
+
+/// How an open layer is laid over what is under it when its scope closes.
+#[derive(Debug, Clone, Copy)]
+enum LayerEffect {
+    /// `PushOpacity`: every channel scaled by the factor.
+    Fade(f32),
+    /// `PushFilter`: a 4x5 row-major colour matrix on unpremultiplied
+    /// colour, clamped (Filter Effects 1 §13).
+    ColorMatrix([f32; 20]),
+}
+
+/// The open `PushOpacity` and `PushFilter` scopes, innermost last, when
+/// they are not drawn as layers.
+///
+/// Draw calls do not know about opacity or filters. A scope remembers where
+/// each batch stood when it opened, and the vertices added since are faded,
+/// or run through the filter's colour matrix, when it closes; scopes nest,
+/// so an inner scope's vertices are processed again by the outer one, which
+/// multiplies fades and composes matrices inner first. A batch flush in the
+/// middle of a scope applies what the scope has added so far
+/// ([`OpacityScopes::settle`]) and the scope carries on from the empty
+/// batches.
+///
+/// Per vertex is exact for opaque content that does not overlap. Where a
+/// translucent part overlaps another inside the group, the group would be
+/// processed as one picture by a layer, and per vertex is an approximation.
+///
+/// Pure for the same reason as [`clip_entry_for`]: no device is needed to
+/// test the bookkeeping.
+#[derive(Debug, Default)]
+struct OpacityScopes {
+    scopes: Vec<(LayerEffect, BatchLens)>,
+}
+
+impl OpacityScopes {
+    fn clear(&mut self) {
+        self.scopes.clear();
+    }
+
+    fn push(&mut self, effect: LayerEffect, lens: BatchLens) {
+        self.scopes.push((effect, lens));
+    }
+
+    /// Close the innermost scope: its effect and where its vertices start.
+    /// `None` for a pop without a push.
+    fn pop(&mut self) -> Option<(LayerEffect, BatchLens)> {
+        self.scopes.pop()
+    }
+
+    /// Before the batches are drawn: every open scope's effect and start,
+    /// outermost first, to be applied now (innermost first). Afterwards each
+    /// scope starts at `lens`, so a second call before the batches are
+    /// emptied applies nothing twice.
+    fn settle(&mut self, lens: BatchLens) -> Vec<(LayerEffect, BatchLens)> {
+        let due = self.scopes.clone();
+        for scope in &mut self.scopes {
+            scope.1 = lens;
+        }
+        due
+    }
+
+    /// After the batches are emptied: every open scope starts at zero.
+    fn rebase(&mut self) {
+        for scope in &mut self.scopes {
+            scope.1 = [0; 4];
+        }
+    }
+}
+
+/// Fade straight-alpha vertex colours from `start` on.
+fn fade_straight<'a>(colors: impl Iterator<Item = &'a mut [f32; 4]>, start: usize, alpha: f32) {
+    for color in colors.skip(start) {
+        color[3] *= alpha;
+    }
+}
+
+/// Run a filter's colour matrix on straight-alpha vertex colours from
+/// `start` on: the 4x5 row-major matrix on unpremultiplied RGBA, clamped,
+/// as `filter_matrix.wgsl` does per pixel (Filter Effects 1 §13).
+fn filter_straight<'a>(colors: impl Iterator<Item = &'a mut [f32; 4]>, start: usize, m: &[f32; 20]) {
+    for color in colors.skip(start) {
+        let c = *color;
+        for (row, out) in color.iter_mut().enumerate() {
+            let r = &m[row * 5..row * 5 + 5];
+            *out = (r[0] * c[0] + r[1] * c[1] + r[2] * c[2] + r[3] * c[3] + r[4]).clamp(0.0, 1.0);
+        }
+    }
+}
+
+/// Fade premultiplied vertex colours from `start` on: all four channels.
+fn fade_premultiplied<'a>(colors: impl Iterator<Item = &'a mut [f32; 4]>, start: usize, alpha: f32) {
+    for color in colors.skip(start) {
+        for channel in color.iter_mut() {
+            *channel *= alpha;
+        }
+    }
 }
 
 /// The clip entry a `PushClip`/`PushClipRounded` produces on top of `current`.
@@ -5965,6 +7126,61 @@ fn invert_matrix_2d(m: [f32; 6]) -> Option<[f32; 6]> {
     Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
 }
 
+/// The texture-cache key a mask image is stored under: the same image
+/// used as a mask and as an ordinary image needs two textures, the mask
+/// one white.
+pub fn mask_texture_key(url: &str) -> String {
+    format!("mask-alpha:{url}")
+}
+
+/// `rgba` (straight alpha, 4 bytes a pixel) as a mask texture: every
+/// colour channel 255, alpha kept. Drawn through the image pipeline
+/// (texel times vertex colour) it paints the vertex colour at the mask's
+/// alpha, which is CSS `mask-mode: alpha`.
+pub fn mask_alpha_rgba(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4).flat_map(|px| [255, 255, 255, px[3]]).collect()
+}
+
+/// The quads a background or mask image paints in `container`: each tile
+/// from [`rustkit_layout::background_tiles`] cut to the container, with
+/// the texture coordinates `[left, top, right, bottom]` of the part kept.
+/// Tiles wholly outside the container are dropped.
+pub fn background_tile_quads(
+    container: Rect,
+    size: &BackgroundSize,
+    position: (f32, f32),
+    offset: (f32, f32),
+    repeat: BackgroundRepeat,
+    image_width: f32,
+    image_height: f32,
+) -> Vec<(Rect, [f32; 4])> {
+    rustkit_layout::background_tiles(container, size, position, offset, repeat, image_width, image_height)
+        .into_iter()
+        .filter_map(|tile| {
+            let clip_left = (container.x - tile.x).max(0.0);
+            let clip_top = (container.y - tile.y).max(0.0);
+            let clip_right = (tile.x + tile.width - container.x - container.width).max(0.0);
+            let clip_bottom = (tile.y + tile.height - container.y - container.height).max(0.0);
+            let draw_rect = Rect {
+                x: tile.x + clip_left,
+                y: tile.y + clip_top,
+                width: tile.width - clip_left - clip_right,
+                height: tile.height - clip_top - clip_bottom,
+            };
+            if draw_rect.width <= 0.0 || draw_rect.height <= 0.0 {
+                return None;
+            }
+            let tex = [
+                clip_left / tile.width,
+                clip_top / tile.height,
+                1.0 - clip_right / tile.width,
+                1.0 - clip_bottom / tile.height,
+            ];
+            Some((draw_rect, tex))
+        })
+        .collect()
+}
+
 /// The clip entry a `PushClip`/`PushClipRounded` issued under transform `m`
 /// produces on top of `current`. The command's `rect` is in document space;
 /// the entry is in screen space, so a clip and the quads drawn under it are
@@ -5984,14 +7200,9 @@ fn clip_entry_under(
     }
     match map_rect_axis_aligned(m, rect) {
         Some(screen) => {
-            let scale = (m[0] * m[3]).abs().sqrt();
-            let radius = rustkit_layout::BorderRadius {
-                top_left: radius.top_left * scale,
-                top_right: radius.top_right * scale,
-                bottom_right: radius.bottom_right * scale,
-                bottom_left: radius.bottom_left * scale,
-            };
-            clip_entry_for(current, screen, radius)
+            // Axis-aligned, so each axis scales its own radii: a circular
+            // corner under a non-uniform scale is an ellipse on screen.
+            clip_entry_for(current, screen, radius.scaled(m[0].abs(), m[3].abs()))
         }
         None => clip_entry_for(current, map_rect_bounds(m, rect), radius),
     }
@@ -6077,8 +7288,7 @@ fn clip_textured_under(
 /// Textured quads used to bypass the clip stack entirely — only color quads
 /// went through `collect_clipped_pieces` — so `overflow: hidden` clipped a
 /// box's background but never its text (n35). The rounded part of the clip
-/// is NOT applied to textured quads: a glyph straddling a rounded corner's
-/// arc keeps its square corner. That is a ledgered residual, not a rule.
+/// is applied on top of this by `clip_textured_pieces_under`.
 fn clip_textured_rect(
     clip: Option<Rect>,
     rect: Rect,
@@ -6129,23 +7339,148 @@ fn collect_clipped_pieces(clip: Option<&ClipEntry>, rect: Rect, out: &mut Vec<(R
     out.extend(clip_quad_to_rounded(rect, rounded));
 }
 
-/// Radii clamped so opposite corners cannot overlap, matching
-/// `point_in_rounded_rect` and `draw_rounded_rect`.
-fn clamped_radii(rect: Rect, radius: rustkit_layout::BorderRadius) -> (f32, f32, f32, f32) {
-    let max_r = (rect.width / 2.0).min(rect.height / 2.0).max(0.0);
-    (
-        radius.top_left.min(max_r).max(0.0),
-        radius.top_right.min(max_r).max(0.0),
-        radius.bottom_right.min(max_r).max(0.0),
-        radius.bottom_left.min(max_r).max(0.0),
-    )
+/// How far inside the ellipse with semi-axes `(h, v)` the point `(dx, dy)`
+/// from its centre lies, in px: positive inside, negative outside.
+///
+/// A circle is exact. An ellipse has no closed-form distance, so it uses the
+/// first-order estimate `(1 - k) / |grad k|` for `k = sqrt((dx/h)^2 +
+/// (dy/v)^2)`, which is exact on the curve and good to a fraction of a pixel
+/// in the one-pixel band the antialiasing reads.
+///
+/// Every rounded rasteriser (fill, border, gradient cells) measures its
+/// corners with this, so they agree on where a corner's edge is.
+fn ellipse_edge_distance(dx: f32, dy: f32, h: f32, v: f32) -> f32 {
+    if h == v {
+        return h - (dx * dx + dy * dy).sqrt();
+    }
+    let (nx, ny) = (dx / h, dy / v);
+    let k = (nx * nx + ny * ny).sqrt();
+    if k <= f32::EPSILON {
+        return h.min(v);
+    }
+    let grad = ((nx / h).powi(2) + (ny / v).powi(2)).sqrt() / k;
+    (1.0 - k) / grad
+}
+
+/// Pixel coverage for a signed distance to a corner's edge: half covered on
+/// the edge, a two-pixel ramp across it.
+fn corner_coverage(signed_dist: f32) -> f32 {
+    if signed_dist >= 1.0 {
+        1.0
+    } else if signed_dist > -1.0 {
+        (signed_dist * 0.5 + 0.5).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// The one-pixel cells a corner box is painted in along one axis, as
+/// `(grid start, drawn start, drawn length)`.
+///
+/// The box runs `len` from `box_start`. Its grid is laid from the rect's
+/// OUTER edge inward (`outer_at_start` says which end that is), so the cell
+/// centres `grid start + 0.5` sit where the straight edge beside the corner
+/// puts its pixels, whatever the radius. Laying it from the box's inner
+/// corner put a right or bottom corner with a fractional radius (`25%` of
+/// 150px) half a pixel off the grid: the pixels along the box's outer edge
+/// were measured on the curve instead of inside it and came out half
+/// transparent, a notch in the side.
+///
+/// The cell that crosses the box's inner end is drawn only up to it; what
+/// is past it belongs to the strip beside the corner. A whole-pixel box
+/// gets whole cells, the same ones from either end.
+fn corner_cells(box_start: f32, len: f32, outer_at_start: bool) -> Vec<(f32, f32, f32)> {
+    let box_end = box_start + len;
+    let mut cells = Vec::new();
+    let mut grid = if outer_at_start {
+        box_start
+    } else {
+        box_start - (len.ceil() - len)
+    };
+    while grid < box_end - 0.001 {
+        let start = grid.max(box_start);
+        let length = (grid + 1.0).min(box_end) - start;
+        if length > 0.0 {
+            cells.push((grid, start, length));
+        }
+        grid += 1.0;
+    }
+    cells
+}
+
+/// Top-left of the `h` x `v` box a corner occupies in `rect`.
+/// quadrant: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
+fn corner_box_origin(rect: Rect, corner: rustkit_layout::CornerRadius, quadrant: u8) -> (f32, f32) {
+    let x = if quadrant == 0 || quadrant == 3 {
+        rect.x
+    } else {
+        rect.x + rect.width - corner.h
+    };
+    let y = if quadrant == 0 || quadrant == 1 {
+        rect.y
+    } else {
+        rect.y + rect.height - corner.v
+    };
+    (x, y)
+}
+
+/// Whether the boxes of two diagonally opposite corners of `rect` overlap.
+/// Fitting keeps adjacent corners apart, not opposite ones: `80px 0` on a
+/// 100px square is a leaf whose two corner boxes share the middle.
+fn corner_boxes_overlap(
+    rect: Rect,
+    a: rustkit_layout::CornerRadius,
+    b: rustkit_layout::CornerRadius,
+) -> bool {
+    !a.is_zero() && !b.is_zero() && a.h + b.h > rect.width && a.v + b.v > rect.height
+}
+
+/// Signed distance of the point `(px, py)` to the edge of `corner`
+/// (`quadrant` of `rect`), or `None` when the point is outside that
+/// corner's box and the corner says nothing about it.
+fn corner_distance_at(
+    rect: Rect,
+    corner: rustkit_layout::CornerRadius,
+    quadrant: u8,
+    px: f32,
+    py: f32,
+) -> Option<f32> {
+    if corner.is_zero() {
+        return None;
+    }
+    let ex = if quadrant == 0 || quadrant == 3 {
+        px - rect.x
+    } else {
+        rect.x + rect.width - px
+    };
+    let ey = if quadrant == 0 || quadrant == 1 {
+        py - rect.y
+    } else {
+        rect.y + rect.height - py
+    };
+    if ex >= corner.h || ey >= corner.v {
+        return None;
+    }
+    Some(ellipse_edge_distance(
+        corner.h - ex,
+        corner.v - ey,
+        corner.h,
+        corner.v,
+    ))
+}
+
+/// How far a corner's arc reaches from its centre line on the row `dy` away
+/// from it: the ellipse's `(h / v) * sqrt(v^2 - dy^2)`.
+fn corner_row_reach(corner: rustkit_layout::CornerRadius, dy: f32) -> f32 {
+    (corner.h / corner.v) * (corner.v * corner.v - dy * dy).max(0.0).sqrt()
 }
 
 /// The horizontal span of a rounded rect at height `y`, or `None` when the row
 /// is outside it entirely.
 ///
-/// Analytic rather than sampled: for a row crossing a corner, the arc gives
-/// `dx = sqrt(r^2 - dy^2)` and the span shrinks by exactly that much. The left
+/// Analytic rather than sampled: for a row crossing a corner, the ellipse
+/// gives `dx = (h / v) * sqrt(v^2 - dy^2)` and the span shrinks by exactly
+/// that much. The left
 /// bound takes the tighter of the two left corners and the right bound the
 /// tighter of the two right ones, so a row crossing both a top-left and a
 /// bottom-left arc is handled without special-casing.
@@ -6153,29 +7488,31 @@ fn rounded_row_span(rect: Rect, radius: rustkit_layout::BorderRadius, y: f32) ->
     if y < rect.y || y > rect.bottom() {
         return None;
     }
-    let (tl, tr, br, bl) = clamped_radii(rect, radius);
+    let radius = radius.fitted(rect.width, rect.height);
+    let (tl, tr, br, bl) = (
+        radius.top_left,
+        radius.top_right,
+        radius.bottom_right,
+        radius.bottom_left,
+    );
     let mut left = rect.x;
     let mut right = rect.right();
 
-    if tl > 0.0 && y < rect.y + tl {
-        let dy = (rect.y + tl) - y;
-        let dx = (tl * tl - dy * dy).max(0.0).sqrt();
-        left = left.max(rect.x + tl - dx);
+    if !tl.is_zero() && y < rect.y + tl.v {
+        let dx = corner_row_reach(tl, (rect.y + tl.v) - y);
+        left = left.max(rect.x + tl.h - dx);
     }
-    if bl > 0.0 && y > rect.bottom() - bl {
-        let dy = y - (rect.bottom() - bl);
-        let dx = (bl * bl - dy * dy).max(0.0).sqrt();
-        left = left.max(rect.x + bl - dx);
+    if !bl.is_zero() && y > rect.bottom() - bl.v {
+        let dx = corner_row_reach(bl, y - (rect.bottom() - bl.v));
+        left = left.max(rect.x + bl.h - dx);
     }
-    if tr > 0.0 && y < rect.y + tr {
-        let dy = (rect.y + tr) - y;
-        let dx = (tr * tr - dy * dy).max(0.0).sqrt();
-        right = right.min(rect.right() - tr + dx);
+    if !tr.is_zero() && y < rect.y + tr.v {
+        let dx = corner_row_reach(tr, (rect.y + tr.v) - y);
+        right = right.min(rect.right() - tr.h + dx);
     }
-    if br > 0.0 && y > rect.bottom() - br {
-        let dy = y - (rect.bottom() - br);
-        let dx = (br * br - dy * dy).max(0.0).sqrt();
-        right = right.min(rect.right() - br + dx);
+    if !br.is_zero() && y > rect.bottom() - br.v {
+        let dx = corner_row_reach(br, y - (rect.bottom() - br.v));
+        right = right.min(rect.right() - br.h + dx);
     }
 
     if right > left {
@@ -6289,16 +7626,17 @@ fn clip_quad_to_rounded(
     let mut top_limit = f32::NEG_INFINITY;
     let mut bottom_limit = f32::INFINITY;
     for (rect, radius) in rounded {
-        let (tl, tr, br, bl) = clamped_radii(*rect, *radius);
-        top_limit = top_limit.max(rect.y + tl.max(tr));
-        bottom_limit = bottom_limit.min(rect.bottom() - bl.max(br));
+        let fitted = radius.fitted(rect.width, rect.height);
+        top_limit = top_limit.max(rect.y + fitted.top_left.v.max(fitted.top_right.v));
+        bottom_limit =
+            bottom_limit.min(rect.bottom() - fitted.bottom_left.v.max(fitted.bottom_right.v));
     }
     if quad.y >= top_limit && quad.bottom() <= bottom_limit {
         return vec![(quad, 1.0)];
     }
 
     let mut out = Vec::new();
-    let mut emit_rows = |out: &mut Vec<(Rect, f32)>, from: f32, to: f32| {
+    let emit_rows = |out: &mut Vec<(Rect, f32)>, from: f32, to: f32| {
         let mut y = from;
         while y < to {
             let height = 1.0_f32.min(to - y);
@@ -6348,6 +7686,226 @@ fn clip_quad_to_rounded(
     out
 }
 
+/// Whether `quad` lies wholly inside every rounded constraint. A rounded rect
+/// is convex, so a quad whose top and bottom edges are both inside it is
+/// inside it everywhere.
+fn quad_inside_rounded(quad: Rect, rounded: &[(Rect, rustkit_layout::BorderRadius)]) -> bool {
+    rounded.iter().all(|(rect, radius)| {
+        [quad.y, quad.bottom()].into_iter().all(|y| {
+            matches!(
+                rounded_row_span(*rect, *radius, y),
+                Some((left, right)) if left <= quad.x && right >= quad.right()
+            )
+        })
+    })
+}
+
+/// A textured quad (glyph, image, background tile) drawn under transform `m`
+/// and cut to `clip`, rounded corners included: each surviving piece with its
+/// texture coordinates and coverage, appended to `out`. The return value says
+/// which space the pieces are in.
+///
+/// The rectangular half is `clip_textured_under`. The rounded half is the
+/// decomposition colour quads get (`clip_quad_to_rounded`), with each piece
+/// taking the texels that were under it, so an `<img>` in a rounded
+/// `overflow: hidden` box (an avatar, a card's cover photo) loses its corners
+/// the way the box's background does. A quad clear of every corner comes back
+/// as the one piece it always was.
+///
+/// Under a rotation or skew only the rectangular part applies, as for colour
+/// quads.
+fn clip_textured_pieces_under(
+    m: [f32; 6],
+    clip: Option<&ClipEntry>,
+    rect: Rect,
+    tex: [f32; 4],
+    out: &mut Vec<(Rect, [f32; 4], f32)>,
+) -> QuadSpace {
+    let Some((quad, tex, space)) = clip_textured_under(m, clip.map(|entry| entry.rect), rect, tex)
+    else {
+        return QuadSpace::Screen;
+    };
+    let rounded = match (space, clip) {
+        (QuadSpace::Screen, Some(entry)) => entry.rounded.as_slice(),
+        _ => &[],
+    };
+    if rounded.is_empty() || quad_inside_rounded(quad, rounded) {
+        out.push((quad, tex, 1.0));
+        return space;
+    }
+
+    let u_per_px = (tex[2] - tex[0]) / quad.width;
+    let v_per_px = (tex[3] - tex[1]) / quad.height;
+    for (piece, coverage) in clip_quad_to_rounded(quad, rounded) {
+        // An antialiased end cell is a whole pixel and can start before the
+        // quad does; a piece only has texels where the quad is.
+        let Some(piece) = piece.intersect(&quad) else {
+            continue;
+        };
+        if piece.width <= 0.0 || piece.height <= 0.0 {
+            continue;
+        }
+        let u0 = tex[0] + (piece.x - quad.x) * u_per_px;
+        let v0 = tex[1] + (piece.y - quad.y) * v_per_px;
+        out.push((
+            piece,
+            [u0, v0, u0 + piece.width * u_per_px, v0 + piece.height * v_per_px],
+            coverage,
+        ));
+    }
+    space
+}
+
+/// How much of the pixel centred on `(px, py)` the rounded rect covers: 1
+/// inside, 0 outside, and the fill's own ramp across a corner's curve
+/// (`corner_coverage`), so a shape cut out with this and the same shape
+/// filled by `draw_rounded_rect` meet on the curve. `radius` must be fitted.
+fn rounded_rect_coverage(rect: Rect, radius: rustkit_layout::BorderRadius, px: f32, py: f32) -> f32 {
+    if px < rect.x || px >= rect.right() || py < rect.y || py >= rect.bottom() {
+        return 0.0;
+    }
+    let mut coverage = 1.0_f32;
+    for (quadrant, corner) in [
+        radius.top_left,
+        radius.top_right,
+        radius.bottom_right,
+        radius.bottom_left,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(distance) = corner_distance_at(rect, corner, quadrant as u8, px, py) {
+            coverage = coverage.min(corner_coverage(distance));
+        }
+    }
+    coverage
+}
+
+/// The part of the rounded rect `shape` that is outside the rounded rect
+/// `hole`, as `(piece, coverage)`: an outer box shadow's layer with the box
+/// cut out of it (CSS Backgrounds 3 §6.1).
+///
+/// Two square shapes give `rect_minus` exactly. Otherwise the plane is cut
+/// along every edge of both rects and of their corner boxes: a cell outside
+/// every corner box is wholly painted or wholly not, and a cell in one is
+/// painted a pixel at a time, runs of fully covered pixels joined.
+///
+/// Pure for the same reason as `clip_quad_to_rounded`.
+fn rounded_difference_pieces(
+    shape: Rect,
+    shape_radius: rustkit_layout::BorderRadius,
+    hole: Rect,
+    hole_radius: rustkit_layout::BorderRadius,
+) -> Vec<(Rect, f32)> {
+    if shape.width <= 0.0 || shape.height <= 0.0 {
+        return Vec::new();
+    }
+    if shape_radius.is_zero() && hole_radius.is_zero() {
+        return Renderer::rect_minus(shape, hole)
+            .into_iter()
+            .map(|r| (r, 1.0))
+            .collect();
+    }
+    let shape_radius = shape_radius.fitted(shape.width, shape.height);
+    let hole_radius = hole_radius.fitted(hole.width, hole.height);
+    let coverage = |x: f32, y: f32| {
+        rounded_rect_coverage(shape, shape_radius, x, y)
+            * (1.0 - rounded_rect_coverage(hole, hole_radius, x, y))
+    };
+
+    // The corner boxes of both shapes, and the cuts along both axes.
+    let mut corner_boxes = Vec::new();
+    let mut xs = vec![shape.x, shape.right()];
+    let mut ys = vec![shape.y, shape.bottom()];
+    for (rect, radius) in [(shape, shape_radius), (hole, hole_radius)] {
+        xs.extend([rect.x, rect.right()]);
+        ys.extend([rect.y, rect.bottom()]);
+        for (quadrant, corner) in [
+            radius.top_left,
+            radius.top_right,
+            radius.bottom_right,
+            radius.bottom_left,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if corner.is_zero() {
+                continue;
+            }
+            let (x, y) = corner_box_origin(rect, corner, quadrant as u8);
+            corner_boxes.push(Rect::new(x, y, corner.h, corner.v));
+            xs.extend([x, x + corner.h]);
+            ys.extend([y, y + corner.v]);
+        }
+    }
+    let cuts = |mut values: Vec<f32>, from: f32, to: f32| {
+        for v in values.iter_mut() {
+            *v = v.clamp(from, to);
+        }
+        values.sort_by(|a, b| a.total_cmp(b));
+        values.dedup();
+        values
+    };
+    let xs = cuts(xs, shape.x, shape.right());
+    let ys = cuts(ys, shape.y, shape.bottom());
+
+    let mut out: Vec<(Rect, f32)> = Vec::new();
+    for band in ys.windows(2) {
+        let (y0, y1) = (band[0], band[1]);
+        // The whole cell of this band still open on its right, if any: cells
+        // side by side in a band join into one rect.
+        let mut open: Option<usize> = None;
+        for span in xs.windows(2) {
+            let (x0, x1) = (span[0], span[1]);
+            let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+            if !corner_boxes.iter().any(|b| b.contains(cx, cy)) {
+                if coverage(cx, cy) <= 0.0 {
+                    open = None;
+                } else if let Some(index) = open {
+                    out[index].0.width = x1 - out[index].0.x;
+                } else {
+                    open = Some(out.len());
+                    out.push((Rect::new(x0, y0, x1 - x0, y1 - y0), 1.0));
+                }
+                continue;
+            }
+            open = None;
+
+            // A cell in a corner box: one pixel at a time on the pixel grid,
+            // each drawn only as far as the cell reaches.
+            let mut row = y0.floor();
+            while row < y1 {
+                let top = row.max(y0);
+                let height = (row + 1.0).min(y1) - top;
+                let mut run: Option<usize> = None;
+                let mut column = x0.floor();
+                while column < x1 {
+                    let left = column.max(x0);
+                    let width = (column + 1.0).min(x1) - left;
+                    let c = coverage(column + 0.5, row + 0.5);
+                    if c >= 1.0 {
+                        match run {
+                            Some(index) => out[index].0.width = left + width - out[index].0.x,
+                            None => {
+                                run = Some(out.len());
+                                out.push((Rect::new(left, top, width, height), 1.0));
+                            }
+                        }
+                    } else {
+                        run = None;
+                        if c > 0.01 {
+                            out.push((Rect::new(left, top, width, height), c));
+                        }
+                    }
+                    column += 1.0;
+                }
+                row += 1.0;
+            }
+        }
+    }
+    out
+}
+
 // ==================== Transform Helpers ====================
 
 /// The page-space affine a `PushTransform { matrix, origin }` command means:
@@ -6391,6 +7949,70 @@ fn multiply_matrices_2d(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_oversized_image_is_downscaled_to_the_limit_keeping_its_aspect() {
+        // 20x10 solid red, limit 8: longest side becomes 8, the other 4.
+        let data = [255u8, 0, 0, 255].repeat(20 * 10);
+        let (w, h, px) = super::downscale_rgba_to_fit(20, 10, &data, 8);
+        assert_eq!((w, h), (8, 4));
+        assert_eq!(px.len(), 8 * 4 * 4);
+        assert!(px.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn downscaling_averages_the_source_pixels_it_covers() {
+        // 2x1: black and white, to 1x1: mid grey.
+        let data = vec![0, 0, 0, 255, 255, 255, 255, 255];
+        let (w, h, px) = super::downscale_rgba_to_fit(2, 1, &data, 1);
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(px, vec![128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn a_cover_image_is_cropped_by_uv_not_squashed_into_its_box() {
+        // eBay's hero: a 2.9:1 texture in a 1.4:1 box. Painting the whole
+        // texture ([0, 0, 1, 1]) into the box squashed it.
+        let (rect, uv) = super::image_paint_quad(
+            super::Rect::new(0.0, 0.0, 140.0, 100.0),
+            (290, 100),
+            super::ObjectFit::Cover,
+            (0.5, 0.5),
+            (0.0, 0.0),
+        )
+        .expect("a visible quad");
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (0.0, 0.0, 140.0, 100.0)
+        );
+        let shown = ((uv[2] - uv[0]) * 290.0) / ((uv[3] - uv[1]) * 100.0);
+        assert!((shown - 1.4).abs() < 1e-3, "shown aspect {shown}, uv {uv:?}");
+        assert!((uv[0] - 75.0 / 290.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_fill_image_still_paints_the_whole_texture_over_the_box() {
+        let (rect, uv) = super::image_paint_quad(
+            super::Rect::new(5.0, 6.0, 140.0, 100.0),
+            (290, 100),
+            super::ObjectFit::Fill,
+            (0.5, 0.5),
+            (0.0, 0.0),
+        )
+        .expect("a visible quad");
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (5.0, 6.0, 140.0, 100.0)
+        );
+        assert_eq!(uv, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn an_image_within_the_limit_is_left_alone() {
+        let data = vec![7u8; 3 * 2 * 4];
+        let (w, h, px) = super::downscale_rgba_to_fit(3, 2, &data, 8);
+        assert_eq!((w, h, px), (3, 2, data));
+    }
+
     use super::*;
 
     // ==================== Transform origin (n48) ====================
@@ -6711,7 +8333,24 @@ mod tests {
         let entry = clip_entry_under(None, [2.0, 0.0, 0.0, 2.0, 0.0, 0.0], Rect::new(0.0, 0.0, 50.0, 50.0), radius(10.0));
         assert_eq!(entry.rect.width, 100.0);
         assert_eq!(entry.rounded.len(), 1);
-        assert_eq!(entry.rounded[0].1.top_left, 20.0);
+        assert_eq!(entry.rounded[0].1.top_left, rustkit_layout::CornerRadius::circular(20.0));
+    }
+
+    #[test]
+    fn a_clip_scaled_unevenly_scales_each_axis_of_its_radius() {
+        // A circular corner under scale(2, 3) is an ellipse on screen. One
+        // scalar per corner could only take the geometric mean for both.
+        let entry = clip_entry_under(
+            None,
+            [2.0, 0.0, 0.0, 3.0, 0.0, 0.0],
+            Rect::new(0.0, 0.0, 50.0, 50.0),
+            radius(10.0),
+        );
+        assert_eq!((entry.rect.width, entry.rect.height), (100.0, 150.0));
+        assert_eq!(
+            entry.rounded[0].1.top_left,
+            rustkit_layout::CornerRadius { h: 20.0, v: 30.0 }
+        );
     }
 
     #[test]
@@ -6773,6 +8412,111 @@ mod tests {
         assert_eq!(space, QuadSpace::Screen);
         assert_eq!((r.x, r.width), (70.0, 20.0));
         assert_eq!(t, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    // ==================== Rounded clip on textured quads ====================
+
+    fn textured_pieces_under(
+        clip: Option<&ClipEntry>,
+        rect: Rect,
+        tex: [f32; 4],
+    ) -> Vec<(Rect, [f32; 4], f32)> {
+        let mut out = Vec::new();
+        clip_textured_pieces_under(IDENTITY_2D, clip, rect, tex, &mut out);
+        out
+    }
+
+    /// An avatar: an image filling a circular `overflow: hidden` box. Its
+    /// corners used to survive, because only the clip's rect reached a
+    /// textured quad.
+    #[test]
+    fn an_image_under_a_round_clip_loses_its_corners_and_keeps_its_texels() {
+        let box_rect = Rect::new(20.0, 10.0, 100.0, 100.0);
+        let entry = clip_entry_for(None, box_rect, radius(50.0));
+        let pieces = textured_pieces_under(Some(&entry), box_rect, [0.0, 0.0, 1.0, 1.0]);
+        assert!(pieces.len() > 1, "the image was not decomposed");
+
+        let holds = |x: f32, y: f32| {
+            pieces
+                .iter()
+                .any(|(r, _, coverage)| *coverage > 0.0 && r.contains(x, y))
+        };
+        assert!(!holds(22.0, 12.0), "the top-left corner is still painted");
+        assert!(!holds(118.0, 108.0), "the bottom-right corner is still painted");
+        assert!(holds(70.0, 60.0), "the centre is gone");
+
+        // Every piece samples the texels that were under it in the whole quad.
+        for (r, tex, coverage) in &pieces {
+            assert!(*coverage > 0.0 && *coverage <= 1.0);
+            let expected = [
+                (r.x - 20.0) / 100.0,
+                (r.y - 10.0) / 100.0,
+                (r.right() - 20.0) / 100.0,
+                (r.bottom() - 10.0) / 100.0,
+            ];
+            for (got, want) in tex.iter().zip(expected) {
+                assert!((got - want).abs() < 1e-4, "{r:?}: tex {tex:?}, expected {expected:?}");
+                assert!((-1e-4..=1.0 + 1e-4).contains(got), "texel {got} outside the image");
+            }
+        }
+
+        // What survives is the disc.
+        let area: f32 = pieces.iter().map(|(r, _, c)| r.width * r.height * c).sum();
+        let disc = std::f32::consts::PI * 50.0 * 50.0;
+        assert!((area - disc).abs() < disc * 0.02, "area {area}, disc {disc}");
+    }
+
+    /// A sub-rect of an atlas keeps its own texel range through the split.
+    #[test]
+    fn a_split_glyph_stays_inside_its_atlas_cell() {
+        let box_rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+        let entry = clip_entry_for(None, box_rect, radius(20.0));
+        let glyph = Rect::new(0.5, 4.0, 20.0, 30.0);
+        let cell = [0.25, 0.5, 0.35, 0.65];
+        let pieces = textured_pieces_under(Some(&entry), glyph, cell);
+        assert!(pieces.len() > 1);
+        for (r, tex, _) in &pieces {
+            assert!(r.x >= glyph.x - 1e-4 && r.right() <= glyph.right() + 1e-4, "{r:?}");
+            assert!(tex[0] >= cell[0] - 1e-5 && tex[2] <= cell[2] + 1e-5, "{tex:?}");
+            assert!(tex[1] >= cell[1] - 1e-5 && tex[3] <= cell[3] + 1e-5, "{tex:?}");
+        }
+    }
+
+    /// Text in a pill sits in the band the corners occupy but clear of both
+    /// arcs: it is one quad, as it was, not one per scanline.
+    #[test]
+    fn a_glyph_between_the_arcs_of_a_pill_is_not_split() {
+        let box_rect = Rect::new(0.0, 0.0, 150.0, 40.0);
+        let entry = clip_entry_for(None, box_rect, radius(20.0));
+        let glyph = Rect::new(60.0, 5.0, 20.0, 30.0);
+        let tex = [0.1, 0.2, 0.3, 0.4];
+        let pieces = textured_pieces_under(Some(&entry), glyph, tex);
+        assert_eq!(pieces.len(), 1);
+        let (r, t, coverage) = pieces[0];
+        assert_eq!((r.x, r.y, r.width, r.height), (60.0, 5.0, 20.0, 30.0));
+        assert_eq!(t, tex);
+        assert_eq!(coverage, 1.0);
+    }
+
+    /// No rounded clip, no change: the single piece `clip_textured_under`
+    /// always gave.
+    #[test]
+    fn a_textured_quad_under_a_square_clip_is_the_one_piece_it_was() {
+        let entry = clip_entry_for(None, Rect::new(0.0, 0.0, 50.0, 50.0), radius(0.0));
+        let glyph = Rect::new(40.0, 10.0, 20.0, 20.0);
+        let pieces = textured_pieces_under(Some(&entry), glyph, [0.0, 0.0, 1.0, 1.0]);
+        let (r, t, _) = clip_textured_under(IDENTITY_2D, Some(entry.rect), glyph, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].0.x, pieces[0].0.width, pieces[0].1, pieces[0].2), (r.x, r.width, t, 1.0));
+        assert!(textured_pieces_under(Some(&entry), Rect::new(60.0, 0.0, 10.0, 10.0), [0.0, 0.0, 1.0, 1.0]).is_empty());
+    }
+
+    /// Images are composited source-over. With the blit pipeline's REPLACE a
+    /// transparent PNG painted black where it should show the page.
+    #[test]
+    fn images_are_blended_not_copied() {
+        assert_eq!(pipeline::IMAGE_BLEND, wgpu::BlendState::ALPHA_BLENDING);
+        assert_ne!(pipeline::IMAGE_BLEND, wgpu::BlendState::REPLACE);
     }
 
     #[test]
@@ -7019,6 +8763,270 @@ mod tests {
             (covered_area(&pieces) - expected).abs() < 2.0,
             "clamped radius should give a 20px pill, covered {}",
             covered_area(&pieces)
+        );
+    }
+
+    fn ellipse(h: f32, v: f32) -> rustkit_layout::BorderRadius {
+        let corner = rustkit_layout::CornerRadius { h, v };
+        rustkit_layout::BorderRadius {
+            top_left: corner,
+            top_right: corner,
+            bottom_right: corner,
+            bottom_left: corner,
+        }
+    }
+
+    #[test]
+    fn top_only_radii_as_tall_as_the_box_are_not_cut_to_half_of_it() {
+        // `40px 40px 0 0` on a 200x40 tab: nothing on the left or right side
+        // overlaps, so the corners stay 40px (CSS Backgrounds 3 §5.5). Each
+        // radius used to be cut to half the shorter side, 20px.
+        let clip = Rect::new(0.0, 0.0, 200.0, 40.0);
+        let tab = rustkit_layout::BorderRadius {
+            top_left: rustkit_layout::CornerRadius::circular(40.0),
+            top_right: rustkit_layout::CornerRadius::circular(40.0),
+            ..Default::default()
+        };
+        let pieces = clip_quad_to_rounded(clip, &[(clip, tab)]);
+        let expected = 200.0 * 40.0 - (2.0 - std::f32::consts::FRAC_PI_2) * 40.0 * 40.0;
+        assert!(
+            (covered_area(&pieces) - expected).abs() < 2.0,
+            "two 40px quarter circles, covered {} expected {expected}",
+            covered_area(&pieces)
+        );
+        // 29.5px above its centre line a 40px corner has come in
+        // 40 - sqrt(40^2 - 29.5^2) = 12.99px; a 20px one is not on this row
+        // the same way (it would be 2.6px in).
+        let (left, _) = rounded_row_span(clip, tab, 10.5).expect("row crosses the tab");
+        assert!(
+            (left - 12.986).abs() < 0.01,
+            "left edge at y=10.5 was {left}"
+        );
+    }
+
+    #[test]
+    fn an_elliptical_clip_follows_the_ellipse() {
+        // 200x100 with 100x50 corners is one whole ellipse.
+        let clip = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let (left, right) =
+            rounded_row_span(clip, ellipse(100.0, 50.0), 25.0).expect("row crosses");
+        // dy = 25 of 50: dx = 100 * sqrt(1 - 0.25) = 86.60
+        assert!((left - 13.397).abs() < 0.01, "left {left}");
+        assert!((right - 186.603).abs() < 0.01, "right {right}");
+
+        let pieces = clip_quad_to_rounded(clip, &[(clip, ellipse(100.0, 50.0))]);
+        // One sample per row: the rows nearest the flat top and bottom are
+        // where the span changes fastest, so allow them a few px^2.
+        let expected = std::f32::consts::PI * 100.0 * 50.0;
+        assert!(
+            (covered_area(&pieces) - expected).abs() < 8.0,
+            "ellipse area {expected}, covered {}",
+            covered_area(&pieces)
+        );
+        // Inside the old circular corner (a 50px circle at (50, 50)), outside
+        // the ellipse.
+        assert!(
+            !painted_at(&pieces, 30.0, 10.5, 0.01),
+            "(30, 10.5) is outside the ellipse"
+        );
+        assert!(
+            painted_at(&pieces, 100.0, 2.5, 0.999),
+            "the top of the ellipse is painted"
+        );
+    }
+
+    #[test]
+    fn an_elliptical_corner_loses_its_own_area_to_the_clip() {
+        // Each corner loses (1 - pi/4) * h * v.
+        let clip = Rect::new(0.0, 0.0, 200.0, 120.0);
+        let pieces = clip_quad_to_rounded(clip, &[(clip, ellipse(60.0, 30.0))]);
+        let expected = 200.0 * 120.0 - (4.0 - std::f32::consts::PI) * 60.0 * 30.0;
+        assert!(
+            (covered_area(&pieces) - expected).abs() < 6.0,
+            "covered {} expected {expected}",
+            covered_area(&pieces)
+        );
+    }
+
+    #[test]
+    fn the_edge_distance_is_exact_for_a_circle_and_close_for_an_ellipse() {
+        // Circle: the plain radius-minus-distance.
+        assert_eq!(ellipse_edge_distance(3.0, 4.0, 10.0, 10.0), 5.0);
+        assert_eq!(ellipse_edge_distance(6.0, 8.0, 10.0, 10.0), 0.0);
+
+        // Ellipse (60, 30): walk the curve; half a pixel along the normal on
+        // either side must read as half a pixel, to well under the width of
+        // the antialiasing ramp.
+        let (h, v) = (60.0_f32, 30.0_f32);
+        for step in 0..=20 {
+            let t = step as f32 / 20.0 * std::f32::consts::FRAC_PI_2;
+            let (x, y) = (h * t.cos(), v * t.sin());
+            assert!(
+                ellipse_edge_distance(x, y, h, v).abs() < 1e-3,
+                "on the curve at t={t}"
+            );
+            let (nx, ny) = (x / (h * h), y / (v * v));
+            let len = (nx * nx + ny * ny).sqrt();
+            let (nx, ny) = (nx / len, ny / len);
+            let outside = ellipse_edge_distance(x + 0.5 * nx, y + 0.5 * ny, h, v);
+            let inside = ellipse_edge_distance(x - 0.5 * nx, y - 0.5 * ny, h, v);
+            assert!(
+                (outside + 0.5).abs() < 0.05,
+                "t={t}: half a pixel outside read {outside}"
+            );
+            assert!(
+                (inside - 0.5).abs() < 0.05,
+                "t={t}: half a pixel inside read {inside}"
+            );
+        }
+        // The centre is as far inside as the shorter axis.
+        assert_eq!(ellipse_edge_distance(0.0, 0.0, h, v), 30.0);
+    }
+
+    #[test]
+    fn the_fill_and_the_clip_agree_on_an_elliptical_corner() {
+        // The fill paints corner pixels from `ellipse_edge_distance`; the clip
+        // cuts rows with `rounded_row_span`. If they drew different curves the
+        // clip would eat the fill's edge or leave a rim outside it.
+        let rect = Rect::new(0.0, 0.0, 200.0, 120.0);
+        let radius = ellipse(60.0, 30.0);
+        let corner = radius.top_left;
+        // Whether the clip keeps the point, read from its row.
+        let kept = |px: f32, py: f32| {
+            py >= 0.0
+                && rounded_row_span(rect, radius, py)
+                    .map(|(left, _)| px >= left)
+                    .unwrap_or(false)
+        };
+        let mut edge_pixels = 0;
+        for row in 0..30 {
+            let py = row as f32 + 0.5;
+            for col in 0..60 {
+                let px = col as f32 + 0.5;
+                let fill = corner_distance_at(rect, corner, 0, px, py)
+                    .map(corner_coverage)
+                    .unwrap_or(1.0);
+                // A pixel and a half clear of the curve along both axes
+                // (the curve is nearly flat along the top, so one axis alone
+                // says little there).
+                if !kept(px + 1.5, py) && !kept(px, py + 1.5) {
+                    assert!(
+                        fill < 0.01,
+                        "({px}, {py}) is well outside the clip but filled {fill}"
+                    );
+                }
+                if kept(px - 1.5, py) && kept(px, py - 1.5) {
+                    assert!(
+                        fill > 0.99,
+                        "({px}, {py}) is well inside the clip but filled {fill}"
+                    );
+                }
+                if fill > 0.01 && fill < 0.99 {
+                    edge_pixels += 1;
+                }
+            }
+        }
+        assert!(
+            edge_pixels > 60,
+            "the corner has an antialiased edge, saw {edge_pixels} partial pixels"
+        );
+    }
+
+    #[test]
+    fn a_fractional_corner_is_sampled_on_the_grid_of_its_outer_edge() {
+        // `25%` of a 150px box is 37.5px. The right-hand corner's box starts
+        // at 112.5; its cells must still be centred where the box's right
+        // edge (150) puts pixels: 112.5, 113.5 ... 149.5.
+        let from_right = corner_cells(112.5, 37.5, false);
+        assert_eq!(from_right.len(), 38);
+        assert_eq!(from_right[0], (112.0, 112.5, 0.5), "the inner cell is cut at the box");
+        assert_eq!(from_right[37], (149.0, 149.0, 1.0), "the outer cell is whole");
+        // The left-hand corner: laid from 0, cut at 37.5.
+        let from_left = corner_cells(0.0, 37.5, true);
+        assert_eq!(from_left.len(), 38);
+        assert_eq!(from_left[0], (0.0, 0.0, 1.0));
+        assert_eq!(from_left[37], (37.0, 37.0, 0.5));
+
+        // Mirror images: the outermost column of a right corner reads the
+        // same coverage as the outermost column of a left one. Laid from the
+        // box's inner corner the right one sat half a pixel out and read
+        // one-half or less down the whole side.
+        let rect = Rect::new(0.0, 0.0, 150.0, 100.0);
+        let corner = rustkit_layout::CornerRadius { h: 37.5, v: 25.0 };
+        for row in 0..25 {
+            let py = row as f32 + 0.5;
+            let left = corner_distance_at(rect, corner, 0, from_left[0].0 + 0.5, py).map(corner_coverage);
+            let right = corner_distance_at(rect, corner, 1, from_right[37].0 + 0.5, py).map(corner_coverage);
+            let (left, right) = (left.expect("in the box"), right.expect("in the box"));
+            assert!((left - right).abs() < 1e-4, "row {row}: left {left} right {right}");
+        }
+        let side = corner_distance_at(rect, corner, 1, from_right[37].0 + 0.5, 24.5).map(corner_coverage);
+        assert!(side.unwrap() > 0.7, "the side just above the corner's end is covered, read {side:?}");
+
+        // A whole-pixel box has the same whole cells from either end.
+        assert_eq!(corner_cells(20.0, 12.0, true), corner_cells(20.0, 12.0, false));
+        assert_eq!(corner_cells(20.0, 12.0, true).len(), 12);
+        assert!(corner_cells(20.0, 12.0, true).iter().all(|c| c.0 == c.1 && c.2 == 1.0));
+    }
+
+    #[test]
+    fn opposite_corners_that_share_the_middle_both_cut_it() {
+        // `80px 0` on a 100px square: a leaf. The top-left and bottom-right
+        // boxes overlap in the middle and a point there must be inside both
+        // curves. Adjacent corners never overlap once fitted.
+        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let big = rustkit_layout::CornerRadius::circular(80.0);
+        let leaf = rustkit_layout::BorderRadius {
+            top_left: big,
+            bottom_right: big,
+            ..Default::default()
+        };
+        assert_eq!(leaf.fitted(100.0, 100.0), leaf, "nothing adjacent overlaps");
+        assert!(corner_boxes_overlap(rect, big, big));
+        assert!(!corner_boxes_overlap(
+            rect,
+            rustkit_layout::CornerRadius::circular(50.0),
+            rustkit_layout::CornerRadius::circular(50.0)
+        ));
+
+        // (25, 75): inside the top-left box and curve region's box overlap?
+        // It is in both boxes; the bottom-right curve (centre (20, 20),
+        // r 80) is 55 from its centre on one axis and 5 on the other: inside.
+        // (22, 22) is in both boxes too and outside the top-left curve
+        // (centre (80, 80), distance 82).
+        assert_eq!(Renderer::point_in_rounded_rect(50.0, 50.0, rect, leaf), 1.0);
+        assert_eq!(Renderer::point_in_rounded_rect(22.0, 22.0, rect, leaf), 0.0);
+        assert_eq!(Renderer::point_in_rounded_rect(78.0, 78.0, rect, leaf), 0.0);
+        // The square corners are whole.
+        assert_eq!(Renderer::point_in_rounded_rect(99.0, 1.0, rect, leaf), 1.0);
+
+        // Row 10 is cut on the left by the top-left curve only.
+        let (left, right) = rounded_row_span(rect, leaf, 10.0).expect("row crosses");
+        assert!(left > 40.0 && left < 42.0, "left {left}");
+        assert_eq!(right, 100.0);
+    }
+
+    #[test]
+    fn a_gradient_cell_is_tested_against_the_ellipse() {
+        let rect = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let whole = ellipse(100.0, 50.0);
+        assert_eq!(
+            Renderer::point_in_rounded_rect(30.0, 10.0, rect, whole),
+            0.0
+        );
+        assert_eq!(
+            Renderer::point_in_rounded_rect(100.0, 3.0, rect, whole),
+            1.0
+        );
+        assert_eq!(
+            Renderer::point_in_rounded_rect(15.0, 50.0, rect, whole),
+            1.0
+        );
+        // On the curve: half covered.
+        let on_curve = Renderer::point_in_rounded_rect(100.0 - 86.603, 25.0, rect, whole);
+        assert!(
+            (on_curve - 0.5).abs() < 0.02,
+            "on the curve read {on_curve}"
         );
     }
 
@@ -7525,6 +9533,141 @@ mod outer_shadow_tests {
         rects.iter().map(|(r, _)| r.width * r.height).sum()
     }
 
+    const SQUARE: rustkit_layout::BorderRadius = rustkit_layout::BorderRadius {
+        top_left: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+        top_right: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+        bottom_right: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+        bottom_left: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+    };
+
+    /// Paint at `(x, y)`: the summed alpha of the pieces holding the point.
+    fn alpha_at(rects: &[(Rect, f32)], x: f32, y: f32) -> f32 {
+        rects
+            .iter()
+            .filter(|(r, _)| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())
+            .map(|(_, a)| *a)
+            .sum()
+    }
+
+    /// The area painted, weighted by alpha.
+    fn weighted_area(rects: &[(Rect, f32)]) -> f32 {
+        rects.iter().map(|(r, a)| r.width * r.height * a).sum()
+    }
+
+    /// `box-shadow: 0 0 0 6px` on a 100px box with 20px corners is a ring
+    /// between two rounded rects (radii 26 and 20), not a square frame.
+    #[test]
+    fn a_rounded_box_gets_a_rounded_ring() {
+        let border_box = Rect::new(50.0, 50.0, 100.0, 100.0);
+        let radius = rustkit_layout::BorderRadius::uniform(20.0);
+        let shadow = Rect::new(44.0, 44.0, 112.0, 112.0);
+        let rects = Renderer::outer_shadow_paint_rects(
+            border_box,
+            radius,
+            shadow,
+            radius.spread(6.0),
+            0.0,
+            1.0,
+        );
+
+        // On the ring's straight side, and in the gap between the two curves.
+        assert_eq!(alpha_at(&rects, 100.5, 46.5), 1.0);
+        assert_eq!(alpha_at(&rects, 53.5, 53.5), 1.0);
+        // Outside the shadow's own curve: the corner of its bounding square.
+        assert_eq!(alpha_at(&rects, 44.5, 44.5), 0.0);
+        // Inside the box: its middle, and just inside its curve.
+        assert_eq!(alpha_at(&rects, 100.5, 100.5), 0.0);
+        assert_eq!(alpha_at(&rects, 58.5, 58.5), 0.0);
+
+        // No pixel is painted twice, and none outside the shadow's rect.
+        for (r, a) in &rects {
+            assert!(*a > 0.0 && *a <= 1.0, "alpha {a}");
+            assert!(r.x >= 44.0 && r.right() <= 156.0 && r.y >= 44.0 && r.bottom() <= 156.0, "{r:?}");
+        }
+        for y in 44..156 {
+            for x in 44..156 {
+                let a = alpha_at(&rects, x as f32 + 0.5, y as f32 + 0.5);
+                assert!(a <= 1.0 + 1e-6, "({x}, {y}) painted {a}");
+            }
+        }
+
+        // The ring's area: the difference of the two rounded rects.
+        let rounded_area = |side: f32, r: f32| side * side - (4.0 - std::f32::consts::PI) * r * r;
+        let ring = rounded_area(112.0, 26.0) - rounded_area(100.0, 20.0);
+        let painted = weighted_area(&rects);
+        assert!((painted - ring).abs() < ring * 0.02, "painted {painted}, ring {ring}");
+    }
+
+    /// The hole is the box's curve even when the shadow is only moved: the
+    /// notch between the box's square corner and its curve shows the shadow.
+    #[test]
+    fn an_offset_shadow_shows_through_the_corner_notch_of_its_box() {
+        let border_box = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let radius = rustkit_layout::BorderRadius::uniform(30.0);
+        let shadow = Rect::new(10.0, 10.0, 100.0, 100.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, radius, shadow, radius, 0.0, 1.0);
+        // Bottom-right notch of the box: outside its curve, inside the shadow.
+        assert_eq!(alpha_at(&rects, 97.5, 97.5), 1.0);
+        // The shadow's own bottom-right corner is cut.
+        assert_eq!(alpha_at(&rects, 108.5, 108.5), 0.0);
+        // Under the box.
+        assert_eq!(alpha_at(&rects, 50.5, 50.5), 0.0);
+    }
+
+    /// Each blur layer is the shadow's shape grown, corners included.
+    #[test]
+    fn blurred_layers_of_a_rounded_shadow_are_rounded() {
+        let border_box = Rect::new(20.0, 20.0, 60.0, 60.0);
+        let radius = rustkit_layout::BorderRadius::uniform(30.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, radius, border_box, radius, 8.0, 0.9);
+        assert!(!rects.is_empty());
+        // The outermost layer reaches 8px out on the axis, and its bounding
+        // square's corner stays clear.
+        assert!(alpha_at(&rects, 50.5, 13.5) > 0.0);
+        assert_eq!(alpha_at(&rects, 13.5, 13.5), 0.0);
+        assert_eq!(alpha_at(&rects, 50.5, 50.5), 0.0);
+    }
+
+    /// A square box takes the path it always did, rect for rect.
+    #[test]
+    fn a_square_box_gets_exactly_the_old_rects() {
+        let border_box = Rect::new(40.0, 40.0, 89.0, 38.0);
+        let shadow = Rect::new(39.0, 39.0, 91.0, 40.0);
+        let rects = rounded_difference_pieces(shadow, SQUARE, border_box, SQUARE);
+        let old: Vec<(Rect, f32)> = Renderer::rect_minus(shadow, border_box)
+            .into_iter()
+            .map(|r| (r, 1.0))
+            .collect();
+        assert_eq!(rects.len(), old.len());
+        for ((a, ca), (b, cb)) in rects.iter().zip(&old) {
+            assert_eq!((a.x, a.y, a.width, a.height, *ca), (b.x, b.y, b.width, b.height, *cb));
+        }
+    }
+
+    /// The hole's edge takes the fill's coverage ramp, so the two sum to one
+    /// across the box's curve.
+    #[test]
+    fn the_hole_and_the_fill_share_the_corner_ramp() {
+        let rect = Rect::new(0.0, 0.0, 80.0, 80.0);
+        let radius = rustkit_layout::BorderRadius::uniform(24.0);
+        // A shape that covers everything, minus the box.
+        let outside = rounded_difference_pieces(Rect::new(-10.0, -10.0, 100.0, 100.0), SQUARE, rect, radius);
+        let mut partial = 0;
+        for y in 0..24 {
+            for x in 0..24 {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let fill = rounded_rect_coverage(rect, radius, px, py);
+                let hole = alpha_at(&outside, px, py);
+                // A coverage under 0.01 is not emitted, as in the fill.
+                assert!((fill + hole - 1.0).abs() <= 0.011, "({x}, {y}): fill {fill} + hole {hole}");
+                if fill > 0.0 && fill < 1.0 {
+                    partial += 1;
+                }
+            }
+        }
+        assert!(partial > 10, "only {partial} antialiased pixels along a 24px arc");
+    }
+
     fn assert_outside(rects: &[(Rect, f32)], border_box: Rect) {
         for (r, _) in rects {
             assert!(
@@ -7541,7 +9684,7 @@ mod outer_shadow_tests {
     fn spread_only_ring_does_not_fill_the_box() {
         let border_box = Rect::new(40.0, 40.0, 89.0, 38.0);
         let shadow = Rect::new(39.0, 39.0, 91.0, 40.0);
-        let rects = Renderer::outer_shadow_paint_rects(border_box, shadow, 0.0, 1.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, SQUARE, shadow, SQUARE, 0.0, 1.0);
         assert_outside(&rects, border_box);
         let ring = 91.0 * 40.0 - 89.0 * 38.0;
         assert!((area(&rects) - ring).abs() < 1e-3, "area {} != ring {ring}", area(&rects));
@@ -7552,7 +9695,7 @@ mod outer_shadow_tests {
     fn offset_shadow_shows_only_outside_the_box() {
         let border_box = Rect::new(40.0, 40.0, 200.0, 60.0);
         let shadow = Rect::new(48.0, 48.0, 200.0, 60.0);
-        let rects = Renderer::outer_shadow_paint_rects(border_box, shadow, 0.0, 1.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, SQUARE, shadow, SQUARE, 0.0, 1.0);
         assert_outside(&rects, border_box);
         let visible = 200.0 * 60.0 - 192.0 * 52.0;
         assert!((area(&rects) - visible).abs() < 1e-3);
@@ -7562,7 +9705,7 @@ mod outer_shadow_tests {
     #[test]
     fn blurred_layers_are_clipped_too() {
         let border_box = Rect::new(10.0, 10.0, 50.0, 50.0);
-        let rects = Renderer::outer_shadow_paint_rects(border_box, border_box, 4.0, 0.9);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, SQUARE, border_box, SQUARE, 4.0, 0.9);
         assert!(!rects.is_empty());
         assert_outside(&rects, border_box);
         assert!(rects.iter().all(|(_, a)| (*a - 0.9 / 3.0).abs() < 1e-6));
@@ -7573,7 +9716,75 @@ mod outer_shadow_tests {
     fn shadow_under_the_box_paints_nothing() {
         let border_box = Rect::new(0.0, 0.0, 100.0, 100.0);
         let shadow = Rect::new(10.0, 10.0, 80.0, 80.0);
-        assert!(Renderer::outer_shadow_paint_rects(border_box, shadow, 0.0, 1.0).is_empty());
+        assert!(Renderer::outer_shadow_paint_rects(border_box, SQUARE, shadow, SQUARE, 0.0, 1.0).is_empty());
+    }
+}
+
+/// How far inside its padding edge a drop-down `<select>` seats its label.
+const MENU_LIST_LABEL_INSET: f32 = 4.0;
+/// Horizontal padding of a list-box option row (Chrome's `option` padding).
+const LIST_BOX_OPTION_INSET: f32 = 2.0;
+/// A selected list-box row, and its text, in a list box without focus.
+const LIST_BOX_SELECTED_ROW: Color = Color {
+    r: 206,
+    g: 206,
+    b: 206,
+    a: 1.0,
+};
+const LIST_BOX_SELECTED_TEXT: Color = Color {
+    r: 16,
+    g: 16,
+    b: 16,
+    a: 1.0,
+};
+
+/// Centre of a drop-down's arrow in its border box `rect`.
+fn menu_list_arrow_centre(rect: Rect) -> (f32, f32) {
+    (rect.x + rect.width - 8.75, rect.y + rect.height / 2.0)
+}
+
+/// Row `index` of a list box whose frame encloses `inner`.
+fn list_box_row_rect(inner: Rect, row_height: f32, index: usize) -> Rect {
+    Rect::new(
+        inner.x,
+        inner.y + row_height * index as f32,
+        inner.width,
+        row_height,
+    )
+}
+
+#[cfg(test)]
+mod select_paint_tests {
+    use super::*;
+
+    /// Chrome CfT-148, bare `<select>` at (156.19, 875) 137x19: the chevron
+    /// spans x 280.5..288.5 and y 882..886 — centred on the control's
+    /// height, clear of the right border.
+    #[test]
+    fn the_drop_down_arrow_sits_inside_the_right_edge_at_mid_height() {
+        let rect = Rect::new(156.1875, 875.0, 137.0, 19.0);
+        let (cx, cy) = menu_list_arrow_centre(rect);
+        assert!((cx - 284.5).abs() <= 0.5, "arrow centre x {cx}");
+        assert_eq!(cy, 884.5);
+        // The same distance from the right edge on a padded 155x40 select.
+        let big = Rect::new(239.45, 167.0, 155.0, 40.0);
+        let (bx, by) = menu_list_arrow_centre(big);
+        assert_eq!(big.x + big.width - bx, rect.x + rect.width - cx);
+        assert_eq!(by, 187.0);
+    }
+
+    /// Chrome's option rows stack from the inside of the frame: 16px rows
+    /// at y = 906, 922, 938 in a list box whose border box starts at 905.
+    #[test]
+    fn list_box_rows_stack_from_the_inside_of_the_frame() {
+        let inner = Rect::new(157.1875, 906.0, 37.05, 48.0);
+        let ys: Vec<f32> = (0..4)
+            .map(|i| list_box_row_rect(inner, 16.0, i).y)
+            .collect();
+        assert_eq!(ys, vec![906.0, 922.0, 938.0, 954.0]);
+        // The fourth option starts at the frame's inner bottom: not painted.
+        assert!(ys[3] >= inner.y + inner.height);
+        assert_eq!(list_box_row_rect(inner, 16.0, 1).width, inner.width);
     }
 }
 
@@ -7699,5 +9910,458 @@ mod sidecar_timestamp_tests {
         assert_eq!(utc_timestamp_from_secs(951_782_400), "2000-02-29T00:00:00Z");
         // Last second of 2099.
         assert_eq!(utc_timestamp_from_secs(4_102_444_799), "2099-12-31T23:59:59Z");
+    }
+}
+
+/// SHAPED-RUN CONTRACT, slice S0 (docs/SHAPED_RUN_CONTRACT_2026-09-30.md
+/// §7), paint side. Device-free: these read the bitmaps the atlas is filled
+/// from. The character path is the oracle.
+#[cfg(all(test, target_os = "macos"))]
+mod shaped_run_paint_tests {
+    use super::*;
+    use rustkit_css::{ComputedStyle, Length};
+
+    const GEORGIA_LIST: &str = "Georgia, 'Times New Roman', serif";
+
+    fn run_in(family: &str, weight: u16, text: &str, size: f32) -> rustkit_layout::GlyphRun {
+        let mut style = ComputedStyle::new();
+        style.font_family = family.to_string();
+        style.font_size = Length::Px(size);
+        style.font_weight = rustkit_css::FontWeight(weight);
+        rustkit_layout::shape_line_run(text, &style, size, 0.0).expect("a Latin line has a run")
+    }
+
+    fn key(run: &rustkit_layout::GlyphRun, glyph_id: u16) -> RunGlyphKey {
+        RunGlyphKey {
+            face: run.face.id,
+            glyph_id,
+            font_size: (run.font_size * 10.0) as u32,
+            subpixel_phase: 0,
+        }
+    }
+
+    /// "Face identity, macOS": painting the run resolves no family list,
+    /// and what it draws is, byte for byte, what the character path draws
+    /// when that path resolves the same list to the same face.
+    #[test]
+    fn run_glyphs_are_drawn_from_the_run_face_with_no_family_lookup() {
+        for (weight, text, size) in [(400u16, "Wave To", 24.0f32), (700, "Type", 17.6)] {
+            let run = run_in(GEORGIA_LIST, weight, text, size);
+
+            let before = rustkit_text::macos::css_list_resolutions();
+            let from_run: Vec<_> = run
+                .glyphs
+                .iter()
+                .map(|g| rasterize_run_glyph(&key(&run, g.glyph_id), run.font_size))
+                .collect();
+            assert_eq!(
+                rustkit_text::macos::css_list_resolutions(),
+                before,
+                "painting a run must not resolve a font-family list"
+            );
+
+            // The character path, at the size its key quantizes to.
+            let old = rustkit_text::macos::GlyphRasterizer::with_style(
+                GEORGIA_LIST,
+                (size * 10.0) as u32 as f32 / 10.0,
+                weight,
+                false,
+            );
+            assert!(rustkit_text::macos::css_list_resolutions() > before);
+            for (ch, drawn) in text.chars().zip(from_run) {
+                let drawn = drawn.expect("the run's face is held");
+                assert_eq!(Some(drawn), old.rasterize_char(ch, 0.0), "{ch:?} at {size}px");
+            }
+        }
+    }
+
+    /// Two faces, one glyph id each for the same letter: the key tells them
+    /// apart, so regular and bold do not share a bitmap.
+    #[test]
+    fn the_key_is_the_face_and_the_glyph_not_the_family() {
+        let regular = run_in(GEORGIA_LIST, 400, "W", 24.0);
+        let bold = run_in(GEORGIA_LIST, 700, "W", 24.0);
+        let k_regular = key(&regular, regular.glyphs[0].glyph_id);
+        let k_bold = key(&bold, bold.glyphs[0].glyph_id);
+        assert_ne!(k_regular, k_bold);
+        assert_ne!(
+            rasterize_run_glyph(&k_regular, 24.0).expect("regular"),
+            rasterize_run_glyph(&k_bold, 24.0).expect("bold"),
+        );
+
+        // The same face reached through another list is the same key.
+        let walked = run_in("No Such Family 9f2c, Georgia", 400, "W", 24.0);
+        assert_eq!(key(&walked, walked.glyphs[0].glyph_id), k_regular);
+    }
+
+    /// A face the rasterizer does not hold draws nothing: the caller paints
+    /// the command through the family-list path instead.
+    #[test]
+    fn a_face_that_is_not_held_is_not_drawn() {
+        let run = run_in(GEORGIA_LIST, 400, "W", 24.0);
+        let mut unknown = key(&run, run.glyphs[0].glyph_id);
+        unknown.face ^= 0x5a5a;
+        assert!(rasterize_run_glyph(&unknown, 24.0).is_none());
+        // Held per size: a size layout never shaped at is not held either.
+        assert!(rasterize_run_glyph(&key(&run, run.glyphs[0].glyph_id), 23.0).is_none());
+    }
+}
+
+/// Where S0 changes a frame (campaign case `css-selectors`, "Lang prefix |=
+/// (should be italic)"): layout measures italic system-font text in the
+/// system italic, and the character path, resolving the same family list
+/// again, drew another face at those advances. A run is drawn in the face
+/// that was measured.
+#[cfg(all(test, target_os = "macos"))]
+mod shaped_run_measured_face_tests {
+    use super::*;
+    use rustkit_css::{ComputedStyle, Length};
+
+    #[test]
+    fn italic_system_text_is_drawn_in_the_face_layout_measured() {
+        let mut style = ComputedStyle::new();
+        style.font_family = "-apple-system, BlinkMacSystemFont, sans-serif".to_string();
+        style.font_size = Length::Px(14.0);
+        style.font_style = rustkit_css::FontStyle::Italic;
+        let run = rustkit_layout::shape_line_run("Lang", &style, 14.0, 0.0).expect("run");
+        let name = &run.face.postscript_name;
+        assert!(
+            name.starts_with(".SFNS") && name.contains("Italic"),
+            "layout measures the system italic, got {name}"
+        );
+
+        // The rasterizer is handed that face, and draws the run's glyph.
+        let held = rustkit_text::macos::face_font(run.face.id, 14.0).expect("the face is held");
+        assert_eq!(&held.postscript_name(), name);
+        let key = RunGlyphKey {
+            face: run.face.id,
+            glyph_id: run.glyphs[0].glyph_id,
+            font_size: 140,
+            subpixel_phase: 0,
+        };
+        let (bitmap, ..) = rasterize_run_glyph(&key, 14.0).expect("drawn");
+        assert!(bitmap.iter().any(|&v| v > 128), "the glyph has ink");
+    }
+}
+
+/// SHAPED-RUN CONTRACT, slice S0, paint side on Windows. Device-free: these
+/// read the bitmaps the atlas is filled from. The character path is the
+/// oracle.
+#[cfg(all(test, windows))]
+mod shaped_run_windows_paint_tests {
+    use super::*;
+    use rustkit_css::{ComputedStyle, Length};
+
+    const GEORGIA_LIST: &str = "Georgia, 'Times New Roman', serif";
+
+    fn run_in(family: &str, weight: u16, text: &str, size: f32) -> rustkit_layout::GlyphRun {
+        let mut style = ComputedStyle::new();
+        style.font_family = family.to_string();
+        style.font_size = Length::Px(size);
+        style.font_weight = rustkit_css::FontWeight(weight);
+        rustkit_layout::shape_line_run(text, &style, size, 0.0).expect("a Latin line has a run")
+    }
+
+    fn key(run: &rustkit_layout::GlyphRun, glyph_id: u16) -> RunGlyphKey {
+        RunGlyphKey {
+            face: run.face.id,
+            glyph_id,
+            font_size: (run.font_size * 10.0) as u32,
+            subpixel_phase: 0,
+        }
+    }
+
+    /// What the run draws is, byte for byte, what the character path draws
+    /// when it resolves the same list to the same face.
+    #[test]
+    fn run_glyphs_match_the_character_path() {
+        for (weight, text, size) in [(400u16, "Wave", 24.0f32), (700, "Type", 17.6)] {
+            let run = run_in(GEORGIA_LIST, weight, text, size);
+            for (glyph, c) in run.glyphs.iter().zip(text.chars()) {
+                let from_run = rasterize_run_glyph(&key(&run, glyph.glyph_id), run.font_size)
+                    .expect("the run's face is held");
+                let from_char = glyph::rasterize_char_for_test(c, "Georgia", size, weight)
+                    .expect("the character path draws it");
+                assert_eq!(from_run, from_char, "{c:?} at weight {weight}");
+            }
+        }
+    }
+
+    /// A space is a glyph with an advance and no ink: it must not fail the
+    /// run, or every line with a space would fall back to the family path.
+    #[test]
+    fn a_space_in_a_run_is_blank_not_a_failure() {
+        let run = run_in(GEORGIA_LIST, 400, "a b", 24.0);
+        let space = run.glyphs[1].glyph_id;
+        let (bitmap, w, h, advance, _, _) =
+            rasterize_run_glyph(&key(&run, space), 24.0).expect("a space rasterizes");
+        assert_eq!((bitmap.as_slice(), w, h), (&[0u8][..], 1, 1));
+        assert!(advance > 0.0);
+    }
+
+    #[test]
+    fn the_key_is_the_face_and_the_glyph_not_the_family() {
+        let regular = run_in(GEORGIA_LIST, 400, "W", 24.0);
+        let bold = run_in(GEORGIA_LIST, 700, "W", 24.0);
+        let k_regular = key(&regular, regular.glyphs[0].glyph_id);
+        let k_bold = key(&bold, bold.glyphs[0].glyph_id);
+        assert_ne!(k_regular, k_bold);
+        assert_ne!(
+            rasterize_run_glyph(&k_regular, 24.0).expect("regular"),
+            rasterize_run_glyph(&k_bold, 24.0).expect("bold"),
+        );
+        let walked = run_in("No Such Family 9f2c, Georgia", 400, "W", 24.0);
+        assert_eq!(key(&walked, walked.glyphs[0].glyph_id), k_regular);
+    }
+
+    /// A face the rasterizer does not hold draws nothing: the caller paints
+    /// the command through the family-list path instead.
+    #[test]
+    fn a_face_that_is_not_held_is_not_drawn() {
+        let run = run_in(GEORGIA_LIST, 400, "W", 24.0);
+        let mut unknown = key(&run, run.glyphs[0].glyph_id);
+        unknown.face ^= 0x5a5a;
+        assert!(rasterize_run_glyph(&unknown, 24.0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod mask_layer_tests {
+    //! The GPU-free half of `DisplayCommand::MaskedColor`: which texels the
+    //! mask texture holds and where its tiles land. The draw itself needs
+    //! a device and is covered by reading.
+    use super::*;
+
+    fn xywh(r: Rect) -> (f32, f32, f32, f32) {
+        (r.x, r.y, r.width, r.height)
+    }
+
+    #[test]
+    fn a_mask_texture_is_white_with_the_images_alpha() {
+        let rgba = [0, 0, 0, 255, 10, 200, 30, 128, 255, 0, 0, 0];
+        assert_eq!(
+            mask_alpha_rgba(&rgba),
+            vec![255, 255, 255, 255, 255, 255, 255, 128, 255, 255, 255, 0]
+        );
+    }
+
+    #[test]
+    fn the_mask_texture_has_its_own_key() {
+        assert_ne!(mask_texture_key("a.png"), "a.png");
+        assert_eq!(mask_texture_key("a.png"), mask_texture_key("a.png"));
+    }
+
+    #[test]
+    fn the_repro_mask_contained_in_its_box_is_one_full_quad() {
+        // 10x10 mask, `mask-size: contain` in the repro's 50x50 box at (8, 8).
+        let quads = background_tile_quads(
+            Rect::new(8.0, 8.0, 50.0, 50.0),
+            &BackgroundSize::Contain,
+            (0.0, 0.0),
+            (0.0, 0.0),
+            BackgroundRepeat::NoRepeat,
+            10.0,
+            10.0,
+        );
+        let quads: Vec<_> = quads.into_iter().map(|(r, t)| (xywh(r), t)).collect();
+        assert_eq!(quads, vec![((8.0, 8.0, 50.0, 50.0), [0.0, 0.0, 1.0, 1.0])]);
+    }
+
+    #[test]
+    fn a_repeated_mask_tiles_and_the_last_tile_is_cut_to_the_box() {
+        // A 20x20 mask tiled across 50x20: tiles at 0, 20, and half a tile at 40.
+        let quads = background_tile_quads(
+            Rect::new(0.0, 0.0, 50.0, 20.0),
+            &BackgroundSize::Auto,
+            (0.0, 0.0),
+            (0.0, 0.0),
+            BackgroundRepeat::RepeatX,
+            20.0,
+            20.0,
+        );
+        let quads: Vec<_> = quads.into_iter().map(|(r, t)| (xywh(r), t)).collect();
+        assert_eq!(
+            quads,
+            vec![
+                ((0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0, 1.0]),
+                ((20.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0, 1.0]),
+                ((40.0, 0.0, 10.0, 20.0), [0.0, 0.0, 0.5, 1.0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mask_offset_past_the_box_edge_keeps_only_the_inside_part() {
+        // 16x16 at -4px, -8px: the top-left is cut away.
+        let quads = background_tile_quads(
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            &BackgroundSize::Auto,
+            (0.0, 0.0),
+            (-4.0, -8.0),
+            BackgroundRepeat::NoRepeat,
+            16.0,
+            16.0,
+        );
+        let quads: Vec<_> = quads.into_iter().map(|(r, t)| (xywh(r), t)).collect();
+        assert_eq!(quads, vec![((0.0, 0.0, 12.0, 8.0), [0.25, 0.5, 1.0, 1.0])]);
+    }
+}
+
+#[cfg(test)]
+mod opacity_scope_tests {
+    //! `PushOpacity`/`PopOpacity` fade the vertices batched between them.
+    //! The four batches are stood in for by one list of colours; a flush is
+    //! `settle`, emptying the list, `rebase`.
+    use super::*;
+
+    const OPAQUE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+    fn alphas(batch: &[[f32; 4]]) -> Vec<f32> {
+        batch.iter().map(|c| c[3]).collect()
+    }
+
+    fn fade(alpha: f32) -> LayerEffect {
+        LayerEffect::Fade(alpha)
+    }
+
+    /// `Renderer::apply_since` for the colour batch.
+    fn apply(batch: &mut [[f32; 4]], effect: LayerEffect, start: usize) {
+        match effect {
+            LayerEffect::Fade(alpha) => fade_straight(batch.iter_mut(), start, alpha),
+            LayerEffect::ColorMatrix(m) => filter_straight(batch.iter_mut(), start, &m),
+        }
+    }
+
+    fn close(scopes: &mut OpacityScopes, batch: &mut [[f32; 4]]) {
+        let (effect, starts) = scopes.pop().expect("an open scope");
+        apply(batch, effect, starts[0]);
+    }
+
+    #[test]
+    fn a_scope_fades_what_was_batched_inside_it_only() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = vec![OPAQUE];
+        scopes.push(fade(0.5), [batch.len(); 4]);
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        batch.push(OPAQUE);
+        assert_eq!(alphas(&batch), [1.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn nested_scopes_multiply() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = Vec::new();
+        scopes.push(fade(0.5), [0; 4]);
+        batch.push(OPAQUE);
+        scopes.push(fade(0.5), [batch.len(); 4]);
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        close(&mut scopes, &mut batch);
+        assert_eq!(alphas(&batch), [0.5, 0.25]);
+    }
+
+    #[test]
+    fn a_flush_inside_a_scope_fades_both_halves_once() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = vec![OPAQUE];
+        scopes.push(fade(0.5), [batch.len(); 4]);
+        batch.push(OPAQUE);
+        scopes.push(fade(0.5), [batch.len(); 4]);
+        batch.push(OPAQUE);
+
+        // The flush: settle, a second settle before the draw (a flush that
+        // calls another), then the batches are emptied.
+        for _ in 0..2 {
+            let lens = [batch.len(); 4];
+            for (effect, starts) in scopes.settle(lens).into_iter().rev() {
+                apply(&mut batch, effect, starts[0]);
+            }
+        }
+        assert_eq!(alphas(&batch), [1.0, 0.5, 0.25], "what was drawn");
+        batch.clear();
+        scopes.rebase();
+
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        batch.push(OPAQUE);
+        assert_eq!(alphas(&batch), [0.25, 0.5, 1.0], "after the flush");
+    }
+
+    // invert(1) and grayscale(1) as `rustkit_layout::filter` builds them.
+    const INVERT: [f32; 20] = [
+        -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+    ];
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+
+    /// #790 R1 nit 4: off the layered path (past `MAX_OPACITY_LAYERS`, or on
+    /// a page with `backdrop-filter: blur()`) a filter scope used to paint
+    /// its content unfiltered.
+    #[test]
+    fn a_filter_scope_runs_its_matrix_on_what_was_batched_inside_it_only() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = vec![RED];
+        scopes.push(LayerEffect::ColorMatrix(INVERT), [batch.len(); 4]);
+        batch.push(RED);
+        close(&mut scopes, &mut batch);
+        batch.push(RED);
+        assert_eq!(batch, [RED, [0.0, 1.0, 1.0, 1.0], RED]);
+    }
+
+    #[test]
+    fn nested_filters_apply_inner_first_across_a_flush() {
+        // grayscale-ish row sum then invert differs from invert then the row
+        // sum: a matrix that copies red into every channel, inside invert.
+        let red_everywhere: [f32; 20] = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+        ];
+        let mut scopes = OpacityScopes::default();
+        let mut batch = Vec::new();
+        scopes.push(LayerEffect::ColorMatrix(INVERT), [0; 4]);
+        scopes.push(LayerEffect::ColorMatrix(red_everywhere), [0; 4]);
+        scopes.push(fade(0.5), [0; 4]);
+        batch.push(RED);
+        // A flush in the middle: what was drawn is inner first.
+        for _ in 0..2 {
+            let lens = [batch.len(); 4];
+            for (effect, starts) in scopes.settle(lens).into_iter().rev() {
+                apply(&mut batch, effect, starts[0]);
+            }
+        }
+        // red -> fade .5 -> (1,1,1,.5) -> invert -> (0,0,0,.5).
+        assert_eq!(batch, [[0.0, 0.0, 0.0, 0.5]], "what was drawn");
+        batch.clear();
+        scopes.rebase();
+        batch.push(RED);
+        for _ in 0..3 {
+            close(&mut scopes, &mut batch);
+        }
+        assert_eq!(batch, [[0.0, 0.0, 0.0, 0.5]], "after the flush");
+    }
+
+    #[test]
+    fn a_filter_matrix_clamps() {
+        let mut batch = vec![[0.5, 0.5, 0.5, 1.0]];
+        // brightness(3)
+        let mut m = [0.0; 20];
+        for (i, gain) in [3.0, 3.0, 3.0, 1.0].into_iter().enumerate() {
+            m[i * 6] = gain;
+        }
+        filter_straight(batch.iter_mut(), 0, &m);
+        assert_eq!(batch, [[1.0, 1.0, 1.0, 1.0]]);
+    }
+
+    #[test]
+    fn a_pop_without_a_push_is_ignored() {
+        assert!(OpacityScopes::default().pop().is_none());
+    }
+
+    #[test]
+    fn premultiplied_colours_fade_on_every_channel() {
+        let mut batch = vec![OPAQUE, [0.8, 0.4, 0.2, 0.8]];
+        fade_premultiplied(batch.iter_mut(), 1, 0.5);
+        assert_eq!(batch, vec![OPAQUE, [0.4, 0.2, 0.1, 0.4]]);
     }
 }
