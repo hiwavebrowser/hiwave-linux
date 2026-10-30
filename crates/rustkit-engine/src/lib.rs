@@ -12901,21 +12901,24 @@ impl layout_ctx::LayoutCtx {
                         }
                         let mut numbers: Vec<f32> = Vec::new();
                         let mut basis: Option<&str> = None;
+                        let mut basis_idx: Option<usize> = None;
                         for (idx, &tok) in parts.iter().enumerate() {
                             match tok.parse::<f32>() {
                                 Ok(n) if numbers.len() < 2 && basis.is_none() || (numbers.len() < 2 && idx > 0) => {
-                                    // Numbers (grow, shrink) must be contiguous
-                                    if numbers.len() == 1 && idx == 2 && basis.is_some() {
-                                        // `<number> <basis> <number>` is invalid; numbers must be adjacent
+                                    // Numbers (grow, shrink) must be contiguous:
+                                    // reject `<number> <basis> <number>` while allowing `<basis> <grow> <shrink>`.
+                                    if basis_idx == Some(1) && !numbers.is_empty() {
                                         return;
                                     }
                                     numbers.push(n);
                                 }
                                 Ok(n) if numbers.len() == 2 && n == 0.0 && basis.is_none() => {
                                     basis = Some(tok);
+                                    basis_idx = Some(idx);
                                 }
                                 Err(_) if basis.is_none() && is_flex_basis_value(tok) => {
                                     basis = Some(tok);
+                                    basis_idx = Some(idx);
                                 }
                                 _ => return,
                             }

@@ -33,6 +33,7 @@ struct AliasMap {
     entries: VecDeque<(String, String)>,
 }
 
+#[cfg(not(test))]
 fn aliases() -> &'static Mutex<AliasMap> {
     static ALIASES: OnceLock<Mutex<AliasMap>> = OnceLock::new();
     ALIASES.get_or_init(|| Mutex::new(AliasMap { entries: VecDeque::new() }))
@@ -43,6 +44,13 @@ thread_local! {
     static FORCE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static SINK: std::cell::RefCell<Option<std::sync::Arc<Mutex<Vec<String>>>>> =
         const { std::cell::RefCell::new(None) };
+    static TEST_ALIASES: std::cell::RefCell<AliasMap> =
+        const { std::cell::RefCell::new(AliasMap { entries: VecDeque::new() }) };
+}
+
+#[cfg(test)]
+fn clear_test_aliases() {
+    TEST_ALIASES.with(|cell| cell.borrow_mut().entries.clear());
 }
 
 /// `HIWAVE_CONSOLE_LOG=1`. Empty, `0`, and anything else are off.
@@ -57,6 +65,7 @@ pub(crate) fn enabled() -> bool {
 #[cfg(test)]
 pub(crate) fn force_for_test(on: Option<bool>) {
     FORCE.with(|cell| cell.set(on));
+    clear_test_aliases();
     sync_diag_armed();
 }
 
@@ -89,23 +98,52 @@ pub(crate) fn alias(name: &str, url: &str) {
     if !enabled() {
         return;
     }
-    let Ok(mut map) = aliases().lock() else {
-        return;
-    };
-    if map.entries.len() >= ALIAS_CAP {
-        map.entries.pop_front();
+    #[cfg(test)]
+    {
+        TEST_ALIASES.with(|cell| {
+            let mut map = cell.borrow_mut();
+            if map.entries.len() >= ALIAS_CAP {
+                map.entries.pop_front();
+            }
+            map.entries.push_back((name.to_string(), url.to_string()));
+        });
     }
-    map.entries.push_back((name.to_string(), url.to_string()));
+    #[cfg(not(test))]
+    {
+        let Ok(mut map) = aliases().lock() else {
+            return;
+        };
+        if map.entries.len() >= ALIAS_CAP {
+            map.entries.pop_front();
+        }
+        map.entries.push_back((name.to_string(), url.to_string()));
+    }
 }
 
 /// The URL an engine script label stands for, or `path` itself; either
 /// way through [`brief_place`].
 fn resolve(path: &str) -> String {
-    let Ok(map) = aliases().lock() else {
-        return brief_place(path);
-    };
-    let place = map.entries.iter().rev().find(|(name, _)| name == path).map_or(path, |(_, url)| url.as_str());
-    brief_place(place)
+    #[cfg(test)]
+    {
+        return TEST_ALIASES.with(|cell| {
+            let map = cell.borrow();
+            let place = map
+                .entries
+                .iter()
+                .rev()
+                .find(|(name, _)| name == path)
+                .map_or(path, |(_, url)| url.as_str());
+            brief_place(place)
+        });
+    }
+    #[cfg(not(test))]
+    {
+        let Ok(map) = aliases().lock() else {
+            return brief_place(path);
+        };
+        let place = map.entries.iter().rev().find(|(name, _)| name == path).map_or(path, |(_, url)| url.as_str());
+        brief_place(place)
+    }
 }
 
 fn emit(line: String) {
@@ -484,9 +522,6 @@ mod tests {
         fn drop(&mut self) {
             force_for_test(None);
             install_sink(None);
-            if let Ok(mut map) = aliases().lock() {
-                map.entries.clear();
-            }
         }
     }
 
@@ -960,9 +995,6 @@ mod engine_tests {
         fn drop(&mut self) {
             force_for_test(None);
             install_sink(None);
-            if let Ok(mut map) = aliases().lock() {
-                map.entries.clear();
-            }
         }
     }
 
