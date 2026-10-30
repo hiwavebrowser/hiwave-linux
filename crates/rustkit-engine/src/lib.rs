@@ -392,6 +392,8 @@ mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
+mod flex_item_paint_order_tests;
+#[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
 #[cfg(test)]
 mod content_string_tests;
@@ -403,6 +405,8 @@ mod is_complex_argument_tests;
 mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
+#[cfg(test)]
+mod positioned_paint_order_tests;
 #[cfg(test)]
 mod abspos_percent_height_image_tests;
 #[cfg(test)]
@@ -12901,21 +12905,24 @@ impl layout_ctx::LayoutCtx {
                         }
                         let mut numbers: Vec<f32> = Vec::new();
                         let mut basis: Option<&str> = None;
+                        let mut basis_idx: Option<usize> = None;
                         for (idx, &tok) in parts.iter().enumerate() {
                             match tok.parse::<f32>() {
                                 Ok(n) if numbers.len() < 2 && basis.is_none() || (numbers.len() < 2 && idx > 0) => {
-                                    // Numbers (grow, shrink) must be contiguous
-                                    if numbers.len() == 1 && idx == 2 && basis.is_some() {
-                                        // `<number> <basis> <number>` is invalid; numbers must be adjacent
+                                    // Numbers (grow, shrink) must be contiguous:
+                                    // reject `<number> <basis> <number>` while allowing `<basis> <grow> <shrink>`.
+                                    if basis_idx == Some(1) && !numbers.is_empty() {
                                         return;
                                     }
                                     numbers.push(n);
                                 }
                                 Ok(n) if numbers.len() == 2 && n == 0.0 && basis.is_none() => {
                                     basis = Some(tok);
+                                    basis_idx = Some(idx);
                                 }
                                 Err(_) if basis.is_none() && is_flex_basis_value(tok) => {
                                     basis = Some(tok);
+                                    basis_idx = Some(idx);
                                 }
                                 _ => return,
                             }
@@ -33354,8 +33361,9 @@ mod cascade_wire_tests {
     fn an_invalid_flex_shorthand_keeps_the_earlier_flex() {
         let e = engine();
         // Three bare numbers are invalid: the basis needs a unit unless it
-        // is `0` (`flex: 1 1 0` stays valid).
-        for junk in ["1 junk", "junk 5", "1 2 3 4", "1 2 junk", "1 2 3", "1 1 1"] {
+        // is `0` (`flex: 1 1 0` stays valid). Basis between two numbers
+        // (`2 10px 3`) is also invalid; numbers must be contiguous.
+        for junk in ["1 junk", "junk 5", "1 2 3 4", "1 2 junk", "1 2 3", "1 1 1", "2 10px 3"] {
             let mut s = ComputedStyle::default();
             e.lctx.apply_style_property(&mut s, "flex", "2 3 10px");
             e.lctx.apply_style_property(&mut s, "flex", junk);
@@ -33393,6 +33401,20 @@ mod cascade_wire_tests {
         e.lctx.apply_style_property(&mut s, "flex", "3 3 10px");
         e.lctx.apply_style_property(&mut s, "flex", "2 calc(100% - 20px)");
         assert_eq!((s.flex_grow, s.flex_shrink), (2.0, 1.0), "flex: <grow> <calc basis>");
+        let mut s = ComputedStyle::default();
+        e.lctx.apply_style_property(&mut s, "flex", "10px 2 3");
+        assert_eq!(
+            (s.flex_grow, s.flex_shrink, s.flex_basis),
+            (2.0, 3.0, rustkit_css::FlexBasis::Length(10.0)),
+            "flex: 10px 2 3 (<basis> <grow> <shrink>)"
+        );
+        let mut s = ComputedStyle::default();
+        e.lctx.apply_style_property(&mut s, "flex", "10px 1 0");
+        assert_eq!(
+            (s.flex_grow, s.flex_shrink, s.flex_basis),
+            (1.0, 0.0, rustkit_css::FlexBasis::Length(10.0)),
+            "flex: 10px 1 0 (<basis> <grow> <shrink>)"
+        );
     }
 
     #[test]
@@ -34049,6 +34071,41 @@ window.addEventListener('resize', function () {
             .expect("resize");
         let seen = engine.execute_script(view, "seen.join(',')").unwrap();
         assert_eq!(seen, r#"String("200x100,resize:640x480")"#);
+    }
+
+    /// HTML §8.1.8.2.1: `<body onload>` and `<body onresize>` are the
+    /// Window's handlers (BW1). `load` fires at the Window only, so the body's
+    /// attribute must be compiled into the Window's slot for it to run at
+    /// all; `document.body.onresize = f` is `window.onresize = f` and runs on
+    /// a resize of the view.
+    #[test]
+    fn body_onload_and_onresize_are_the_windows_handlers() {
+        let html = r#"<html><head><script>
+var seen = [];
+</script></head><body onload="seen.push('load:' + (this === window) + ':' + document.readyState)"
+    onresize="seen.push('attr-resize:' + window.innerWidth)">hi</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let seen = engine.execute_script(view, "seen.join(',')").unwrap();
+        assert_eq!(seen, r#"String("load:true:complete")"#);
+
+        engine
+            .execute_script(
+                view,
+                "document.body.onresize = function () { seen.push('resize:' + window.innerWidth + ':' + (this === window)); }; \
+                 window.onresize === document.body.onresize",
+            )
+            .map(|v| assert_eq!(v, "Boolean(true)"))
+            .unwrap();
+        engine
+            .resize_view(view, Bounds { x: 0, y: 0, width: 640, height: 480 })
+            .expect("resize");
+        let seen = engine.execute_script(view, "seen.join(',')").unwrap();
+        assert_eq!(seen, r#"String("load:true:complete,resize:640:true")"#);
     }
 
     #[test]

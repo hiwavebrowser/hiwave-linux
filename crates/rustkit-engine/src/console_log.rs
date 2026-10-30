@@ -33,6 +33,7 @@ struct AliasMap {
     entries: VecDeque<(String, String)>,
 }
 
+#[cfg(not(test))]
 fn aliases() -> &'static Mutex<AliasMap> {
     static ALIASES: OnceLock<Mutex<AliasMap>> = OnceLock::new();
     ALIASES.get_or_init(|| Mutex::new(AliasMap { entries: VecDeque::new() }))
@@ -43,6 +44,13 @@ thread_local! {
     static FORCE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static SINK: std::cell::RefCell<Option<std::sync::Arc<Mutex<Vec<String>>>>> =
         const { std::cell::RefCell::new(None) };
+    static TEST_ALIASES: std::cell::RefCell<AliasMap> =
+        const { std::cell::RefCell::new(AliasMap { entries: VecDeque::new() }) };
+}
+
+#[cfg(test)]
+fn clear_test_aliases() {
+    TEST_ALIASES.with(|cell| cell.borrow_mut().entries.clear());
 }
 
 /// `HIWAVE_CONSOLE_LOG=1`. Empty, `0`, and anything else are off.
@@ -57,6 +65,7 @@ pub(crate) fn enabled() -> bool {
 #[cfg(test)]
 pub(crate) fn force_for_test(on: Option<bool>) {
     FORCE.with(|cell| cell.set(on));
+    clear_test_aliases();
     sync_diag_armed();
 }
 
@@ -89,23 +98,52 @@ pub(crate) fn alias(name: &str, url: &str) {
     if !enabled() {
         return;
     }
-    let Ok(mut map) = aliases().lock() else {
-        return;
-    };
-    if map.entries.len() >= ALIAS_CAP {
-        map.entries.pop_front();
+    #[cfg(test)]
+    {
+        TEST_ALIASES.with(|cell| {
+            let mut map = cell.borrow_mut();
+            if map.entries.len() >= ALIAS_CAP {
+                map.entries.pop_front();
+            }
+            map.entries.push_back((name.to_string(), url.to_string()));
+        });
     }
-    map.entries.push_back((name.to_string(), url.to_string()));
+    #[cfg(not(test))]
+    {
+        let Ok(mut map) = aliases().lock() else {
+            return;
+        };
+        if map.entries.len() >= ALIAS_CAP {
+            map.entries.pop_front();
+        }
+        map.entries.push_back((name.to_string(), url.to_string()));
+    }
 }
 
 /// The URL an engine script label stands for, or `path` itself; either
 /// way through [`brief_place`].
 fn resolve(path: &str) -> String {
-    let Ok(map) = aliases().lock() else {
-        return brief_place(path);
-    };
-    let place = map.entries.iter().rev().find(|(name, _)| name == path).map_or(path, |(_, url)| url.as_str());
-    brief_place(place)
+    #[cfg(test)]
+    {
+        return TEST_ALIASES.with(|cell| {
+            let map = cell.borrow();
+            let place = map
+                .entries
+                .iter()
+                .rev()
+                .find(|(name, _)| name == path)
+                .map_or(path, |(_, url)| url.as_str());
+            brief_place(place)
+        });
+    }
+    #[cfg(not(test))]
+    {
+        let Ok(map) = aliases().lock() else {
+            return brief_place(path);
+        };
+        let place = map.entries.iter().rev().find(|(name, _)| name == path).map_or(path, |(_, url)| url.as_str());
+        brief_place(place)
+    }
 }
 
 fn emit(line: String) {
@@ -366,7 +404,18 @@ fn brief_relative(url: &str) -> String {
         (authority.rfind('@').map_or(authority, |at| &authority[at + 1..]), path)
     };
     let end = path.find(['?', '#']).unwrap_or(path.len());
-    cap_url(format!("{slashes}{host}{}", crate::inspector::drop_path_params(&path[..end])))
+    let path = &path[..end];
+    // A not-quite-scheme (`ht tp://u:pw@h`, `1http://...`) or an `@` before
+    // the first `/` (`a b:pw@h/x`) is a credential the parser did not read
+    // as one; none of it is printed (T8, carried from T7a).
+    let first_slash = path.find('/').unwrap_or(path.len());
+    if slashes.is_empty() && (path.contains("://") || path.find('@').is_some_and(|at| at < first_slash)) {
+        return "…".to_string();
+    }
+    // Control characters become spaces, so a specifier cannot start a
+    // forged mirror line.
+    let brief = format!("{slashes}{host}{}", crate::inspector::drop_path_params(path));
+    cap_url(brief.chars().map(|c| if c.is_control() { ' ' } else { c }).collect())
 }
 
 /// At most 180 characters, the last one `…` when cut.
@@ -484,9 +533,6 @@ mod tests {
         fn drop(&mut self) {
             force_for_test(None);
             install_sink(None);
-            if let Ok(mut map) = aliases().lock() {
-                map.entries.clear();
-            }
         }
     }
 
@@ -815,6 +861,46 @@ mod tests {
         assert_eq!(brief_url("m.js"), "m.js");
     }
 
+    // T8 (T7a nits carried, Atlas 75f82d34 residue + Prometheus 295816ff).
+
+    #[test]
+    fn brief_relative_prints_nothing_of_a_not_quite_scheme_with_userinfo() {
+        // The parser finds no scheme in these, so they reach the hand cut,
+        // which printed them whole.
+        for u in ["ht tp://u:SECRET@h/x", "1http://u:SECRET@h/x", "-http://u:SECRET@h/x", "h ttps://u:SECRET@h/x?q"] {
+            let brief = brief_without_userinfo(u);
+            assert_eq!(brief, "…", "{u:?}");
+        }
+    }
+
+    #[test]
+    fn brief_relative_prints_nothing_of_a_userinfo_before_the_first_slash() {
+        for u in ["a b:SECRET@h/x", "u%3ASECRET@h/x"] {
+            assert_eq!(brief_without_userinfo(u), "…", "{u:?}");
+        }
+        // An `@` in the path, after the first `/`, is path text.
+        assert_eq!(brief_url("./a/b@c"), "./a/b@c");
+    }
+
+    #[test]
+    fn scrub_url_keeps_a_hostless_path_a_path_when_its_params_are_cut() {
+        // `foo:/;x/a@b`: cutting `;x` leaves `//a@b`, which url's `set_path`
+        // serialised as `foo://a@b`, so the record re-read as user `a`,
+        // host `b`.
+        let brief = brief_url("foo:/;x/a@b");
+        assert_eq!(brief, "foo:/.//a@b");
+        let reread = url::Url::parse(&brief).unwrap();
+        assert!(reread.host().is_none() && reread.username().is_empty(), "{brief}");
+    }
+
+    #[test]
+    fn brief_relative_maps_control_characters_so_a_line_cannot_be_forged() {
+        let brief = brief_url("./x\nnet response GET https://evil status=200");
+        assert!(!brief.contains('\n'), "{brief:?}");
+        let brief = brief_url("/a\tb?S");
+        assert!(!brief.contains('\t') && !brief.contains('S'), "{brief:?}");
+    }
+
     #[test]
     fn brief_place_keeps_only_numbered_engine_labels() {
         // T7a R1 delta (Atlas 5): `word#` is a label only when digits follow.
@@ -900,6 +986,52 @@ mod tests {
         assert!(line.contains("frames=\"set x > set x\""), "{line}");
         assert!(!line.contains('\n'), "{line}");
     }
+
+    #[test]
+    fn aliases_do_not_race_across_threads_or_leak_across_force_for_test() {
+        let _reset = Reset;
+        // 1. Simulate a test (like inspector_engine_tests) that calls
+        // force_for_test(Some(true)), records inline#1, and calls
+        // force_for_test(None) without dropping console_log::tests::Reset.
+        force_for_test(Some(true));
+        alias("inline#1", "https://stale-from-earlier-test.example/");
+        force_for_test(None);
+
+        // 2. Now start a fresh forced test on this thread and also run a
+        // concurrent Reset on another thread between alias() and console_message().
+        force_for_test(Some(true));
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        alias("chunk#thread-a", "https://thread-a.example/app.js");
+
+        std::thread::spawn(|| {
+            let _other_reset = Reset;
+            force_for_test(Some(true));
+            alias("chunk#thread-b", "https://thread-b.example/other.js");
+        })
+        .join()
+        .expect("other thread");
+
+        console_message(
+            LogLevel::Log,
+            "from-a",
+            Some(&ScriptPosition { path: "chunk#thread-a".into(), line: 1, column: 1 }),
+        );
+        console_message(
+            LogLevel::Log,
+            "inline-a",
+            Some(&ScriptPosition { path: "inline#1".into(), line: 1, column: 1 }),
+        );
+        let text = sink.lock().unwrap().join("\n");
+        assert!(
+            text.contains("console log https://thread-a.example/app.js:1:1 from-a"),
+            "concurrent Reset on another thread cleared this thread's alias: {text}"
+        );
+        assert!(
+            text.contains("console log inline#1:1:1 inline-a"),
+            "stale alias from before force_for_test(None) leaked into new test: {text}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "headless"))]
@@ -914,9 +1046,6 @@ mod engine_tests {
         fn drop(&mut self) {
             force_for_test(None);
             install_sink(None);
-            if let Ok(mut map) = aliases().lock() {
-                map.entries.clear();
-            }
         }
     }
 

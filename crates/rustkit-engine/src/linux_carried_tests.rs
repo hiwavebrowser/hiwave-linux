@@ -1399,10 +1399,16 @@ mod flex_property_tests {
         assert_eq!((gs.flex_grow, gs.flex_shrink), (2.0, 3.0));
         let gb = st("flex: 2 100px");
         assert_eq!((gb.flex_grow, gb.flex_basis), (2.0, FlexBasis::Length(100.0)));
-        // three-value form
+        // three-value form (basis last or basis first per css-flexbox-1 §7.1.1)
         let three = st("flex: 3 4 50px");
         assert_eq!((three.flex_grow, three.flex_shrink, three.flex_basis),
                    (3.0, 4.0, FlexBasis::Length(50.0)));
+        let basis_first = st("flex: 10px 2 3");
+        assert_eq!((basis_first.flex_grow, basis_first.flex_shrink, basis_first.flex_basis),
+                   (2.0, 3.0, FlexBasis::Length(10.0)));
+        let basis_first_no_shrink = st("flex: 10px 1 0");
+        assert_eq!((basis_first_no_shrink.flex_grow, basis_first_no_shrink.flex_shrink, basis_first_no_shrink.flex_basis),
+                   (1.0, 0.0, FlexBasis::Length(10.0)));
         // a bare length is a basis, with grow/shrink 1
         let b = st("flex: 30px");
         assert_eq!((b.flex_grow, b.flex_basis), (1.0, FlexBasis::Length(30.0)));
