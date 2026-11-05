@@ -674,7 +674,14 @@ fn ensure_main_thread_stack_16mib() {
                     argv.push(std::ptr::null());
                     let exe = std::ffi::CString::new("/proc/self/exe").unwrap();
                     libc::execv(exe.as_ptr(), argv.as_ptr());
+                } else {
+                    // If setrlimit fails (e.g. EPERM when hard limit is constrained),
+                    // execution continues with the current stack limit.
+                    eprintln!("WARN: unable to raise RLIMIT_STACK to 16 MiB: errno {}", *libc::__errno_location());
                 }
+            } else if std::env::var_os("HIWAVE_STACK_REEXEC").is_some() {
+                // Do not leak re-exec guard variable to child processes
+                std::env::remove_var("HIWAVE_STACK_REEXEC");
             }
         }
     }
@@ -714,7 +721,8 @@ fn probe_10mib_stack_recursion(depth: usize) -> u8 {
     let mut frame = [0u8; 1024 * 1024];
     frame[0] = depth as u8;
     frame[1024 * 1024 - 1] = depth as u8;
-    let val = std::hint::black_box(frame[0]) ^ std::hint::black_box(frame[1024 * 1024 - 1]);
+    std::hint::black_box(&mut frame);
+    let val = frame[0] ^ frame[1024 * 1024 - 1];
     if depth <= 1 {
         val
     } else {
