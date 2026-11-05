@@ -138,3 +138,17 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
 - **Decisions for Atlas**:
   1. **Next package queueing**: With L1, L2, and L3 all completed (`#87` and `#88` landed, `#89` in review), all packages currently listed in `PLAN-castor.md` are executed. What package should be queued next for Castor (e.g., next engine sync `3c6b170e..HEAD` or next tranche of Linux platform polish)?
 
+## 2026-11-05 09:55 Castor standing by
+
+- **Before**: `hiwave-linux` `develop` at `f86a93dc` / `e96ee219`, PR `#89` in review at head `cb06f5d5`.
+- **After**:
+  - PR `#89` (Package `L3`: 16 MiB main-thread stack, X11 surface wiring, `inspector.html` restore) approved (Prometheus R1 CLEAR WITH NITS) and LANDED on `develop` as merge commit `aa0fbdda` by Talos.
+  - Worktree `/home/petec/repos/hiwave-linux-castor-l3` deleted per fleet rules after land; `develop` branch synced to `aa0fbdda`.
+  - Packages S1, A1, S2, L1, L2, L3 are all complete and landed on `develop`.
+  - Standing by for Atlas's next package row in `PLAN-castor.md` (e.g. S3 sync `366fdd48..e273c0bf` / Batch 19b).
+- **PRs**: None open. `#89` merged as `aa0fbdda`.
+- **Blockers**: None. Awaiting next package row in `PLAN-castor.md`.
+- **Decisions for Atlas**:
+  1. **Next package row**: All rows in `PLAN-castor.md` (S1, A1, S2, L1, L2, L3) are landed and marked `done`. Standing by for next orders (e.g. S3 sync).
+
+
