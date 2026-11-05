@@ -115,3 +115,26 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
 - **Blockers**: None. Awaiting R1 review on `#88`.
 - **Decisions for Atlas**:
   1. **Row L3 unblocking**: Next row is `L3` (App parity: 16 MiB main-thread stack linker flag in `crates/hiwave-app/build.rs`, X11 `WindowSurface`/`ContentThread` wiring, and restoring `ui/inspector.html`). Should I prepare a fresh worktree for `L3` while waiting for `#88` review, or wait for `#88` to land?
+
+## 2026-11-05 04:45 Castor L3
+
+- **Before**: `hiwave-linux` `develop` at `f86a93dc` (with `#88` merged as `79f6b621`).
+- **After**:
+  - Fresh worktree `/home/petec/repos/hiwave-linux-castor-l3` on branch `castor/l3-app-parity`.
+  - Configured 16 MiB main-thread stack linker flag on Linux (`-Wl,-z,stack-size=16777216`) in `crates/hiwave-app/build.rs`.
+  - Added red-first Linux test in `crates/hiwave-app/tests/main_thread_stack.rs` (asserts `readelf -lW` reports `GNU_STACK` `memsz` == `0x1000000`).
+  - Restored canonical `crates/hiwave-app/src/ui/inspector.html` (~67 KB) from `hiwave-macos` and wired `pub const INSPECTOR_HTML: &str = include_str!("ui/inspector.html");` in `crates/hiwave-app/src/main.rs`. Verified `scripts/tests/test_inspector_console_groups.py` passes 4/4.
+  - Implemented `WindowSurface::attach_x11(parent: u64, bounds: Bounds)` on Linux in `crates/rustkit-engine/src/presenter.rs` and exported `WindowSurface` unconditionally in `crates/rustkit-engine/src/lib.rs`.
+  - Added `clip_raw_view` no-op fallback in `crates/rustkit-viewhost/src/lib.rs` for `not(target_os = "macos")`.
+  - Ported `crates/hiwave-app/src/webview_rustkit.rs`, extracting X11 window handle from `tao` window and wiring `WindowSurface::attach_x11` + `ContentThread::spawn` on Linux when `content_thread_enabled()` is true.
+  - Added optional dependency `hiwave-shield-intercept` to `crates/hiwave-app/Cargo.toml` and wired `shield_adapter` in `main.rs`.
+  - Added test `window_surface_attaches_and_presents_on_x11` in `crates/rustkit-engine/src/linux_carried_tests.rs`.
+  - Verified `hiwave` binary builds with default features and `--features rustkit`, and launches cleanly on X11 (`DISPLAY=:0 timeout 2s target/debug/hiwave`).
+  - **Workspace tests (`--workspace --no-fail-fast -- --test-threads=1`)**: **3,876 passed, 0 failed, 33 ignored** across 57 non-empty suites (+2 passed over L2).
+  - **26-case Linux parity campaign**: **`1.1410%` mean** vs Mac `latest-develop.json` (`ff6ad36a`) **`1.1075%`** (delta **`+0.0335%`**, **`0 / 26`** cases over `+1.0 pt` vs Mac).
+- **PRs**:
+  - `hiwavebrowser/hiwave-linux#89` (`castor/l3-app-parity`, head `54366282`), ready for R1 (Argos / Prometheus).
+- **Blockers**: None. Awaiting R1 review on `#89`.
+- **Decisions for Atlas**:
+  1. **Next package queueing**: With L1, L2, and L3 all completed (`#87` and `#88` landed, `#89` in review), all packages currently listed in `PLAN-castor.md` are executed. What package should be queued next for Castor (e.g., next engine sync `3c6b170e..HEAD` or next tranche of Linux platform polish)?
+
