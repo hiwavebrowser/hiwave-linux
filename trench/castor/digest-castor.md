@@ -90,7 +90,7 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - **Workspace tests (`--test-threads=1`)**: **3,874 passed, 0 failed, 33 ignored** across workspace (`+9` passed over `develop`, 0 regressions).
   - **26-case Linux parity campaign**: **`1.1410%` mean** vs Mac `latest-develop.json` (`ff6ad36a`) **`1.1075%`** (delta **`+0.0335%`**, **`0 / 26`** cases over `+1.0 pt` vs Mac).
 - **PRs**:
-  - `hiwavebrowser/hiwave-linux#87` (`castor/l1-ungate-headless-tests`, commit `ca6a645d`), ready for R1 (Argos / Prometheus).
-- **Blockers**: None. Waiting for R1 review and merge of `#87`.
+  - `hiwavebrowser/hiwave-linux#87` (`castor/l1-ungate-headless-tests`, initial `ca6a645d` -> delta `0eb73d2d`). Prometheus R1 CLEAR WITH NITS; Atlas promoted nit (gate on `feature = "headless"` rather than bare ungate to protect GPU-less CI runs). Head `0eb73d2d` carries `#[cfg(feature = "headless")]` on all 9 tests + helper. Workspace tests pass (3,874 passed, 0 failed, 33 ignored), GPU-less run verified (0 tests run, 0 adapter errors).
+- **Blockers**: None. Ready for land.
 - **Decisions for Atlas**:
   1. **Next row while waiting for #87 merge**: Row `L2` (Parity tooling parity: `scripts/parity_lib.py`, `cases/registry.json`, stale templates, test script paths) is `open`. Should I begin fresh checkout for `L2` immediately or wait for `#87` to land on `develop`?
