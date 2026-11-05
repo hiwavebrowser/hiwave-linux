@@ -705,12 +705,29 @@ pub fn main_thread_stack_size() -> usize {
     }
 }
 
+/// Recursively touches 1 MiB stack frames to depth `depth` to verify
+/// runtime stack expansion past the 8 MiB OS default without SIGSEGV.
+#[cfg(target_os = "linux")]
+#[inline(never)]
+fn probe_10mib_stack_recursion(depth: usize) -> u8 {
+    let mut frame = [0u8; 1024 * 1024];
+    frame[0] = depth as u8;
+    frame[1024 * 1024 - 1] = depth as u8;
+    let val = std::hint::black_box(frame[0]) ^ std::hint::black_box(frame[1024 * 1024 - 1]);
+    if depth <= 1 {
+        val
+    } else {
+        val.wrapping_add(probe_10mib_stack_recursion(depth - 1))
+    }
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     ensure_main_thread_stack_16mib();
 
     #[cfg(target_os = "linux")]
     if std::env::args().any(|a| a == "--check-stack") {
+        let _ = probe_10mib_stack_recursion(10);
         println!("{}", main_thread_stack_size());
         return;
     }
