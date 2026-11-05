@@ -94,3 +94,24 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
 - **Blockers**: None. Ready for land.
 - **Decisions for Atlas**:
   1. **Next row while waiting for #87 merge**: Row `L2` (Parity tooling parity: `scripts/parity_lib.py`, `cases/registry.json`, stale templates, test script paths) is `open`. Should I begin fresh checkout for `L2` immediately or wait for `#87` to land on `develop`?
+
+## 2026-11-05 01:35 Castor L2
+
+- **Before**: `hiwave-linux` `develop` at `21cb0309` (with `#87` merged as `8b4d7afc`).
+- **After**:
+  - Fresh worktree `/home/petec/repos/hiwave-linux-castor-l2` on branch `castor/l2-parity-tooling`.
+  - Synced `scripts/parity_lib.py` with modern `--html-file`/`--dump-frame` flags, single source of truth from `cases/registry.json`, dynamic `CARGO_TARGET_DIR` binary discovery, and node path resolution supporting `~/.local/node22/bin`.
+  - Synced `cases/registry.json` (26 non-holdout cases) and `cases/declaration_gaps.json`.
+  - Synced `crates/hiwave-app/src/ui/{about,chrome,chrome_rustkit,settings,shelf}.html` canonical templates from macOS.
+  - Synced case HTML files in `websuite/cases/`, `websuite/micro/`, `websuite/common/`.
+  - Synced `scripts/parity_test.py` and modern `scripts/parity_swarm.py`.
+  - Added existence guards for kept-deleted macOS paths in `scripts/tests/test_inspector_console_groups.py` (skips missing `inspector.html`), `scripts/tests/test_capture_suites_actually_run.py` (skips missing `parity.yml`), and `scripts/tests/test_js_suites_actually_run.py` (skips missing `parity.yml`).
+  - Updated `.gitignore` to ignore parity capture/results output directories and `node_modules/`.
+  - Configured `LimitNOFILE=524288:524288` in `null-daemon-castor.service`, verified daemon process has 524288 limit matching `ulimit -n 65536` in test runs.
+  - **Workspace tests (`--workspace --no-fail-fast -- --test-threads=1`)**: **3,874 passed, 0 failed, 33 ignored** across 56 test suites.
+  - **26-case Linux parity campaign**: **`1.1410%` mean** vs Mac `latest-develop.json` (`ff6ad36a`) **`1.1075%`** (delta **`+0.0335%`**, **`0 / 26`** cases over `+1.0 pt` vs Mac).
+- **PRs**:
+  - `hiwavebrowser/hiwave-linux#88` (`castor/l2-parity-tooling`, head `c8a46971`), ready for R1 (Argos / Prometheus).
+- **Blockers**: None. Awaiting R1 review on `#88`.
+- **Decisions for Atlas**:
+  1. **Row L3 unblocking**: Next row is `L3` (App parity: 16 MiB main-thread stack linker flag in `crates/hiwave-app/build.rs`, X11 `WindowSurface`/`ContentThread` wiring, and restoring `ui/inspector.html`). Should I prepare a fresh worktree for `L3` while waiting for `#88` review, or wait for `#88` to land?
