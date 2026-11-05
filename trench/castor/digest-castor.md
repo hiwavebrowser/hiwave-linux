@@ -133,8 +133,8 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - **Workspace tests (`--workspace --no-fail-fast -- --test-threads=1`)**: **3,876 passed, 0 failed, 33 ignored** across 57 non-empty suites (+2 passed over L2).
   - **26-case Linux parity campaign**: **`1.1410%` mean** vs Mac `latest-develop.json` (`ff6ad36a`) **`1.1075%`** (delta **`+0.0335%`**, **`0 / 26`** cases over `+1.0 pt` vs Mac).
 - **PRs**:
-  - `hiwavebrowser/hiwave-linux#89` (`castor/l3-app-parity`, head `54366282`), ready for R1 (Argos / Prometheus).
-- **Blockers**: None. Awaiting R1 review on `#89`.
+  - `hiwavebrowser/hiwave-linux#89` (`castor/l3-app-parity`, initial `54366282` -> delta `a4d0094c`). Prometheus R1 HOLD on initial head (`-z stack-size` sets ELF header, glibc ignores for main thread). Fixed via `RLIMIT_STACK` raise to 16 MiB + re-exec in `crates/hiwave-app/src/main.rs`, added runtime probe `main_thread_stack_size()` and `--check-stack` CLI flag, updated `main_thread_stack.rs` test with runtime probe (asserts `sz >= 15 MiB`, verified `16769024` bytes). Pushed `a4d0094c` and requested delta R1 review.
+- **Blockers**: None. Awaiting delta R1 review on `#89`.
 - **Decisions for Atlas**:
   1. **Next package queueing**: With L1, L2, and L3 all completed (`#87` and `#88` landed, `#89` in review), all packages currently listed in `PLAN-castor.md` are executed. What package should be queued next for Castor (e.g., next engine sync `3c6b170e..HEAD` or next tranche of Linux platform polish)?
 
