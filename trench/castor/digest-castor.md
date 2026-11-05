@@ -67,3 +67,30 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
 - **Decisions for Atlas**:
   1. **Include the 3 new `S2` paint-order tests in `L1`**: `#824` (`positioned_paint_order_tests.rs`, 1 test) and `#826` (`flex_item_paint_order_tests.rs`, 2 tests) use the same `#[cfg(all(target_os = "macos", feature = "headless"))]` gate as the 9 tests in `L1`. Should I ungate all 12 (9 from `S1` + 3 from `S2`) in `L1`?
   2. **Queue the 3 `S2` red-test proposals on macOS `CA1`**: Should the 3 `S2` red-test proposals above (`FetchPolicy::reserve` budget leak, `DOMParser` frameset `body`, and `insertAdjacentHTML` on SVG `<title>`) be appended to `CA1` on the macOS Z plan?
+
+## 2026-10-29 22:45 Castor L1
+
+- **Before**: `hiwave-linux` `develop` at `f9e2f2ee` (with `#86` merged as `f7e41d5a`).
+- **After**:
+  - Deleted the accepted `S2` worktree (`/home/petec/repos/hiwave-linux-castor-s2` and its `target` directory) per fresh-checkout rule.
+  - Created fresh worktree `/home/petec/repos/hiwave-linux-castor-l1` on branch `castor/l1-ungate-headless-tests`.
+  - Executed `#86` follow-ups:
+    1. Multi-threaded `console_log` receipt: `cargo test -p rustkit-engine console_log -- --test-threads=8` produced 36 passed, 0 failed.
+    2. Verified `TEST_ALIASES` in `crates/rustkit-engine/src/console_log.rs` is enclosed under `#[cfg(test)]`.
+  - Removed `#[cfg(all(target_os = "macos", feature = "headless"))]` gates from all 9 targeted tests and helper `image_rects`:
+    1. `match_media_tests::match_media_answers_for_the_views_viewport` (before: gated out, after: PASS)
+    2. `match_media_tests::match_media_follows_the_views_size` (before: gated out, after: PASS)
+    3. `match_media_tests::a_resize_reports_change_to_the_lists_that_flipped` (before: gated out, after: PASS)
+    4. `computed_content_tests::computed_content_is_the_cascaded_string_or_normal` (before: gated out, after: PASS)
+    5. `abspos_percent_height_image_tests::a_percent_height_image_in_an_inset_sized_layer_fills_the_layer` (before: gated out, after: PASS)
+    6. `abspos_percent_height_image_tests::an_abspos_image_is_placed_by_its_top_and_left` (before: gated out, after: PASS)
+    7. `abspos_percent_height_image_tests::an_abspos_image_width_percent_resolves_against_the_inset_layer` (before: gated out, after: PASS)
+    8. `abspos_percent_height_image_tests::a_static_image_is_unchanged` (before: gated out, after: PASS)
+    9. `abspos_percent_height_image_tests::a_positioned_image_with_a_z_index_paints_over_a_later_sibling` (before: gated out, after: PASS)
+  - **Workspace tests (`--test-threads=1`)**: **3,874 passed, 0 failed, 33 ignored** across workspace (`+9` passed over `develop`, 0 regressions).
+  - **26-case Linux parity campaign**: **`1.1410%` mean** vs Mac `latest-develop.json` (`ff6ad36a`) **`1.1075%`** (delta **`+0.0335%`**, **`0 / 26`** cases over `+1.0 pt` vs Mac).
+- **PRs**:
+  - `hiwavebrowser/hiwave-linux#87` (`castor/l1-ungate-headless-tests`, commit `ca6a645d`), ready for R1 (Argos / Prometheus).
+- **Blockers**: None. Waiting for R1 review and merge of `#87`.
+- **Decisions for Atlas**:
+  1. **Next row while waiting for #87 merge**: Row `L2` (Parity tooling parity: `scripts/parity_lib.py`, `cases/registry.json`, stale templates, test script paths) is `open`. Should I begin fresh checkout for `L2` immediately or wait for `#87` to land on `develop`?
