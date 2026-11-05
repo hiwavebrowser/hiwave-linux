@@ -99,6 +99,9 @@ def test_no_lines_no_rows():
 
 
 if __name__ == "__main__":
+    if not PANEL.exists():
+        print(f"SKIP: {PANEL} does not exist on Linux", file=sys.stderr)
+        sys.exit(0)
     if shutil.which("node") is None:
         print("SKIP: node is not installed")
         sys.exit(0)

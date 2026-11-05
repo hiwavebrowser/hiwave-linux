@@ -529,7 +529,7 @@
 
         <!-- Single Donation CTA -->
         <div style="text-align: center; margin: 32px 0 48px 0;">
-            <a href="https://ko-fi.com/hiwavebrowser" class="sponsor-btn" target="_blank" rel="noopener">
+            <a href="https://ko-fi.com/hiwavebrowser" class="sponsor-btn" target="_blank">
                 ☕ Support Independent Development
             </a>
         </div>
@@ -551,9 +551,8 @@
                 Even "privacy-focused" Chromium browsers inherit Google's codebase and its priorities.
             </p>
             <p>
-                <strong>HiWave is built from scratch on Rust with our own RustKit engine.</strong>
-                No Chromium. No Google code. No ad company calling the shots.
-                ~45,000 lines of custom browser engine code and growing.
+                <strong>HiWave is built from scratch on Rust.</strong> No Chromium. No Google code.
+                No ad company calling the shots.
             </p>
         </div>
 
@@ -592,49 +591,6 @@
                     <span>Keyboard First - No telemetry tracking</span>
                 </div>
             </div>
-        </div>
-
-        <!-- RustKit Engine -->
-        <div class="card">
-            <h2 class="card-title">
-                <span class="icon">🦀</span>
-                RustKit: Our Custom Browser Engine
-            </h2>
-            <p>
-                HiWave doesn't just wrap Chromium with privacy settings—we're building a
-                <strong>custom browser engine from scratch</strong> called RustKit.
-            </p>
-            <div class="features">
-                <div class="feature">
-                    <span class="feature-icon">📐</span>
-                    <span>Custom Layout (Flexbox, Grid, Box Model)</span>
-                </div>
-                <div class="feature">
-                    <span class="feature-icon">🎨</span>
-                    <span>GPU Renderer (wgpu/DirectX)</span>
-                </div>
-                <div class="feature">
-                    <span class="feature-icon">🖼️</span>
-                    <span>SVG & Canvas 2D</span>
-                </div>
-                <div class="feature">
-                    <span class="feature-icon">✨</span>
-                    <span>CSS Animations & Transitions</span>
-                </div>
-                <div class="feature">
-                    <span class="feature-icon">🔐</span>
-                    <span>Built-in CSP & CORS</span>
-                </div>
-                <div class="feature">
-                    <span class="feature-icon">📝</span>
-                    <span>Full DOM Events</span>
-                </div>
-            </div>
-            <p style="margin-top: 16px; color: var(--text-muted); font-size: 0.9rem;">
-                <strong style="color: var(--accent);">~45,000 lines</strong> of Rust powering HTML parsing, CSS styling, layout computation,
-                event handling, and GPU rendering. ~80% custom RustKit code, with minimal external dependencies
-                (boa_engine for JavaScript, wgpu for GPU, native-tls for HTTPS).
-            </p>
         </div>
 
         <!-- Rust Advantage -->
@@ -677,16 +633,16 @@
                 HiWave is open source under MPL-2.0. Verify for yourself.
             </p>
             <div class="links">
-                <a href="https://github.com/hiwavebrowser/hiwave" class="link" target="_blank" rel="noopener">
+                <a href="https://github.com/hiwavebrowser/hiwave" class="link" target="_blank">
                     📂 Source Code
                 </a>
-                <a href="https://github.com/hiwavebrowser/hiwave/issues" class="link" target="_blank" rel="noopener">
+                <a href="https://github.com/hiwavebrowser/hiwave/issues" class="link" target="_blank">
                     🐛 Report Issues
                 </a>
-                <a href="https://github.com/hiwavebrowser/hiwave/blob/main/CONTRIBUTING.md" class="link" target="_blank" rel="noopener">
+                <a href="https://github.com/hiwavebrowser/hiwave/blob/main/CONTRIBUTING.md" class="link" target="_blank">
                     🤝 Contribute
                 </a>
-                <a href="https://github.com/hiwavebrowser/hiwave/releases" class="link" target="_blank" rel="noopener">
+                <a href="https://github.com/hiwavebrowser/hiwave/releases" class="link" target="_blank">
                     📦 Releases
                 </a>
             </div>
@@ -710,9 +666,8 @@
             <div class="credits">
                 <p><strong>Built With:</strong></p>
                 <p>
-                    Rust • RustKit Engine (rustkit-html, rustkit-css, rustkit-layout, rustkit-http) • 
-                    wgpu • boa_engine •
-                    <a href="https://github.com/brave/adblock-rust" target="_blank" rel="noopener">Brave's adblock-rust</a>
+                    Rust • Tauri/WRY • WebKit/WebView2 •
+                    <a href="https://github.com/brave/adblock-rust" target="_blank">Brave's adblock-rust</a>
                 </p>
             </div>
         </div>
@@ -773,13 +728,12 @@
         <!-- Footer -->
         <div class="footer">
             <p>
-                <a href="https://www.hiwavebrowser.com" target="_blank" rel="noopener">www.hiwavebrowser.com</a> &nbsp;•&nbsp;
-                <a href="https://github.com/hiwavebrowser/hiwave" target="_blank" rel="noopener">GitHub</a> &nbsp;•&nbsp;
-                <a href="https://twitter.com/hiwavebrowser" target="_blank" rel="noopener">Twitter</a> &nbsp;•&nbsp;
-                <a href="https://ko-fi.com/hiwavebrowser" target="_blank" rel="noopener">Ko-fi</a>
+                <a href="https://www.hiwavebrowser.com">www.hiwavebrowser.com</a> &nbsp;•&nbsp;
+                <a href="https://github.com/hiwavebrowser/hiwave">GitHub</a> &nbsp;•&nbsp;
+                <a href="https://twitter.com/hiwavebrowser">Twitter</a>
             </p>
             <p style="margin-top: 16px; font-size: 0.7rem;">
-                © 2024-2026 HiWave. Licensed under MPL-2.0.
+                © 2024 HiWave. Licensed under MPL-2.0.
             </p>
         </div>
     </div>
@@ -798,28 +752,20 @@
             }
         };
 
-        // Handle external link clicks - open in new tab within HiWave
+        // Handle link clicks - open externally
         document.querySelectorAll('a[target="_blank"]').forEach(link => {
             link.addEventListener('click', (e) => {
                 e.preventDefault();
                 const url = link.href;
-
-                // Use IPC to create a new tab and navigate to the URL
                 if (window.ipc) {
                     window.ipc.postMessage(JSON.stringify({
-                        cmd: 'create_tab',
+                        cmd: 'open_external',
                         url: url
                     }));
+                } else {
+                    window.open(url, '_blank');
                 }
             });
-        });
-
-        // Ensure all http links have proper attributes
-        document.querySelectorAll('a[href^="http"]').forEach(link => {
-            if (!link.hasAttribute('target')) {
-                link.setAttribute('target', '_blank');
-                link.setAttribute('rel', 'noopener');
-            }
         });
     </script>
 </body>

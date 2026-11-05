@@ -12,15 +12,56 @@
         }
 
         :root {
-            --bg-primary: #1a1a2e;
-            --bg-secondary: #16213e;
-            --bg-tertiary: #0f0f23;
-            --accent: #14b8a6;
-            --accent-hover: #2dd4bf;
-            --text-primary: #e2e8f0;
-            --text-secondary: #94a3b8;
-            --text-muted: #64748b;
-            --border: #334155;
+            /* Backgrounds (dark slate) */
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --bg-elevated: #475569;
+
+            /* Teal/Cyan Accent */
+            --accent: #06b6d4;
+            --accent-hover: #22d3ee;
+            --accent-dark: #0891b2;
+            --accent-subtle: rgba(6, 182, 212, 0.08);
+            --accent-medium: rgba(6, 182, 212, 0.15);
+
+            /* Text */
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --text-muted: #94a3b8;
+            --text-disabled: #64748b;
+
+            /* Borders */
+            --border: #1f2937;
+            --border-subtle: #16213e;
+            --border-focus: #475569;
+        }
+
+        @keyframes flowGlow {
+            0%, 100% { box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.2); }
+            50% { box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.4), 0 0 20px rgba(6, 182, 212, 0.2); }
+        }
+
+        @keyframes ripple {
+            0% {
+                transform: scale(0.8);
+                opacity: 0.8;
+            }
+            100% {
+                transform: scale(2);
+                opacity: 0;
+            }
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         html, body {
@@ -66,11 +107,13 @@
             cursor: pointer;
             border-radius: 4px;
             font-size: 16px;
+            transition: all 0.2s ease;
         }
 
         .shelf-close:hover {
             background: var(--bg-primary);
-            color: var(--text-primary);
+            color: var(--accent-hover);
+            transform: rotate(90deg);
         }
 
         /* Command palette */
@@ -89,16 +132,38 @@
             border-radius: 8px;
             padding: 0 12px;
             margin-bottom: 12px;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .command-input-wrapper::after {
+            content: '';
+            position: absolute;
+            inset: -2px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+            opacity: 0;
+            z-index: -1;
+            transition: opacity 0.3s ease;
         }
 
         .command-input-wrapper:focus-within {
             border-color: var(--accent);
-            box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2);
+            animation: flowGlow 2s ease-in-out infinite;
+        }
+
+        .command-input-wrapper:focus-within::after {
+            opacity: 0.15;
         }
 
         .command-input-icon {
             color: var(--text-muted);
             margin-right: 10px;
+            transition: color 0.2s ease;
+        }
+
+        .command-input-wrapper:focus-within .command-input-icon {
+            color: var(--accent-hover);
         }
 
         .command-input {
@@ -123,6 +188,7 @@
             grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
             gap: 4px;
             align-content: start;
+            animation: slideIn 0.3s ease-out;
         }
 
         .command-item {
@@ -132,14 +198,43 @@
             padding: 8px 10px;
             border-radius: 6px;
             cursor: pointer;
-            transition: background 0.1s ease;
+            transition: all 0.2s ease;
             background: var(--bg-tertiary);
             min-width: 0;
+            border: 1px solid transparent;
+            position: relative;
+            overflow: hidden;
         }
 
-        .command-item:hover,
+        .command-item::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            border-radius: 50%;
+            background: rgba(6, 182, 212, 0.3);
+            transform: translate(-50%, -50%);
+            transition: width 0.3s ease, height 0.3s ease;
+        }
+
+        .command-item:hover {
+            background: var(--bg-elevated);
+            border-color: rgba(6, 182, 212, 0.3);
+            transform: translateX(2px);
+        }
+
         .command-item.selected {
             background: var(--accent);
+            border-color: var(--accent-hover);
+            box-shadow: 0 4px 12px rgba(6, 182, 212, 0.3);
+        }
+
+        .command-item.selected::before {
+            width: 100%;
+            height: 100%;
+            animation: ripple 0.6s ease-out;
         }
 
         .command-item-left {
@@ -148,6 +243,8 @@
             gap: 1px;
             min-width: 0;
             flex: 1;
+            position: relative;
+            z-index: 1;
         }
 
         .command-item-name {
@@ -161,6 +258,7 @@
         .command-item-category {
             font-size: 9px;
             color: var(--text-muted);
+            transition: color 0.2s ease;
         }
 
         .command-item:hover .command-item-category,
@@ -177,9 +275,16 @@
             border-radius: 3px;
             margin-left: 6px;
             flex-shrink: 0;
+            position: relative;
+            z-index: 1;
+            transition: all 0.2s ease;
         }
 
-        .command-item:hover .command-item-shortcut,
+        .command-item:hover .command-item-shortcut {
+            background: rgba(0, 0, 0, 0.3);
+            color: var(--text-secondary);
+        }
+
         .command-item.selected .command-item-shortcut {
             background: rgba(255,255,255,0.2);
             color: white;
@@ -206,6 +311,24 @@
             text-transform: uppercase;
             letter-spacing: 0.5px;
             margin-bottom: 8px;
+        }
+
+        /* Custom scrollbar */
+        .command-results::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .command-results::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .command-results::-webkit-scrollbar-thumb {
+            background: var(--bg-elevated);
+            border-radius: 4px;
+        }
+
+        .command-results::-webkit-scrollbar-thumb:hover {
+            background: var(--accent);
         }
     </style>
 </head>
