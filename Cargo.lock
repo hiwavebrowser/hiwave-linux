@@ -2753,6 +2753,7 @@ dependencies = [
  "hiwave-shield-intercept",
  "hiwave-vault",
  "http",
+ "libc",
  "log",
  "muda",
  "rfd",

@@ -646,7 +646,75 @@ fn should_record_history_url(url: &str) -> bool {
 // Popup filtering is now handled by platform::is_definitely_popup()
 // which provides comprehensive cross-platform URL blocking
 
+#[cfg(target_os = "linux")]
+fn ensure_main_thread_stack_16mib() {
+    const TARGET: libc::rlim_t = 16 * 1024 * 1024;
+    unsafe {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_STACK, &mut rlim) == 0 {
+            if rlim.rlim_cur < TARGET && std::env::var_os("HIWAVE_STACK_REEXEC").is_none() {
+                let mut new_rlim = rlim;
+                new_rlim.rlim_cur = TARGET;
+                if new_rlim.rlim_max < TARGET && new_rlim.rlim_max != libc::RLIM_INFINITY {
+                    new_rlim.rlim_max = TARGET;
+                }
+                if libc::setrlimit(libc::RLIMIT_STACK, &new_rlim) == 0 {
+                    std::env::set_var("HIWAVE_STACK_REEXEC", "1");
+                    let args: Vec<std::ffi::CString> = std::env::args_os()
+                        .map(|a| {
+                            use std::os::unix::ffi::OsStrExt;
+                            std::ffi::CString::new(a.as_bytes()).unwrap_or_default()
+                        })
+                        .collect();
+                    let mut argv: Vec<*const libc::c_char> = args.iter().map(|s| s.as_ptr()).collect();
+                    argv.push(std::ptr::null());
+                    let exe = std::ffi::CString::new("/proc/self/exe").unwrap();
+                    libc::execv(exe.as_ptr(), argv.as_ptr());
+                }
+            }
+        }
+    }
+}
+
+/// Stack size of the calling thread, as the OS reports it.
+#[cfg(target_os = "linux")]
+pub fn main_thread_stack_size() -> usize {
+    extern "C" {
+        fn pthread_getattr_np(thread: libc::pthread_t, attr: *mut libc::pthread_attr_t) -> libc::c_int;
+        fn pthread_attr_getstack(
+            attr: *const libc::pthread_attr_t,
+            stackaddr: *mut *mut libc::c_void,
+            stacksize: *mut libc::size_t,
+        ) -> libc::c_int;
+        fn pthread_attr_destroy(attr: *mut libc::pthread_attr_t) -> libc::c_int;
+    }
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
+            let mut stackaddr: *mut libc::c_void = std::ptr::null_mut();
+            let mut stacksize: libc::size_t = 0;
+            pthread_attr_getstack(&attr, &mut stackaddr, &mut stacksize);
+            pthread_attr_destroy(&mut attr);
+            stacksize as usize
+        } else {
+            0
+        }
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    ensure_main_thread_stack_16mib();
+
+    #[cfg(target_os = "linux")]
+    if std::env::args().any(|a| a == "--check-stack") {
+        println!("{}", main_thread_stack_size());
+        return;
+    }
+
     // Initialize logging with log compatibility
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
     let subscriber = FmtSubscriber::builder()
@@ -655,6 +723,11 @@ fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
     info!("Starting HiWave...");
+    #[cfg(target_os = "linux")]
+    info!(
+        "Main thread stack: {} MiB",
+        main_thread_stack_size() / (1024 * 1024)
+    );
 
     // Native platform mode: Use RustKit for everything (no wry/tao)
     #[cfg(feature = "native-linux")]

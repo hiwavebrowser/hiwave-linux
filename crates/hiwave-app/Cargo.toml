@@ -66,6 +66,9 @@ rustkit-net = { workspace = true, optional = true }
 hiwave-shield-intercept = { workspace = true, optional = true }
 tokio = { version = "1.42", features = ["rt", "time"], optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 rustkit-engine = { workspace = true, features = ["headless"] }
 rustkit-viewhost = { workspace = true }
