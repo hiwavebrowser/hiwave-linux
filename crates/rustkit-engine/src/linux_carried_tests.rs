@@ -3452,4 +3452,47 @@ mod x11_content_path {
 
         engine.render_view(view).expect("render_view must paint via the wgpu surface");
     }
+
+    #[test]
+    fn window_surface_attaches_and_presents_on_x11() {
+        let _gpu = gpu_serial();
+        if !have_display() {
+            eprintln!("SKIP: no DISPLAY; X11 window surface not exercised");
+            return;
+        }
+        let engine = EngineBuilder::new().build().expect("engine");
+
+        let parent = engine
+            .viewhost()
+            .create_main_window(rustkit_viewhost::MainWindowConfig {
+                title: "rustkit x11 window surface".to_string(),
+                width: 800,
+                height: 600,
+                resizable: true,
+                centered: true,
+            })
+            .expect("X11 main window");
+        assert_ne!(parent, 0, "main window id must be a real X11 window, not 0");
+
+        let mut surface = WindowSurface::attach_x11(
+            parent,
+            rustkit_viewhost::Bounds { x: 0, y: 0, width: 800, height: 600 },
+        )
+        .expect("attach_x11 must succeed on X11");
+
+        assert_ne!(surface.raw_view(), 0, "raw_view must be non-zero");
+
+        let images = rustkit_image::ImageManager::new();
+        let commit = FrameCommit {
+            generation: 1,
+            nav_generation: 1,
+            list: Some(Arc::new(DisplayList::new())),
+            scroll_offset: (0.0, 0.0),
+            max_scroll_offset: (0.0, 0.0),
+            laid_out_for: (800, 600),
+            input: None,
+            canvas: [1.0, 1.0, 1.0, 1.0],
+        };
+        surface.present_commit(&commit, &images).expect("present_commit must succeed");
+    }
 }

@@ -296,7 +296,6 @@ mod restyle_invalidation;
 mod restyle_invalidation_tests;
 mod presenter;
 pub use presenter::FrameCommit;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use presenter::WindowSurface;
 mod page_protocol;
 pub use page_protocol::{

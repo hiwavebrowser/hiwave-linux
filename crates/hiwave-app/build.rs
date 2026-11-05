@@ -7,5 +7,7 @@ fn main() {
     // thread with an explicit stack.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-arg-bins=-Wl,-stack_size,0x1000000");
+    } else if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-link-arg-bins=-Wl,-z,stack-size=16777216");
     }
 }
