@@ -103,7 +103,8 @@ const ABOUT_HTML: &str = include_str!("ui/about.html");
 const ABOUT_URL: &str = "hiwave://about";
 #[cfg(not(feature = "native-linux"))]
 const SETTINGS_HTML: &str = include_str!("ui/settings.html");
-/// The HTML content for the inspector panel
+/// The HTML content for the inspector panel (restored canonical template from macOS; wired in shell work)
+#[allow(dead_code)]
 pub const INSPECTOR_HTML: &str = include_str!("ui/inspector.html");
 #[cfg(not(feature = "native-linux"))]
 const REPORT_HTML: &str = include_str!("ui/report.html");
