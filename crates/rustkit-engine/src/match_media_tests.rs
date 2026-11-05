@@ -26,7 +26,7 @@ const CHROME: &str = "(min-width: 600px)=true screen and (min-width: 960px)=true
     not print=true all=true (min-height: 801px)=false";
 
 #[test]
-#[cfg(all(target_os = "macos", feature = "headless"))]
+#[cfg(feature = "headless")]
 fn match_media_answers_for_the_views_viewport() {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let id = engine
@@ -46,7 +46,7 @@ fn match_media_answers_for_the_views_viewport() {
 /// The same queries in a narrow, portrait view: the answers follow the
 /// view, not a fixed board size.
 #[test]
-#[cfg(all(target_os = "macos", feature = "headless"))]
+#[cfg(feature = "headless")]
 fn match_media_follows_the_views_size() {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let id = engine
@@ -72,7 +72,7 @@ fn match_media_follows_the_views_size() {
 /// `change` (after `resize`) at those whose answer flipped, with the new
 /// `matches` and the `media` text; a legacy `addListener` hears it too.
 #[test]
-#[cfg(all(target_os = "macos", feature = "headless"))]
+#[cfg(feature = "headless")]
 fn a_resize_reports_change_to_the_lists_that_flipped() {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let id = engine

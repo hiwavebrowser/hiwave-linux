@@ -40,7 +40,7 @@ fn page() -> String {
 }
 
 #[test]
-#[cfg(all(target_os = "macos", feature = "headless"))]
+#[cfg(feature = "headless")]
 fn a_percent_height_image_in_an_inset_sized_layer_fills_the_layer() {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let id = engine
@@ -57,7 +57,7 @@ fn a_percent_height_image_in_an_inset_sized_layer_fills_the_layer() {
 
 /// `getBoundingClientRect` of every `<img>` on `html`, as `id:x:y:w:h`
 /// rows, from a 1280x1300 headless view.
-#[cfg(all(target_os = "macos", feature = "headless"))]
+#[cfg(feature = "headless")]
 fn image_rects(html: &str) -> String {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let id = engine
@@ -76,7 +76,7 @@ fn image_rects(html: &str) -> String {
 /// took its positioning, so the image sat at its static position. Chrome:
 /// `d:70:50:100:50`.
 #[test]
-#[cfg(all(target_os = "macos", feature = "headless"))]
+#[cfg(feature = "headless")]
 fn an_abspos_image_is_placed_by_its_top_and_left() {
     let html = format!(
         "<!doctype html><html><head><style>\
@@ -97,7 +97,7 @@ fn an_abspos_image_is_placed_by_its_top_and_left() {
 /// (CSS 2.1 §10.3.8, §10.6.5): the 1x1 PNG stays 1x1 (`n`), where a block
 /// would stretch to 600x400. Chrome: `n:0:0:1:1 w:0:410:600:600`.
 #[test]
-#[cfg(all(target_os = "macos", feature = "headless"))]
+#[cfg(feature = "headless")]
 fn an_abspos_image_width_percent_resolves_against_the_inset_layer() {
     let html = format!(
         "<!doctype html><html><head><style>\
@@ -122,7 +122,7 @@ fn an_abspos_image_width_percent_resolves_against_the_inset_layer() {
 /// static, floated or relative `<img>` must still leave them untouched. Only
 /// the absolute one differs, and it carries its offsets.
 #[test]
-#[cfg(all(target_os = "macos", feature = "headless"))]
+#[cfg(feature = "headless")]
 fn a_static_image_is_unchanged() {
     let html = format!(
         "<!doctype html><html><head><style>\
@@ -177,7 +177,7 @@ fn a_static_image_is_unchanged() {
 /// point lookup names the image in the first box and the sibling in the
 /// second. Before the fix both boxes hit the sibling.
 #[test]
-#[cfg(all(target_os = "macos", feature = "headless"))]
+#[cfg(feature = "headless")]
 fn a_positioned_image_with_a_z_index_paints_over_a_later_sibling() {
     let html = format!(
         "<!doctype html><html><head><style>\

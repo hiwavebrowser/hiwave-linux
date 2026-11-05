@@ -9,7 +9,7 @@
 use super::*;
 
 #[test]
-#[cfg(all(target_os = "macos", feature = "headless"))]
+#[cfg(feature = "headless")]
 fn computed_content_is_the_cascaded_string_or_normal() {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let id = engine
