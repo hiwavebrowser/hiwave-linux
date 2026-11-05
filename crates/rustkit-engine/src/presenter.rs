@@ -861,11 +861,10 @@ pub(crate) fn present_choice(shown: Option<ShownFrame>, commit: &FrameCommit) ->
 
 /// The window thread's surface for a page that lives on the content thread.
 ///
-/// The NSView, the GPU surface and the renderer are created here, on the
-/// thread that calls [`WindowSurface::attach`]. The page thread never sees
-/// them. It publishes [`FrameCommit`]s; this draws the newest one, including
-/// a commit whose only change is the scroll offset.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// The NSView/X11 window, the GPU surface and the renderer are created here, on the
+/// thread that calls [`WindowSurface::attach`] or [`WindowSurface::attach_x11`].
+/// The page thread never sees them. It publishes [`FrameCommit`]s; this draws the
+/// newest one, including a commit whose only change is the scroll offset.
 pub struct WindowSurface {
     presenter: Presenter,
     viewhost_id: ViewId,
@@ -873,13 +872,29 @@ pub struct WindowSurface {
     shown: Option<ShownFrame>,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl WindowSurface {
     /// A host view and its GPU surface in `parent`. Fails before any page
     /// state exists.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn attach(parent: WindowHandle, bounds: Bounds) -> Result<Self, EngineError> {
         let mut presenter = Presenter::new(super::EngineConfig::default().background_color)?;
         let viewhost_id = presenter.create_host_view(parent, bounds)?;
+        presenter.attach_surface(viewhost_id, bounds)?;
+        presenter.clear_to_background(viewhost_id)?;
+        Ok(Self {
+            presenter,
+            viewhost_id,
+            id: super::EngineViewId::new(),
+            shown: None,
+        })
+    }
+
+    /// An X11 host view and its GPU surface in `parent`. Fails before any page
+    /// state exists.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn attach_x11(parent: u64, bounds: Bounds) -> Result<Self, EngineError> {
+        let mut presenter = Presenter::new(super::EngineConfig::default().background_color)?;
+        let viewhost_id = presenter.create_x11_view(parent, bounds)?;
         presenter.attach_surface(viewhost_id, bounds)?;
         presenter.clear_to_background(viewhost_id)?;
         Ok(Self {

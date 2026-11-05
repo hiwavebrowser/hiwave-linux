@@ -360,6 +360,9 @@ pub fn clip_raw_view(view: isize) {
     clip_view_layer(view as id);
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn clip_raw_view(_view: isize) {}
+
 /// The main ViewHost that manages all views.
 pub struct ViewHost {
     views: RwLock<HashMap<ViewId, Arc<Mutex<ViewState>>>>,

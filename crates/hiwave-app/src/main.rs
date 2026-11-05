@@ -73,7 +73,7 @@ mod webview;
 #[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
 mod webview_rustkit;
 #[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
-mod shield_adapter;
+use hiwave_shield_intercept as shield_adapter;
 #[cfg(not(feature = "native-linux"))]
 mod content_webview_trait;
 #[cfg(not(feature = "native-linux"))]
@@ -103,6 +103,8 @@ const ABOUT_HTML: &str = include_str!("ui/about.html");
 const ABOUT_URL: &str = "hiwave://about";
 #[cfg(not(feature = "native-linux"))]
 const SETTINGS_HTML: &str = include_str!("ui/settings.html");
+/// The HTML content for the inspector panel
+pub const INSPECTOR_HTML: &str = include_str!("ui/inspector.html");
 #[cfg(not(feature = "native-linux"))]
 const REPORT_HTML: &str = include_str!("ui/report.html");
 #[cfg(not(feature = "native-linux"))]

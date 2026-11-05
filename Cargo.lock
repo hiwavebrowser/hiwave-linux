@@ -2750,6 +2750,7 @@ dependencies = [
  "hiwave-core",
  "hiwave-shell",
  "hiwave-shield",
+ "hiwave-shield-intercept",
  "hiwave-vault",
  "http",
  "log",

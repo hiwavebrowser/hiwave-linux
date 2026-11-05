@@ -18,3 +18,21 @@ fn hiwave_binary_has_a_16_mib_main_thread_stack() {
         .expect("LC_MAIN stacksize in otool -l output");
     assert_eq!(stacksize.trim(), "16777216");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hiwave_binary_has_a_16_mib_main_thread_stack() {
+    let out = std::process::Command::new("readelf")
+        .args(["-lW", env!("CARGO_BIN_EXE_hiwave")])
+        .output()
+        .expect("run readelf");
+    assert!(out.status.success(), "readelf failed");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let stack_line = text
+        .lines()
+        .find(|l| l.contains("GNU_STACK"))
+        .expect("GNU_STACK segment in readelf -lW output");
+    let parts: Vec<&str> = stack_line.split_whitespace().collect();
+    let memsz = parts.get(5).expect("memsz column in GNU_STACK line");
+    assert_eq!(*memsz, "0x1000000", "expected 16 MiB stack (0x1000000), found {memsz}");
+}
