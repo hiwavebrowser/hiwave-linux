@@ -219,6 +219,8 @@ enum UserEvent {
     Stop,
     NewTab,
     UpdateTitle(String),
+    /// The layout container moved inside the window (title bar, menu bar): place the views again.
+    Relayout,
     UpdateUrl(String),
     UpdateActiveTabUrl(String),
     NavigationStateChanged {
@@ -371,6 +373,23 @@ enum UserEvent {
     },
 }
 
+/// Where the shared container sits inside the window, in window pixels. On GNOME Wayland GTK draws its own
+/// title bar and puts the container BELOW it (observed: y = 47). The WebKit layer's `set_bounds` re-places a
+/// view with `size_allocate`, whose coordinates are measured from the top of the WINDOW, not from the
+/// container, so without this offset every view moved up by the title bar's height (the tab strip hid behind
+/// the title bar and the address row was half covered). Before this the same bug showed as a 27 px shift from
+/// the "Edit" menu bar. 0 on a bare X11 window with no decorations.
+#[cfg(not(feature = "native-linux"))]
+static LAYOUT_ORIGIN_X: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+#[cfg(not(feature = "native-linux"))]
+static LAYOUT_ORIGIN_Y: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[cfg(not(feature = "native-linux"))]
+fn layout_origin() -> (f64, f64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (LAYOUT_ORIGIN_X.load(Relaxed) as f64, LAYOUT_ORIGIN_Y.load(Relaxed) as f64)
+}
+
 #[cfg(not(feature = "native-linux"))]
 #[allow(clippy::too_many_arguments)]
 fn apply_layout(
@@ -386,7 +405,9 @@ fn apply_layout(
     let scale = window.scale_factor();
     let window_size = window.inner_size();
     let width = window_size.width as f64 / scale;
-    let height = window_size.height as f64 / scale;
+    // The usable height is the window's minus what sits above the container (the title bar).
+    let (origin_x, origin_y) = layout_origin();
+    let height = (window_size.height as f64 / scale - origin_y).max(0.0);
 
     // Clamp sidebar width to valid range (0 = closed, 48-400 when open)
     let sidebar_width = sidebar_width.min(width).max(0.0);
@@ -400,12 +421,12 @@ fn apply_layout(
 
     let chrome_height_rect = height;
     let chrome_rect = Rect {
-        position: LogicalPosition::new(0, 0).into(),
+        position: LogicalPosition::new(origin_x as i32, origin_y as i32).into(),
         size: LogicalSize::new(width, chrome_height_rect).into(),
     };
 
     let content_rect = Rect {
-        position: LogicalPosition::new(sidebar_width as i32, chrome_height as i32).into(),
+        position: LogicalPosition::new((sidebar_width + origin_x) as i32, (chrome_height + origin_y) as i32).into(),
         size: LogicalSize::new(content_width, content_height).into(),
     };
 
@@ -414,7 +435,7 @@ fn apply_layout(
 
     if let Some(shelf) = shelf {
         let shelf_rect = Rect {
-            position: LogicalPosition::new(sidebar_width as i32, (height - shelf_height) as i32).into(),
+            position: LogicalPosition::new((sidebar_width + origin_x) as i32, (height - shelf_height + origin_y) as i32).into(),
             size: LogicalSize::new(content_width, shelf_height).into(),
         };
         shelf.set_bounds(shelf_rect);
@@ -964,6 +985,21 @@ fn main() {
             window.gtk_window().add(&fixed);
         }
         fixed.show_all();
+        // Learn where GTK actually put the container (below GNOME's title bar, below a menu bar...) and re-run
+        // the layout when it changes. Also logs the geometry once, for diagnosing a layout offset from a log.
+        {
+            let origin_proxy = proxy.clone();
+            fixed.connect_size_allocate(move |_, a| {
+                use std::sync::atomic::Ordering::Relaxed;
+                let old_x = LAYOUT_ORIGIN_X.swap(a.x(), Relaxed);
+                let old_y = LAYOUT_ORIGIN_Y.swap(a.y(), Relaxed);
+                let changed = old_x != a.x() || old_y != a.y();
+                if changed {
+                    tracing::debug!(x = a.x(), y = a.y(), w = a.width(), h = a.height(), "Layout container moved");
+                    let _ = origin_proxy.send_event(UserEvent::Relayout);
+                }
+            });
+        }
         fixed
     };
 
@@ -2123,6 +2159,22 @@ fn main() {
             }
             Event::UserEvent(user_event) => {
                 match user_event {
+                    UserEvent::Relayout => {
+                        let ch = *chrome_height_for_events.lock().unwrap();
+                        let sh = *shelf_height_for_events.lock().unwrap();
+                        let sw = *sidebar_width_for_events.lock().unwrap();
+                        let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
+                        apply_layout(
+                            &window,
+                            &chrome_for_events,
+                            &content_for_events,
+                            shelf_for_events.as_deref(),
+                            ch,
+                            sh,
+                            sw,
+                            right_sidebar_open,
+                        );
+                    }
                     UserEvent::Navigate(url) => {
                         info!("Navigating content to: {}", crate::page_url_for_log(&url));
                         if is_new_tab_url(&url) {
