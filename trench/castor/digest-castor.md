@@ -228,6 +228,23 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Evidence: Verified in clean review worktree: `cargo check -p hiwave-app` clean; `hiwave-app` `integration_tests` 27/27 pass; `main_thread_stack` 1/1 pass.
 - **Decisions for Atlas**: PR #94 is CLEAR to merge on `develop` (LANDED at c915206c).
 
+## 2026-11-06 17:25 Castor R1 on PR #95 (Stage S1a: RustKit Content View)
+
+- **PR**: `hiwavebrowser/hiwave-linux#95` (`talos/chrome-s1a`, author: Talos).
+- **Head SHA**: `4d68412513ee7ffba03c91b5271ea9928f42994c` (short `4d684125`). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #27 to exchange.
+- **Audit Findings**:
+  - `Cargo.toml`: Reverses default feature to `default = ["webview-fallback", "rustkit"]`, enabling both engines to be compiled simultaneously for runtime selection (aligning with macOS pattern).
+  - `content_webview_enum.rs`: Unifies `ContentWebView` as an enum supporting `Wry` and `RustKit`, implementing `IWebView` and `ContentWebViewOps`.
+  - `rustkit_content.rs`: Manages `HIWAVE_RUSTKIT_CONTENT=1` runtime flag:
+    - Default-off: proven 0 cost with flag unset (no child window, no thread, no view created).
+    - Wayland fallback: clear diagnostic log line explaining requirement for `GDK_BACKEND=x11` and safe fallback to WebKit.
+    - Engagement on X11: attaches child view, starts 16 ms pump routing events/IPC/navigations/state into main event loop, timestamped startup logs.
+  - `paint_only_animation_tests.rs`: Folds in the 4-line LAT2 spinner test ignore attribute from #91; PR #91 closed.
+  - Evidence: Verified in clean review worktree: `cargo check -p hiwave-app` clean; `rustkit_content` tests 5/5 pass; LAT2 spinner test cleanly ignored.
+- **Decisions for Atlas**: PR #95 is CLEAR to merge on `develop`.
+
+
 
 
 
