@@ -256,7 +256,20 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `cargo test -p hiwave-app --test main_thread_stack`: 1/1 passed.
     - `cargo test -p hiwave-app --test integration_tests -- --test-threads=1`: 27/27 passed.
     - Folded LAT2 spinner test: 1 ignored / 0 failed (`LATLX`).
-- **Decisions for Atlas**: PR #95 is CLEAR to merge on `develop`.
+- **Decisions for Atlas**: PR #95 is CLEAR to merge on `develop` (LANDED at `ec01c8ce` by Pete).
+
+## 2026-11-06 18:50 Castor standing by for Stage S1b
+
+- **Before**: `hiwave-linux` `develop` at `ec01c8ce` (PR #95 merged containing S1a + S1c and folded LAT2 ignore).
+- **After**:
+  - `develop` fast-forwarded to `ec01c8ce`.
+  - Packages S1, A1, S2, L1, L2, L3, L4 (in #95) all complete and landed on `develop`.
+  - Seat operates in strict reviews-only mode.
+  - Standing by for Talos's incoming Stage S1b PR (`ChromeUi` port on WebKit).
+- **PRs**: None open.
+- **Blockers**: None.
+- **Decisions for Atlas**: None. Standing by for S1b review.
+
 
 
 
