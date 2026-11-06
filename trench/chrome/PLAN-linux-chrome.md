@@ -10,6 +10,8 @@ The view machinery exists, **nothing constructs `ContentWebView::RustKit`, and t
 `webview.rs` `engine_name()` / `is_rustkit_enabled()` are `cfg(windows, rustkit)` only, and `main.rs` builds the page with wry `build_gtk` unconditionally.
 What does exist (Castor's L3 and the S3 sync): `webview_rustkit::RustKitView` builds on Linux (X11 child window of the app window, `ContentThread`, `WindowSurface::attach_x11`); `ContentWebView` has a `RustKit(Arc<RustKitView>)` variant in `content_webview_enum.rs`; viewhost has an Xlib `create_view`/`resize_view`/`pump_messages`; `region.rs`, `painted_boxes` (engine) and `A3-composition.md` came from macOS. What does not exist: `ChromeUi`/`ChromeView`/`LazyPanel` in Linux `main.rs`, any chrome view, any composition, keyboard routing to a chrome, panels as RustKit views.
 
+**Second finding (found while scoping S1a): the Linux viewhost drops every X11 event.** `X11ViewHost::pump_messages` selects the input masks (key, button, motion, focus, exposure) and then reads each event and discards it (`// TODO: Handle events and emit via callback`). A RustKit view on Linux therefore receives no mouse, keyboard, scroll, focus or resize input today. macOS delivers input through its viewhost into a platform-neutral `InputQueue` (`input_queue.rs`, already synced) that the app drains; Linux has the queue but nothing feeding it. A RustKit page that cannot be clicked or typed into is not usable and a chrome certainly is not, so X11 input is its own stage (S1c) before the chrome.
+
 ## S0 evidence (done)
 
 A `RustKitView` created on the real app window renders a page in an X11 child (`1280x700+0+104`) under the WebKit chrome bar, with real text, rounded corners and a shadow, on a private Xvfb. Develop `b39da378`. Screenshot `gate-runner/_logs/s0_screen.png`; harness `gate-runner/_logs/s0_harness.patch` (never committed). `load_html` returned ~1.4 s after view creation (not profiled).
@@ -38,6 +40,7 @@ macOS first overlaid the chrome with `region = window - hole + overlays` (`A3-co
 |---|---|---|
 | S0 | Prove a `RustKitView` opens in the real window (evidence only) | screenshot, done |
 | S1a | Wire `ContentWebView::RustKit` into `main.rs` behind `HIWAVE_RUSTKIT_CONTENT=1` (default off); non-X11 fallback line; timestamped log lines around view creation and first `load_html` (a number for S4, not a profile) | default-off proof; Xvfb run with the flag on; all feature sets build |
+| S1c | **X11 input into the viewhost**: translate `ButtonPress/Release`, `MotionNotify`, wheel, `KeyPress/Release` (Xkb), `FocusIn/Out`, `ConfigureNotify`/`Expose` into the `InputQueue` the app already drains (mouse, scroll, text and command keys, focus, resize); the app forwards them to the `RustKitView` methods that exist for it | unit tests of the pure translation (event struct in, input out, no display needed); Xvfb checks with synthetic events (`xdotool`) |
 | S1b | Port `ChromeUi` / `ChromeView` / `LazyPanel` with WebKit as the only backend | `Fake`-impl unit tests; behaviour-neutral |
 | S2 | RustKit chrome view behind `HIWAVE_RUSTKIT_CHROME=1` (default off): `chrome.html` in a `RustKitView`, IPC both ways, xlib `place`/`keep_on_top`, XShape region with the page hole | Xvfb screenshot; default-off proof; non-X11 fallback; alpha gap in the PR body |
 | S3 | Region growth for overlays (dropdowns, find, palette, modals), keyboard routing (`take_keyboard`), hit-test through the shape, cursor; panels as lazy RustKit views | Xvfb interaction checks |
@@ -57,4 +60,5 @@ macOS first overlaid the chrome with `region = window - hole + overlays` (`A3-co
 ## Dependencies and risks
 
 - Castor's L4/L5 (LAT2 ignore, Linux glyph cache) touch `rustkit-engine` tests and `rustkit-text` only, not `main.rs` or viewhost `lib.rs`: no file overlap with S1-S3. A chrome is mostly text; it would be correct but laggy until L5 lands, so S4's frame-time check gates on it. If L4 lands first, S2 rebases on it.
-- S0 found the view machinery was never wired into the app; the first real-window runs of S1a may expose further L3 gaps. Each is reported, not worked around.
+- S0 found the view machinery was never wired into the app, and scoping S1a found the viewhost drops all X11 input. Further L3 gaps are likely; each is reported, not worked around.
+- S1a (page renders, navigates, syncs title and URL) is deliberately NON-interactive; S1c adds input. Neither is shown as a working browser until both have landed and an Xvfb check clicks and types.
