@@ -5,9 +5,8 @@
 //! unset nothing here runs: no `RustKitView`, no X child window, no content thread (`decide` is the whole
 //! gate, and it is unit-tested).
 //!
-//! Stage S1a. The page renders, navigates and syncs its title and URL; it is deliberately NON-interactive
-//! until the X11 input stage (S1c) lands, because the Linux viewhost does not yet deliver mouse or keyboard
-//! events to the engine.
+//! Stage S1a: the page renders, navigates and syncs its title and URL. Stage S1c: mouse, wheel and keyboard
+//! reach it (the viewhost records X11 events, the pump delivers them).
 
 use crate::webview::IWebContent as _;
 use crate::webview_rustkit::RustKitView;
@@ -102,6 +101,11 @@ pub fn create(
 pub fn install_pump(view: Arc<RustKitView>, proxy: EventLoopProxy<UserEvent>, ipc: Rc<dyn Fn(&str)>, created: Instant) {
     let mut first_load_logged = false;
     gtk::glib::timeout_add_local(Duration::from_millis(16), move || {
+        // A load in progress holds the engine and every other call finds it busy, so it is stepped first: until
+        // it ends the page takes no input and reports no title, URL or finished load.
+        view.step_load();
+        // X11 input next: what the user did since the last turn reaches the page before its timers run.
+        view.pump_x11_input();
         let _ = view.process_events();
 
         for body in view.take_ipc_messages() {

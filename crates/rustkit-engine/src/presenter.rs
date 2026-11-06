@@ -977,6 +977,13 @@ impl WindowSurface {
         self.presenter.grab_keyboard(self.viewhost_id)
     }
 
+    /// Read the X11 events waiting for this surface's window and record them in the input queue, tagged with
+    /// [`Self::viewhost_id`] (S1c). On the window thread, like every other call here.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn pump_input(&self) {
+        let _ = self.presenter.viewhost().pump_messages();
+    }
+
     /// Draw this surface transparent (CH3.A3c, the RustKit chrome over the
     /// page): the layer is not opaque, frames clear to (0, 0, 0, 0) and hold
     /// premultiplied colour. The frame on screen is cleared now and the

@@ -3113,6 +3113,15 @@ impl Engine {
     }
 
 // ═══ viewhost ═══
+    /// Linux (S1c): read the X11 events waiting on the viewhost's connection and return the input recorded for
+    /// view `id`, in arrival order. Window thread. Empty for a view that does not exist.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn drain_view_input(&self, id: EngineViewId) -> Vec<rustkit_viewhost::InputEvent> {
+        let Some(view) = self.views.get(&id) else { return Vec::new() };
+        let _ = self.viewhost().pump_messages();
+        rustkit_viewhost::drain_input_view(view.viewhost_id)
+    }
+
     /// The viewhost (window system layer). Public so a native shell can create
     /// the parent window and pump its event loop without the engine having to
     /// re-export every windowing call.

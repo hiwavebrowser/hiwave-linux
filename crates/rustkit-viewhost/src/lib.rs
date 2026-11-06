@@ -22,6 +22,7 @@
 pub mod linux;
 
 pub mod input_queue;
+pub mod x11_input;
 pub mod region;
 pub mod cursor;
 
@@ -481,6 +482,20 @@ impl ViewHost {
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn get_x11_window(&self, id: ViewId) -> Result<u64, ViewHostError> {
         self.x11()?.get_x11_window(id)
+    }
+
+    /// Give the keyboard to a view: its X11 window takes the input focus (S1c).
+    ///
+    /// Before this existed the trait's `focus_view` called itself: `fn focus_view(&self) { self.focus_view() }`
+    /// with no inherent method to resolve to, so the first call overflowed the stack (measured: SIGSEGV on the
+    /// first mouse press in the RustKit page view).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn focus_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
+        self.x11()?.focus_view(view_id)?;
+        if let Some(state) = self.views.read().unwrap().get(&view_id) {
+            state.lock().unwrap().focused = true;
+        }
+        Ok(())
     }
 
     /// Raw X11 display pointer.
