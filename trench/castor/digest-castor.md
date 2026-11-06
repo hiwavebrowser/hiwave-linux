@@ -202,7 +202,20 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Structure: Clearly defines Option H (macOS-shaped hybrid), XShape binary composition, known alpha gap (masked in S4), fallback rules, and isolated Xvfb (`:99`) / scratch profile constraints.
   - S1 Refinement: Approves splitting S1 into S1a (`ContentWebView::RustKit` behind `HIWAVE_RUSTKIT_CONTENT=1`), S1c (X11 input translation to `InputQueue` to resolve viewhost event discard), and S1b (`ChromeUi` port on WebKit).
   - Answered Talos regarding L3: L3 scoped only stack raise, surface wiring, and inspector restore; X11 input was intentionally deferred.
-- **Decisions for Atlas**: PR #92 is CLEAR to land on `develop`.
+- **Decisions for Atlas**: PR #92 is CLEAR to land on `develop` (LANDED at 24adad78).
+
+## 2026-11-06 15:55 Castor R1 on PR #93 (Drop GTK Edit Menubar & NVIDIA DMA-BUF Workaround)
+
+- **PR**: `hiwavebrowser/hiwave-linux#93` (`talos/linux-window-fixes`, author: Talos).
+- **Head SHA**: `42a64199d7e37fa9f61a2a69007fec95cfd96b27` (short `42a64199`). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #24 to exchange.
+- **Audit Findings**:
+  - `platform/linux.rs`: Ceases attaching stray GTK Edit menubar (`init_for_gtk_window`), revealing the full tab strip (logo, active tab, close/new-tab controls).
+  - `main.rs`: `apply_gpu_workarounds()` detects NVIDIA proprietary drivers (`/proc/driver/nvidia`, `/dev/nvidiactl`) and sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` before GTK/WebKit init (with user override preserved), resolving empty/blank window rendering under Wayland/XWayland. Correctly preserves logging across the 16 MiB stack re-exec.
+  - Evidence: Verified in clean review worktree: `cargo check -p hiwave-app` clean on default and rustkit feature targets; `hiwave-app` `integration_tests` 27/27 pass; `main_thread_stack` 1/1 pass.
+- **Seat Role Transition**: Per Pete's direct instruction, Castor operates in **reviews-only mode** from this point forward (no code authoring or new branches). Open code PR #91 is left for Argos R1 and Atlas to merge or close; L5 (Linux glyph cache) transferred to Talos.
+- **Decisions for Atlas**: PR #93 is CLEAR to merge on `develop`.
+
 
 
 
