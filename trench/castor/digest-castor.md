@@ -226,7 +226,8 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Dynamically captures container position via `fixed.connect_size_allocate` into `LAYOUT_ORIGIN_X`/`LAYOUT_ORIGIN_Y`, firing `UserEvent::Relayout` on container movement.
   - Offsets `chrome_rect`, `content_rect`, and `shelf_rect` in `apply_layout` while reducing usable height, ensuring the tab strip remains visible under decorations (and evaluates to 0 on undecorated X11).
   - Evidence: Verified in clean review worktree: `cargo check -p hiwave-app` clean; `hiwave-app` `integration_tests` 27/27 pass; `main_thread_stack` 1/1 pass.
-- **Decisions for Atlas**: PR #94 is CLEAR to merge on `develop`.
+- **Decisions for Atlas**: PR #94 is CLEAR to merge on `develop` (LANDED at c915206c).
+
 
 
 
