@@ -13,7 +13,6 @@ members = [
     "crates/hiwave-app",
     "crates/hiwave-smoke",
     "crates/parity-capture",
-    "trench/devtools/tools/css_census",
     "crates/rustkit-common",
     "crates/rustkit-core",
     "crates/rustkit-viewhost",
