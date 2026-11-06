@@ -51,7 +51,6 @@ core--flex-row--grid--w-auto--h-auto         grid-item-of-flex-laid-out-as-block
 core--flex-row--grid--w-50pct--h-auto        grid-item-of-flex-laid-out-as-block
 core--flex-row--grid--w-200px--h-auto        grid-item-of-flex-laid-out-as-block
 core--flex-row--grid--w-min-content--h-auto  grid-item-of-flex-laid-out-as-block
-clamp--flex-row--max-height-grid             grid-item-of-flex-laid-out-as-block
 margin-auto--flex-row--grid                  grid-item-of-flex-laid-out-as-block
 margin-auto--flex-col--grid                  grid-item-of-flex-laid-out-as-block
 gap--flex-row--grid                          grid-item-of-flex-laid-out-as-block
@@ -159,11 +158,6 @@ grid-span--grid--auto-rows-auto            grid-auto-rows-not-stretched-to-non-p
 gap--grid--grid                            grid-auto-rows-not-stretched-to-non-px-height
 
 # column-flex-item-stretches-to-outer-width: 5
-core--flex-row--flex-col--w-auto--h-auto         column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-min-content--h-auto  column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-auto--h-50pct        column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-max-content--h-50pct column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-auto--h-120px        column-flex-item-stretches-to-outer-width
 
 # fit-content-grid-item-stretches: 5
 core--grid--block--w-fit-content--h-120px        fit-content-grid-item-stretches
@@ -179,15 +173,12 @@ grid-span--flex-row--auto-rows-40     grid-max-content-width-zero-with-column-sp
 grid-span--abspos--auto-rows-40       grid-max-content-width-zero-with-column-span
 grid-span--flex-row--auto-rows-auto   grid-max-content-width-zero-with-column-span
 
-# aspect-ratio-width-not-derived-from-height: 4
+# aspect-ratio-width-not-derived-from-height: 3 (flex-row--fixed-height fixed by C10 e)
 aspect-ratio--flex-row--auto         aspect-ratio-width-not-derived-from-height
 aspect-ratio--block--fixed-height    aspect-ratio-width-not-derived-from-height
-aspect-ratio--flex-row--fixed-height aspect-ratio-width-not-derived-from-height
 aspect-ratio--grid--fixed-height     aspect-ratio-width-not-derived-from-height
 
-# aspect-ratio-height-of-column-flex-item: 2
-aspect-ratio--flex-col--auto        aspect-ratio-height-of-column-flex-item
-aspect-ratio--flex-col--fixed-width aspect-ratio-height-of-column-flex-item
+# aspect-ratio-height-of-column-flex-item: 0 (both fixed by C10 e)
 
 # grid-item-auto-margins-ignored: 2
 margin-auto--block--grid grid-item-auto-margins-ignored

@@ -104,6 +104,11 @@ pub enum PageCmd {
     },
     GrabKeyboard,
     Relayout,
+    /// CH3.A7: the app owns this view (its chrome, a panel). Sent before
+    /// the view's first document; see [`crate::Engine::set_app_owned`].
+    SetAppOwned {
+        owned: bool,
+    },
     /// Test hook: the next JavaScript runtime uses this host re-entry cap.
     /// The frame cap and the operand-stack cap are not changed.
     SetHostReentry {
@@ -225,7 +230,14 @@ pub enum PageInput {
         shift: bool,
         alt: bool,
     },
-    MouseDown { x: f32, y: f32 },
+    /// A primary-button press: the `clicks`-th of a multi-click (AppKit's
+    /// `clickCount`), with Shift held or not.
+    MouseDown { x: f32, y: f32, clicks: u32, shift: bool },
+    /// A secondary-button press (CH2.E4): `contextmenu`. When no listener
+    /// cancels it the page reports [`PageEvent::ContextMenu`].
+    SecondaryDown { x: f32, y: f32 },
+    /// Its release, when the browser's menu did not take it.
+    SecondaryUp { x: f32, y: f32 },
     MouseMove { x: f32, y: f32 },
     MouseLeave,
     Click {
@@ -248,6 +260,13 @@ pub enum PageInput {
         dy: f32,
         reply: oneshot::Sender<bool>,
     },
+    /// A wheel over a point of the view: the box under it may take it.
+    ScrollAt {
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+    },
     FormSubmit {
         reply: oneshot::Sender<Option<String>>,
     },
@@ -257,6 +276,26 @@ pub enum PageInput {
     HasFocus {
         reply: oneshot::Sender<bool>,
     },
+    /// Whether the focused element is a text field (a text input, a
+    /// textarea, editable content): the editing chords go to the page
+    /// only then.
+    HasTextFocus {
+        reply: oneshot::Sender<bool>,
+    },
+    /// A macOS Cmd chord (CH2.E3): the page's keydown first. The page
+    /// answers [`PageEvent::KeyEquivalentDone`] with `token`; one it did
+    /// not claim is the menu's.
+    CommandKey {
+        key_code: u32,
+        key: String,
+        shift: bool,
+        alt: bool,
+        token: u64,
+    },
+    /// The input method's marked or committed text (CH2.E3).
+    Ime(rustkit_viewhost::ImeInput),
+    /// An Edit menu item in the focused text field (CH2.E3).
+    Edit(rustkit_dom::forms::EditCommand),
 }
 
 /// What the page tells the window.
@@ -288,9 +327,35 @@ pub enum PageEvent {
         from_user: bool,
     },
     Focused(bool),
-    /// Not produced on this PR. The variant is the protocol's.
-    #[allow(dead_code)]
+    /// Whether the focused element is a text field, sent with `Focused`.
+    TextFocused(bool),
+    /// A message the page posted with `window.ipc.postMessage` (CH2.E9),
+    /// pushed to the window as it arrives; nothing polls the page for it.
+    Ipc {
+        payload: String,
+        nav_id: u64,
+    },
+    /// Whether the page claimed the Cmd chord `token`
+    /// ([`PageInput::CommandKey`]); the window hands one it did not to the
+    /// menu (CH2.E3).
+    KeyEquivalentDone {
+        token: u64,
+        claimed: bool,
+    },
+    /// The focused text field's marked range, selection and caret, when it
+    /// changed; `None` when no text field has focus (CH2.E3). The input
+    /// method asks for them synchronously; the window keeps the last.
+    TextInput(Option<crate::TextInputState>),
+    /// The used `cursor` keyword under the pointer, when it changed
+    /// (CH2.E4): `auto` resolved to `text` or `default`; `default` once the
+    /// pointer left the view.
     Cursor(String),
+    /// The tooltip under the pointer, when it changed: the nearest
+    /// `title`, `None` for none (CH2.E4).
+    Tooltip(Option<String>),
+    /// A secondary press no listener cancelled: the window shows its
+    /// context menu at view point `x`, `y` (CH2.E4).
+    ContextMenu { x: f32, y: f32 },
     /// Not produced on this PR. The variant is the protocol's.
     #[allow(dead_code)]
     Unresponsive,
@@ -330,10 +395,17 @@ pub struct PageEndpoint {
     /// Post the window's live wake when an event is published. The
     /// same-thread drain does not: it is already on the window thread.
     wake_window: bool,
+    /// Notified with every command the content thread's window sends, so
+    /// the thread's idle wait ends at once (CH3.A9). `None` on the
+    /// same-thread path, which never waits.
+    cmd_wake: Option<Arc<tokio::sync::Notify>>,
     /// The last [`PageEvent::Focused`] sent. A script's `focus()`, an
     /// autofocus or a new document moves focus without any input from the
     /// window, and the window answers its keys from this report.
-    last_focused: Option<bool>,
+    /// The last focus report: (anything focused, a text field focused).
+    last_focused: Option<(bool, bool)>,
+    /// The last [`PageEvent::TextInput`] sent.
+    last_text_input: Option<Option<crate::TextInputState>>,
     /// The newest navigation the window was told failed. A navigation is
     /// reported failed at most once.
     failed_nav: u64,
@@ -359,7 +431,9 @@ pub(crate) fn adopt(
         visible: true,
         settle_keys: false,
         wake_window: false,
+        cmd_wake: None,
         last_focused: None,
+        last_text_input: None,
         failed_nav: 0,
         devtools_counters: Arc::default(),
     }
@@ -391,7 +465,9 @@ pub fn connect(mut engine: Engine, view: EngineViewId) -> (PageHandle, PageEndpo
         visible: true,
         settle_keys: false,
         wake_window: false,
+        cmd_wake: None,
         last_focused: None,
+        last_text_input: None,
         failed_nav: 0,
         devtools_counters: Arc::default(),
     };
@@ -508,6 +584,10 @@ impl PageEndpoint {
                 // `location.href =` and `link.click()` from this script.
                 // The same-thread window asks with TakeNavigation instead.
                 self.report_script_navigation();
+                // What the script posted on `window.ipc` goes now, not
+                // after the next live turn (CH3.A9: the chrome's
+                // `sendIpc('create_tab')` for Cmd+T).
+                self.report_ipc();
             }
             PageCmd::SetVisible { visible } => {
                 self.visible = visible;
@@ -551,6 +631,9 @@ impl PageEndpoint {
             }
             PageCmd::SetHostReentry { limit } => {
                 self.engine.set_host_reentry_limit(limit);
+            }
+            PageCmd::SetAppOwned { owned } => {
+                self.engine.set_app_owned(self.view, owned);
             }
             PageCmd::InstallReentryProbe { reply } => {
                 let result = self
@@ -598,6 +681,19 @@ impl PageEndpoint {
 
     fn apply_input(&mut self, input: PageInput) {
         let view = self.view;
+        // What the pointer is over may change: the window is told its
+        // cursor and tooltip after these (CH2.E4).
+        let pointer = matches!(
+            input,
+            PageInput::MouseDown { .. }
+                | PageInput::MouseMove { .. }
+                | PageInput::MouseLeave
+                | PageInput::Click { .. }
+                | PageInput::SecondaryDown { .. }
+                | PageInput::SecondaryUp { .. }
+                | PageInput::Scroll { .. }
+                | PageInput::ScrollAt { .. }
+        );
         match input {
             PageInput::TextKey {
                 key_code,
@@ -634,12 +730,39 @@ impl PageEndpoint {
                     let _ = reply.send(consumed || self.settle_keys);
                 }
             }
+            PageInput::CommandKey { key_code, key, shift, alt, token } => {
+                let claimed = self.engine.handle_command_key(view, key_code, &key, shift, alt);
+                self.emit(PageEvent::KeyEquivalentDone { token, claimed });
+            }
+            PageInput::Ime(input) => {
+                use rustkit_viewhost::ImeInput;
+                match input {
+                    ImeInput::SetMarked(text) => {
+                        self.engine.set_marked_text(view, &text);
+                    }
+                    ImeInput::Insert { text, replace } => {
+                        self.engine.insert_text_replacing(view, &text, replace);
+                    }
+                    ImeInput::Unmark => {
+                        self.engine.unmark_text(view);
+                    }
+                }
+            }
+            PageInput::Edit(command) => {
+                self.engine.run_edit_command(view, &command);
+            }
             PageInput::KeyUp { key_code, key, ctrl, shift, alt } => {
                 self.engine.handle_key_up(view, key_code, &key, ctrl, shift, alt);
             }
-            PageInput::MouseDown { x, y } => {
-                self.engine.mouse_down_at_point(view, x, y);
+            PageInput::MouseDown { x, y, clicks, shift } => {
+                self.engine.mouse_down_with(view, x, y, clicks.max(1), shift);
             }
+            PageInput::SecondaryDown { x, y } => {
+                if self.engine.context_menu_at_point(view, x, y) {
+                    self.emit(PageEvent::ContextMenu { x, y });
+                }
+            }
+            PageInput::SecondaryUp { x, y } => self.engine.context_menu_release(view, x, y),
             PageInput::MouseMove { x, y } => self.engine.mouse_move_at_point(view, x, y),
             PageInput::MouseLeave => self.engine.mouse_leave(view),
             PageInput::Click { x, y, reply } => {
@@ -657,8 +780,7 @@ impl PageEndpoint {
             }
             PageInput::FocusAt { x, y, reply } => {
                 let tag = self.engine.focus_at_point(view, x, y);
-                self.last_focused = Some(tag.is_some());
-                self.emit(PageEvent::Focused(tag.is_some()));
+                self.emit_focus();
                 let _ = reply.send(tag);
             }
             PageInput::LinkAt { x, y, reply } => {
@@ -674,6 +796,12 @@ impl PageEndpoint {
                     }
                 };
                 let _ = reply.send(changed);
+                self.publish_commit();
+            }
+            PageInput::ScrollAt { x, y, dx, dy } => {
+                if let Err(e) = self.engine.scroll_at(view, x, y, dx, dy) {
+                    tracing::debug!(error = %e, "scroll_at failed");
+                }
                 self.publish_commit();
             }
             PageInput::FormSubmit { reply } => {
@@ -703,14 +831,19 @@ impl PageEndpoint {
                 let _ = reply.send(taken);
             }
             PageInput::HasFocus { reply } => {
-                let focused = self.engine.focused_node(view).is_some();
-                self.last_focused = Some(focused);
-                self.emit(PageEvent::Focused(focused));
+                let (focused, _) = self.emit_focus();
                 let _ = reply.send(focused);
+            }
+            PageInput::HasTextFocus { reply } => {
+                let (_, text) = self.emit_focus();
+                let _ = reply.send(text);
             }
         }
         self.publish_commit();
         self.report_focus();
+        if pointer {
+            self.report_hover();
+        }
         // A listener's `location.href =` or `link.click()` is not the
         // click's own default action. The content thread reports it; the
         // same-thread window still pulls with TakeNavigation.
@@ -859,7 +992,26 @@ impl PageEndpoint {
         self.translate_engine_events();
         self.publish_commit();
         self.report_focus();
+        self.report_text_input();
         self.report_script_navigation();
+        self.report_ipc();
+    }
+
+    /// Send the window what the page posted on `window.ipc` (CH2.E9).
+    /// Only the content thread reports it; the queue is Rust-side, so an
+    /// empty one costs no script.
+    fn report_ipc(&mut self) {
+        if !self.wake_window {
+            return;
+        }
+        let messages = self.engine.drain_view_ipc(self.view);
+        if messages.is_empty() {
+            return;
+        }
+        let nav_id = self.engine.nav_id(self.view).unwrap_or(0);
+        for message in messages {
+            self.emit(PageEvent::Ipc { payload: message.payload, nav_id });
+        }
     }
 
     /// Tell the content thread's window when the page's focus changed on
@@ -870,12 +1022,57 @@ impl PageEndpoint {
         if !self.wake_window {
             return;
         }
-        let focused = self.engine.focused_node(self.view).is_some();
-        if self.last_focused == Some(focused) {
+        if self.last_focused == Some(self.focus_state()) {
             return;
         }
-        self.last_focused = Some(focused);
-        self.emit(PageEvent::Focused(focused));
+        self.emit_focus();
+    }
+
+    /// Tell the content thread's window the focused text field's
+    /// text-input state when it changed (CH2.E3), after the frame it was
+    /// painted in, so the caret is the one on screen.
+    fn report_text_input(&mut self) {
+        if !self.wake_window {
+            return;
+        }
+        let state = self.engine.text_input_state(self.view);
+        if self.last_text_input == Some(state) {
+            return;
+        }
+        self.last_text_input = Some(state);
+        self.emit(PageEvent::TextInput(state));
+    }
+
+    /// Tell the window the cursor and tooltip under the pointer when they
+    /// changed (CH2.E4). A pointer that left the view gets `default` and
+    /// no tooltip.
+    fn report_hover(&mut self) {
+        let Some(now) = self.engine.take_hover_change(self.view) else {
+            return;
+        };
+        let (cursor, title) = match now {
+            Some(f) => (f.cursor, f.title),
+            None => ("default", None),
+        };
+        self.emit(PageEvent::Cursor(cursor.to_string()));
+        self.emit(PageEvent::Tooltip(title));
+    }
+
+    /// (anything focused, a text field focused) in the page now.
+    fn focus_state(&self) -> (bool, bool) {
+        (
+            self.engine.focused_node(self.view).is_some(),
+            self.engine.focused_is_text_control(self.view),
+        )
+    }
+
+    /// Report the page's focus to the window (`Focused`, `TextFocused`).
+    fn emit_focus(&mut self) -> (bool, bool) {
+        let state = self.focus_state();
+        self.last_focused = Some(state);
+        self.emit(PageEvent::Focused(state.0));
+        self.emit(PageEvent::TextFocused(state.1));
+        state
     }
 
     /// A navigation the page's script asked for (`location.href`,
@@ -945,6 +1142,10 @@ impl PageEndpoint {
         self.wake_window = wake;
     }
 
+    pub(crate) fn set_command_wake(&mut self, wake: Arc<tokio::sync::Notify>) {
+        self.cmd_wake = Some(wake);
+    }
+
     /// What devtools has cost this page so far.
     pub fn devtools_counters(&self) -> Arc<DevtoolsCounters> {
         Arc::clone(&self.devtools_counters)
@@ -990,7 +1191,15 @@ impl PageEndpoint {
                 cmds = self.drain_coalesced();
                 if cmds.is_empty() {
                     let wait_ms = turn.next_timer_ms.unwrap_or(50).clamp(2, 50);
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    let wait = std::time::Duration::from_millis(wait_ms);
+                    // A command ends the wait (CH3.A9): the chrome's Cmd+T
+                    // used to sit here until the chrome's next timer.
+                    match &self.cmd_wake {
+                        Some(wake) => {
+                            let _ = tokio::time::timeout(wait, wake.notified()).await;
+                        }
+                        None => tokio::time::sleep(wait).await,
+                    }
                     continue;
                 }
             }
@@ -1158,6 +1367,23 @@ pub(crate) fn coalesce(batch: Vec<PageCmd>) -> Vec<PageCmd> {
                     out.push(PageCmd::Render { every });
                 }
             }
+            // A pointer move replaces an earlier one that only input marks
+            // and renders separate it from: the page hears the latest
+            // position once, as Chromium dispatches coalesced moves once a
+            // frame. Nothing is passed: a press, key, click, live turn or
+            // navigation between two moves keeps both. Every mark stays, so
+            // input-to-present still counts from the first move (Z row S2:
+            // eleven queued 430 ms moves held a navigation for 5.5 s).
+            PageCmd::Input(PageInput::MouseMove { x, y }) => {
+                let earlier = out
+                    .iter()
+                    .rposition(|c| !matches!(c, PageCmd::NoteInput { .. } | PageCmd::Render { .. }))
+                    .filter(|&i| matches!(out[i], PageCmd::Input(PageInput::MouseMove { .. })));
+                if let Some(i) = earlier {
+                    out.remove(i);
+                }
+                out.push(PageCmd::Input(PageInput::MouseMove { x, y }));
+            }
             PageCmd::PumpLive { elapsed_ms, reply } => {
                 if matches!(out.last(), Some(PageCmd::PumpLive { .. })) {
                     if let Some(PageCmd::PumpLive {
@@ -1172,7 +1398,53 @@ pub(crate) fn coalesce(batch: Vec<PageCmd>) -> Vec<PageCmd> {
             other => out.push(other),
         }
     }
-    out
+    // Pointer input queued ahead of a navigation is for a document the
+    // user has left (Z row S2, reopened: a load held the thread for 11 s
+    // while the pointer moved; the thirty moves, leaves, presses and
+    // clicks waiting when the tab was closed were each a ~100 ms hover
+    // restyle on the leaving page, every listener refused by the
+    // navigation's interrupt word, and the new page loaded three seconds
+    // late). A queued click is answered with nothing: the window does not
+    // wait on it. Keys and scrolls are left alone; input marks stay for
+    // the latency figure; input behind the navigation is the next
+    // document's.
+    let leaving = out.iter().rposition(|cmd| {
+        matches!(
+            cmd,
+            PageCmd::Navigate { .. } | PageCmd::LoadHtml { .. } | PageCmd::Reload { .. } | PageCmd::Close
+        )
+    });
+    let Some(at) = leaving else {
+        return out;
+    };
+    let mut kept = Vec::with_capacity(out.len());
+    let mut dropped = 0usize;
+    for (i, cmd) in out.into_iter().enumerate() {
+        if i < at {
+            match cmd {
+                PageCmd::Input(PageInput::MouseMove { .. }
+                    | PageInput::MouseLeave
+                    | PageInput::MouseDown { .. }
+                    | PageInput::SecondaryDown { .. }
+                    | PageInput::SecondaryUp { .. },
+                ) => {
+                    dropped += 1;
+                    continue;
+                }
+                PageCmd::Input(PageInput::Click { reply, .. }) => {
+                    let _ = reply.send(crate::ClickOutcome::default());
+                    dropped += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        kept.push(cmd);
+    }
+    if dropped > 0 {
+        tracing::info!(dropped, "Pointer input queued ahead of a navigation dropped: the page is being left");
+    }
+    kept
 }
 
 fn scroll_dy_for_unhandled_key(key_code: u32, key: &str) -> Option<f32> {
@@ -1271,5 +1543,57 @@ mod tests {
         endpoint.drain(None);
         assert_eq!(handle.last_sent_nav_id(), 1);
         let _ = handle.drain_events();
+    }
+
+    /// CH2.E4: what the pointer is over reaches the window as events: the
+    /// cursor and the tooltip when they change, the context menu when the
+    /// page let a right press through, nothing when it cancelled it.
+    #[test]
+    fn hover_and_a_right_press_reach_the_window_as_events() {
+        let (handle, mut endpoint) = pair();
+        let (tx, _rx) = oneshot::channel();
+        handle.send(PageCmd::LoadHtml {
+            html: "<body style='margin:0'><a id=l href='#x' title='go' style='display:block;height:40px'>link</a>\
+                   <div style='height:40px'></div></body>"
+                .into(),
+            nav_id: 0,
+            reply: tx,
+        });
+        endpoint.drain(None);
+        let _ = handle.drain_events();
+        let hover = |handle: &PageHandle, endpoint: &mut PageEndpoint, input: PageInput| {
+            handle.send(PageCmd::Input(input));
+            endpoint.drain(None);
+            handle
+                .drain_events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    PageEvent::Cursor(c) => Some(format!("cursor {c}")),
+                    PageEvent::Tooltip(t) => Some(format!("tooltip {t:?}")),
+                    PageEvent::ContextMenu { x, y } => Some(format!("menu {x},{y}")),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            hover(&handle, &mut endpoint, PageInput::MouseMove { x: 300.0, y: 10.0 }),
+            vec!["cursor pointer".to_string(), "tooltip Some(\"go\")".to_string()]
+        );
+        assert!(hover(&handle, &mut endpoint, PageInput::MouseMove { x: 310.0, y: 12.0 }).is_empty(), "no change, no event");
+        assert_eq!(
+            hover(&handle, &mut endpoint, PageInput::MouseMove { x: 300.0, y: 60.0 }),
+            vec!["cursor default".to_string(), "tooltip None".to_string()]
+        );
+        assert_eq!(hover(&handle, &mut endpoint, PageInput::SecondaryDown { x: 300.0, y: 60.0 }), vec!["menu 300,60".to_string()]);
+        eval(&handle, &mut endpoint, "document.addEventListener('contextmenu', function (e) { e.preventDefault(); })");
+        assert!(hover(&handle, &mut endpoint, PageInput::SecondaryDown { x: 300.0, y: 60.0 }).is_empty(), "cancelled: no menu");
+        assert_eq!(
+            hover(&handle, &mut endpoint, PageInput::MouseMove { x: 300.0, y: 10.0 }),
+            vec!["cursor pointer".to_string(), "tooltip Some(\"go\")".to_string()]
+        );
+        assert_eq!(
+            hover(&handle, &mut endpoint, PageInput::MouseLeave),
+            vec!["cursor default".to_string(), "tooltip None".to_string()]
+        );
     }
 }

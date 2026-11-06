@@ -22,6 +22,8 @@
 pub mod linux;
 
 pub mod input_queue;
+pub mod region;
+pub mod cursor;
 
 // Platform-agnostic trait seam (ported from the reference tree in the wave-4
 // engine adoption; this is the one-engine Phase-2 shape). On this platform
@@ -32,9 +34,10 @@ mod traits;
 pub use traits::{ViewHostTrait, WindowHandle};
 
 pub use input_queue::{
-    drain_input, retire_view_input, InputEvent, InputKind, PendingClick, PendingKey,
-    PendingScroll, PointerInput,
+    drain_input, drain_input_view, retire_view_input, set_text_input_state, text_input_state, EditAction,
+    ImeInput, InputEvent, InputKind, PendingClick, PendingKey, PendingScroll, PointerInput, TextInputMirror,
 };
+pub use region::{compose_region, region_contains, FrameRegion, RegionRect};
 
 // Screenshot capture
 pub mod screenshot;
@@ -1613,3 +1616,9 @@ impl ViewHostTrait for ViewHost {
         self.get_dpi(view_id)
     }
 }
+
+/// macOS hands a key equivalent the page did not claim on to the main menu, holding the `NSEvent`
+/// by token until the page answers. Other platforms hold nothing, so there is nothing to finish.
+/// A no-op so the shared `webview_rustkit.rs` (synced from hiwave-macos, S3) builds off macOS.
+#[cfg(not(target_os = "macos"))]
+pub fn finish_key_equivalent(_token: u64, _claimed: bool) {}

@@ -49,12 +49,13 @@ deps/wincairo/*
 .ai/logs/
 .ai/*
 
-# Tools (ignore all except parity_oracle, real_window, element_diff and inspector)
+# Tools (ignore all except parity_oracle, real_window, element_diff, inspector and latency)
 tools/*
 !tools/parity_oracle/
 !tools/real_window/
 !tools/element_diff/
 !tools/inspector/
+!tools/latency/
 tools/element_diff/out/
 tools/inspector/out/
 tools/real_window/out/
@@ -98,3 +99,5 @@ multisurface-captures/
 builtins-captures/*.layout.json
 websuite/captures/*.ppm
 /scratch_*/
+# Batch/agent scratch inside a checkout (batch 24 landed 452 of these by accident).
+/scratch/

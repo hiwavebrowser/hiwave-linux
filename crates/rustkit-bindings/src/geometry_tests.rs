@@ -21,6 +21,7 @@ fn geom(x: f32, y: f32, w: f32, h: f32) -> BoxGeometry {
         scroll_width: w,
         scroll_height: h,
         position: 0,
+        ..Default::default()
     }
 }
 
@@ -126,6 +127,40 @@ fn offset_top_and_left_are_from_the_offset_parent() {
     assert_eq!(
         ev(&b, "var s = document.getElementById('gone'); [s.offsetParent === document.body, s.offsetLeft, s.offsetTop].join()"),
         "true,5,7"
+    );
+}
+
+#[test]
+fn a_static_element_stops_at_a_table_cell_and_a_positioned_one_does_not() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(
+        Document::parse_html(
+            "<html><body><table id=tb><tr id=tr><td id=c><p id=s></p><p id=r></p></td></tr></table></body></html>",
+        )
+        .unwrap(),
+    );
+    b.set_document(doc.clone()).unwrap();
+    let mut m = HashMap::new();
+    m.insert(id(&doc, "tb"), geom(5.0, 5.0, 100.0, 100.0));
+    m.insert(id(&doc, "tr"), geom(5.0, 5.0, 100.0, 100.0));
+    let mut cell = geom(5.0, 5.0, 100.0, 100.0);
+    cell.border_left = 2.0;
+    cell.border_top = 2.0;
+    m.insert(id(&doc, "c"), cell);
+    m.insert(id(&doc, "s"), geom(12.0, 13.0, 10.0, 10.0));
+    let mut relative = geom(12.0, 33.0, 10.0, 10.0);
+    relative.position = 1;
+    m.insert(id(&doc, "r"), relative);
+    b.set_geometry(m);
+    assert_eq!(
+        ev(&b, "var e = document.getElementById('s'); [e.offsetParent.id, e.offsetLeft, e.offsetTop].join()"),
+        "c,5,6"
+    );
+    assert_eq!(ev(&b, "document.getElementById('c').offsetParent.id"), "tb");
+    assert_eq!(ev(&b, "document.getElementById('tr').offsetParent.id"), "tb");
+    assert_eq!(
+        ev(&b, "var e = document.getElementById('r'); [e.offsetParent === document.body, e.offsetLeft, e.offsetTop].join()"),
+        "true,12,33"
     );
 }
 
@@ -254,7 +289,10 @@ fn getcomputedstyle_reads_the_published_style() {
         ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.display, c.getPropertyValue('color'), c.fontSize, c['margin-top'], c.marginTop, c.cssFloat, c.getPropertyValue('nope') === ''].join()"),
         "flex,rgb(1, 2, 3),20px,4px,4px,left,true"
     );
-    assert_eq!(ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.length, c.item(0), typeof c.getPropertyPriority].join()"), "10,border-bottom-left-radius,function");
+    // The published rows, the unset radii and the initial values of every
+    // longhand the engine serializes (`COMPUTED_INITIAL`); shorthands and
+    // empty values are not listed, `-webkit-` names come last, as in Chromium.
+    assert_eq!(ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.length, c.item(0), typeof c.getPropertyPriority].join()"), "125,align-content,function");
     assert_eq!(
         ev(&b, "var c = getComputedStyle(document.getElementById('outer')); try { c.setProperty('color', 'red'); 'no throw' } catch (e) { e.name }"),
         "NoModificationAllowedError"
