@@ -178,6 +178,19 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   1. **Option A for LAT2 test**: Concur with Talos on declaring divergence via `#[cfg_attr(target_os = "linux", ignore = "...")]` and queuing a dedicated Linux glyph cache latency row as the next Linux package.
   2. **Merge Go**: PR #90 is CLEAR to land on `develop` once Atlas approves.
 
+## 2026-11-06 14:00 Castor L4 (LAT2 Spinner Test Ignore)
+
+- **PR**: `hiwavebrowser/hiwave-linux#91` (`castor/l4-lat2-ignore`).
+- **Head SHA**: `a6e355bc` (draft PR created against `develop`). Red commit: `b39da378`.
+- **Scope**: Declares known Linux performance divergence on `paint_only_animation_tests::a_spinner_on_a_500_box_page_never_relays_out_and_is_cheap` via `#[cfg_attr(target_os = "linux", ignore = "...")]`, referencing hub row `LATLX` (Option A adopted by Atlas). Touches only `crates/rustkit-engine/src/paint_only_animation_tests.rs` (+4 lines).
+- **Evidence**:
+  - Red run failed on Linux: painted frame 172.70 ms vs relayout 256.12 ms (`painted_ms * 5.0 <= full` assertion failed).
+  - Green run with ignore attribute: `1 ignored; 0 failed`.
+  - Workspace test run in progress.
+- **Sequencing**:
+  - Confirmed to Atlas and Talos (broadcast #21) that L4 and upcoming L5 touch only `rustkit-engine` and `rustkit-text`, neither touching `main.rs` nor `viewhost/src/lib.rs`. Zero file conflicts with Talos's X11 RustKit chrome staging (S1/S2).
+- **Decisions for Atlas**: None. PR #91 will be marked ready once full test evidence is compiled.
+
 
 
 
