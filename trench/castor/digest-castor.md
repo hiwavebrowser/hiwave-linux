@@ -181,15 +181,29 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
 ## 2026-11-06 14:00 Castor L4 (LAT2 Spinner Test Ignore)
 
 - **PR**: `hiwavebrowser/hiwave-linux#91` (`castor/l4-lat2-ignore`).
-- **Head SHA**: `a6e355bc` (draft PR created against `develop`). Red commit: `b39da378`.
+- **Head SHA**: `a6e355bc` (ready for review against `develop`). Red commit: `b39da378`.
 - **Scope**: Declares known Linux performance divergence on `paint_only_animation_tests::a_spinner_on_a_500_box_page_never_relays_out_and_is_cheap` via `#[cfg_attr(target_os = "linux", ignore = "...")]`, referencing hub row `LATLX` (Option A adopted by Atlas). Touches only `crates/rustkit-engine/src/paint_only_animation_tests.rs` (+4 lines).
 - **Evidence**:
   - Red run failed on Linux: painted frame 172.70 ms vs relayout 256.12 ms (`painted_ms * 5.0 <= full` assertion failed).
   - Green run with ignore attribute: `1 ignored; 0 failed`.
-  - Workspace test run in progress.
+  - Workspace test run: `integration_tests` 27/27 pass, `main_thread_stack` 1/1 pass, budget tests pass, 0 unexpected failures across workspace. PR #91 marked ready.
 - **Sequencing**:
   - Confirmed to Atlas and Talos (broadcast #21) that L4 and upcoming L5 touch only `rustkit-engine` and `rustkit-text`, neither touching `main.rs` nor `viewhost/src/lib.rs`. Zero file conflicts with Talos's X11 RustKit chrome staging (S1/S2).
-- **Decisions for Atlas**: None. PR #91 will be marked ready once full test evidence is compiled.
+- **Decisions for Atlas**: None. Standing by for Argos R1 review.
+
+## 2026-11-06 15:20 Castor R1 on PR #92 (Linux RustKit Chrome Staged Plan)
+
+- **PR**: `hiwavebrowser/hiwave-linux#92` (`talos/chrome-plan-linux`, author: Talos).
+- **Head SHA**: `45d2621ab0e52fdc09112b1c129b9e43ab6b39ac` (short `45d2621a`). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #23 to exchange.
+- **Audit Findings**:
+  - Scope: Docs-only addition of `trench/chrome/PLAN-linux-chrome.md`.
+  - Accuracy: Verbatim records the S0 finding (`ContentWebView::RustKit` currently unwired in `main.rs`, Linux `rustkit` feature doing nothing visible today).
+  - Structure: Clearly defines Option H (macOS-shaped hybrid), XShape binary composition, known alpha gap (masked in S4), fallback rules, and isolated Xvfb (`:99`) / scratch profile constraints.
+  - S1 Refinement: Approves splitting S1 into S1a (`ContentWebView::RustKit` behind `HIWAVE_RUSTKIT_CONTENT=1`), S1c (X11 input translation to `InputQueue` to resolve viewhost event discard), and S1b (`ChromeUi` port on WebKit).
+  - Answered Talos regarding L3: L3 scoped only stack raise, surface wiring, and inspector restore; X11 input was intentionally deferred.
+- **Decisions for Atlas**: PR #92 is CLEAR to land on `develop`.
+
 
 
 
