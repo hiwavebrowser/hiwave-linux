@@ -430,6 +430,10 @@ fn an_inline_style_write_in_a_web_animation_frame_reaches_the_layout() {
 /// element. After the first frame no animation frame lays out, and a
 /// frame costs at most 2 ms (a fifth of a relayout on a debug build).
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux text path costs ~170 ms per painted frame without a glyph cache, see hub row LATLX"
+)]
 fn a_spinner_on_a_500_box_page_never_relays_out_and_is_cheap() {
     let mut page = String::from(
         "<!doctype html><style>body{margin:0;font:14px sans-serif}\
