@@ -67,12 +67,13 @@ mod ipc;
 mod webview;
 
 // RustKit integration (not yet implemented for Linux - placeholder for future X11/Wayland support)
-// RustKit content path. Present only when the rustkit feature is on and the
-// WebKit fallback is off -- the two are mutually exclusive by construction, so
-// a build cannot silently link both content engines.
-#[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
+// RustKit content path. Compiled in whenever the rustkit feature is on, alongside WebKit: the RustKit page view
+// is chosen at runtime by HIWAVE_RUSTKIT_CONTENT=1 on an X11 window (see rustkit_content.rs), WebKit otherwise.
+#[cfg(all(target_os = "linux", feature = "rustkit"))]
 mod webview_rustkit;
-#[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "native-linux")))]
+mod rustkit_content;
+#[cfg(all(target_os = "linux", feature = "rustkit"))]
 use hiwave_shield_intercept as shield_adapter;
 #[cfg(not(feature = "native-linux"))]
 mod content_webview_trait;
@@ -1518,8 +1519,187 @@ fn main() {
             .map(|tab| tab.url.to_string())
             .unwrap_or_else(|| NEW_TAB_URL.to_string())
     };
-    // WRY (WebView2) Content WebView creation
-    let content_webview = WebViewBuilder::new()
+    // The content view's IPC handler is shared: the WebKit view calls it from wry's handler, the RustKit page
+    // view (HIWAVE_RUSTKIT_CONTENT=1) from the pump that drains its messages.
+    let content_ipc: std::rc::Rc<dyn Fn(&str)> = std::rc::Rc::new(move |body: &str| {
+        log_ipc("Content IPC", &body);
+            if let Ok(msg) = serde_json::from_str::<IpcMessage>(body) {
+                match &msg {
+                    IpcMessage::GoBack => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::GoBack);
+                    }
+                    IpcMessage::GoForward => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::GoForward);
+                    }
+                    IpcMessage::CreateTab { url } => {
+                        // Handle create tab directly
+                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
+                        let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
+                        let _ = content_proxy_ipc.send_event(UserEvent::SyncWorkspaces);
+                        if let Some(u) = url {
+                            let _ = content_proxy_ipc.send_event(UserEvent::Navigate(u.clone()));
+                        }
+                    }
+                    IpcMessage::AddToShelf { tab_id } => {
+                        // If tab_id is "active", use the currently active tab
+                        let actual_tab_id = if tab_id == "active" {
+                            if let Ok(s) = content_state_ipc.lock() {
+                                s.shell.get_active_tab().map(|t| t.id.0.to_string()).unwrap_or_default()
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            tab_id.clone()
+                        };
+
+                        if !actual_tab_id.is_empty() {
+                            let shelf_msg = IpcMessage::AddToShelf { tab_id: actual_tab_id };
+                            let _ = ipc::commands::handle_message(&content_state_ipc, shelf_msg);
+                            let _ = content_proxy_ipc.send_event(UserEvent::SyncShelf(crate::ShelfScope::Workspace));
+                            let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
+                        }
+                    }
+                    IpcMessage::FindInPageResult { result } => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::FindInPageResult(result.clone()));
+                    }
+                    IpcMessage::TabAudioStateChanged { playing } => {
+                        info!("Tab audio state changed from content: playing={}", playing);
+                        let _ = content_proxy_ipc.send_event(UserEvent::TabAudioStateChanged { playing: *playing });
+                    }
+                    IpcMessage::GetCredentialsForAutofill { ref domain } => {
+                        info!("Getting credentials for autofill: {}", domain);
+                        let response = ipc::commands::handle_message(&content_state_ipc, msg.clone());
+                        info!("Autofill response: {:?}", response);
+                        match response {
+                            ipc::IpcResponse::Success { data } => {
+                                let json = serde_json::to_string(&data).unwrap_or_else(|_| "[]".to_string());
+                                info!("Sending {} credentials to page", json.len());
+                                let _ = content_proxy_ipc.send_event(UserEvent::SendAutofillCredentials {
+                                    credentials_json: json,
+                                });
+                            }
+                            ipc::IpcResponse::Error { ref message } => {
+                                warn!("Autofill error: {}", message);
+                                // Show error alert on content page
+                                let script = format!(
+                                    "alert('[HiWave Autofill] {}');",
+                                    message.replace('\'', "\\'")
+                                );
+                                let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
+                            }
+                        }
+                    }
+                    // Handle focus mode from content (keyboard shortcuts)
+                    IpcMessage::ExitFocusMode => {
+                        info!("Exit focus mode from content WebView");
+                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
+                        let _ = content_proxy_ipc.send_event(UserEvent::ExitFocusMode);
+                    }
+                    IpcMessage::ToggleFocusMode => {
+                        info!("Toggle focus mode from content WebView");
+                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
+                        let _ = content_proxy_ipc.send_event(UserEvent::ToggleFocusMode);
+                    }
+                    IpcMessage::EnterFocusMode => {
+                        info!("Enter focus mode from content WebView");
+                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
+                        let _ = content_proxy_ipc.send_event(UserEvent::EnterFocusMode);
+                    }
+                    // UI shortcuts forwarded from content WebView
+                    IpcMessage::CloseTab { id } => {
+                        info!("Close tab from content: {}", id);
+                        if id == "active" {
+                            let _ = content_proxy_ipc.send_event(UserEvent::CloseActiveTab);
+                        } else {
+                            let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
+                            let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
+                        }
+                    }
+                    IpcMessage::Refresh => {
+                        info!("Refresh from content");
+                        let _ = content_proxy_ipc.send_event(UserEvent::Reload);
+                    }
+                    IpcMessage::FocusAddressBar => {
+                        info!("Focus address bar from content");
+                        let _ = content_proxy_ipc.send_event(UserEvent::FocusAddressBar);
+                    }
+                    IpcMessage::OpenFind => {
+                        info!("Open find from content");
+                        let _ = content_proxy_ipc.send_event(UserEvent::OpenFind);
+                    }
+                    IpcMessage::ToggleSidebar => {
+                        info!("Toggle sidebar from content");
+                        let _ = content_proxy_ipc.send_event(UserEvent::ToggleSidebar);
+                    }
+                    IpcMessage::OpenCommandPalette => {
+                        info!("Open command palette from content");
+                        let _ = content_proxy_ipc.send_event(UserEvent::OpenCommandPalette);
+                    }
+                    IpcMessage::ActivateTabByIndex { index } => {
+                        info!("Activate tab by index from content: {}", index);
+                        let _ = content_proxy_ipc.send_event(UserEvent::ActivateTabByIndex { index: *index });
+                    }
+                    IpcMessage::TriggerAutofill => {
+                        info!("Trigger autofill from content");
+                        let _ = content_proxy_ipc.send_event(UserEvent::TriggerAutofill);
+                    }
+                    // Handle analytics and other commands that need responses sent back to content
+                    IpcMessage::GetTodayStats
+                    | IpcMessage::GetWeeklyReport
+                    | IpcMessage::GetMonthlyReport
+                    | IpcMessage::GetCustomReport { .. }
+                    | IpcMessage::GetTopDomains { .. }
+                    | IpcMessage::GetWorkspaceStats
+                    | IpcMessage::ResetAnalyticsData
+                    | IpcMessage::ExportAnalyticsData { .. } => {
+                        info!("Analytics command from content: {:?}", msg);
+                        let response = ipc::commands::handle_message(&content_state_ipc, msg.clone());
+                        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+                        let script = format!(
+                            "window.dispatchEvent(new CustomEvent('hiwave-response', {{ detail: {} }}));",
+                            response_json
+                        );
+                        let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
+                    }
+                    IpcMessage::OpenExternal { url } => {
+                        info!("Opening external URL from content: {}", crate::page_url_for_log(&url));
+                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
+                    }
+                    _ => {}
+                }
+            }
+    });
+
+    // Which engine draws the page: WebKit unless HIWAVE_RUSTKIT_CONTENT=1 engages the RustKit view on an X11
+    // window. With the variable unset nothing RustKit is created.
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    let rustkit_content_view: Option<(Arc<webview_rustkit::RustKitView>, std::time::Instant)> =
+        match rustkit_content::choose(&window) {
+            rustkit_content::Engagement::On => {
+                let b = rustkit_viewhost::Bounds {
+                    x: content_bounds.position.to_logical::<f64>(1.0).x as i32,
+                    y: content_bounds.position.to_logical::<f64>(1.0).y as i32,
+                    width: content_bounds.size.to_logical::<f64>(1.0).width as u32,
+                    height: content_bounds.size.to_logical::<f64>(1.0).height as u32,
+                };
+                match rustkit_content::create(&window, b, None) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        error!("RustKit content view failed ({e}); using the WebKit page view");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+    #[cfg(not(all(target_os = "linux", feature = "rustkit")))]
+    let rustkit_content_view: Option<()> = None;
+
+    // WRY (WebView2) Content WebView creation. Skipped when the RustKit page view is engaged.
+    let content_webview_wry: Option<wry::WebView> = if rustkit_content_view.is_some() {
+        None
+    } else {
+        Some(WebViewBuilder::new()
         .with_html(ABOUT_HTML)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
@@ -1761,163 +1941,37 @@ fn main() {
             let _ = content_proxy4.send_event(UserEvent::Navigate(url));
             false
         })
-        .with_ipc_handler(move |message| {
-            let body = message.body();
-            log_ipc("Content IPC", &body);
-            if let Ok(msg) = serde_json::from_str::<IpcMessage>(body) {
-                match &msg {
-                    IpcMessage::GoBack => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::GoBack);
-                    }
-                    IpcMessage::GoForward => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::GoForward);
-                    }
-                    IpcMessage::CreateTab { url } => {
-                        // Handle create tab directly
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
-                        let _ = content_proxy_ipc.send_event(UserEvent::SyncWorkspaces);
-                        if let Some(u) = url {
-                            let _ = content_proxy_ipc.send_event(UserEvent::Navigate(u.clone()));
-                        }
-                    }
-                    IpcMessage::AddToShelf { tab_id } => {
-                        // If tab_id is "active", use the currently active tab
-                        let actual_tab_id = if tab_id == "active" {
-                            if let Ok(s) = content_state_ipc.lock() {
-                                s.shell.get_active_tab().map(|t| t.id.0.to_string()).unwrap_or_default()
-                            } else {
-                                String::new()
-                            }
-                        } else {
-                            tab_id.clone()
-                        };
-
-                        if !actual_tab_id.is_empty() {
-                            let shelf_msg = IpcMessage::AddToShelf { tab_id: actual_tab_id };
-                            let _ = ipc::commands::handle_message(&content_state_ipc, shelf_msg);
-                            let _ = content_proxy_ipc.send_event(UserEvent::SyncShelf(crate::ShelfScope::Workspace));
-                            let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
-                        }
-                    }
-                    IpcMessage::FindInPageResult { result } => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::FindInPageResult(result.clone()));
-                    }
-                    IpcMessage::TabAudioStateChanged { playing } => {
-                        info!("Tab audio state changed from content: playing={}", playing);
-                        let _ = content_proxy_ipc.send_event(UserEvent::TabAudioStateChanged { playing: *playing });
-                    }
-                    IpcMessage::GetCredentialsForAutofill { ref domain } => {
-                        info!("Getting credentials for autofill: {}", domain);
-                        let response = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        info!("Autofill response: {:?}", response);
-                        match response {
-                            ipc::IpcResponse::Success { data } => {
-                                let json = serde_json::to_string(&data).unwrap_or_else(|_| "[]".to_string());
-                                info!("Sending {} credentials to page", json.len());
-                                let _ = content_proxy_ipc.send_event(UserEvent::SendAutofillCredentials {
-                                    credentials_json: json,
-                                });
-                            }
-                            ipc::IpcResponse::Error { ref message } => {
-                                warn!("Autofill error: {}", message);
-                                // Show error alert on content page
-                                let script = format!(
-                                    "alert('[HiWave Autofill] {}');",
-                                    message.replace('\'', "\\'")
-                                );
-                                let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
-                            }
-                        }
-                    }
-                    // Handle focus mode from content (keyboard shortcuts)
-                    IpcMessage::ExitFocusMode => {
-                        info!("Exit focus mode from content WebView");
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::ExitFocusMode);
-                    }
-                    IpcMessage::ToggleFocusMode => {
-                        info!("Toggle focus mode from content WebView");
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::ToggleFocusMode);
-                    }
-                    IpcMessage::EnterFocusMode => {
-                        info!("Enter focus mode from content WebView");
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::EnterFocusMode);
-                    }
-                    // UI shortcuts forwarded from content WebView
-                    IpcMessage::CloseTab { id } => {
-                        info!("Close tab from content: {}", id);
-                        if id == "active" {
-                            let _ = content_proxy_ipc.send_event(UserEvent::CloseActiveTab);
-                        } else {
-                            let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                            let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
-                        }
-                    }
-                    IpcMessage::Refresh => {
-                        info!("Refresh from content");
-                        let _ = content_proxy_ipc.send_event(UserEvent::Reload);
-                    }
-                    IpcMessage::FocusAddressBar => {
-                        info!("Focus address bar from content");
-                        let _ = content_proxy_ipc.send_event(UserEvent::FocusAddressBar);
-                    }
-                    IpcMessage::OpenFind => {
-                        info!("Open find from content");
-                        let _ = content_proxy_ipc.send_event(UserEvent::OpenFind);
-                    }
-                    IpcMessage::ToggleSidebar => {
-                        info!("Toggle sidebar from content");
-                        let _ = content_proxy_ipc.send_event(UserEvent::ToggleSidebar);
-                    }
-                    IpcMessage::OpenCommandPalette => {
-                        info!("Open command palette from content");
-                        let _ = content_proxy_ipc.send_event(UserEvent::OpenCommandPalette);
-                    }
-                    IpcMessage::ActivateTabByIndex { index } => {
-                        info!("Activate tab by index from content: {}", index);
-                        let _ = content_proxy_ipc.send_event(UserEvent::ActivateTabByIndex { index: *index });
-                    }
-                    IpcMessage::TriggerAutofill => {
-                        info!("Trigger autofill from content");
-                        let _ = content_proxy_ipc.send_event(UserEvent::TriggerAutofill);
-                    }
-                    // Handle analytics and other commands that need responses sent back to content
-                    IpcMessage::GetTodayStats
-                    | IpcMessage::GetWeeklyReport
-                    | IpcMessage::GetMonthlyReport
-                    | IpcMessage::GetCustomReport { .. }
-                    | IpcMessage::GetTopDomains { .. }
-                    | IpcMessage::GetWorkspaceStats
-                    | IpcMessage::ResetAnalyticsData
-                    | IpcMessage::ExportAnalyticsData { .. } => {
-                        info!("Analytics command from content: {:?}", msg);
-                        let response = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
-                        let script = format!(
-                            "window.dispatchEvent(new CustomEvent('hiwave-response', {{ detail: {} }}));",
-                            response_json
-                        );
-                        let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
-                    }
-                    IpcMessage::OpenExternal { url } => {
-                        info!("Opening external URL from content: {}", crate::page_url_for_log(&url));
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                    }
-                    _ => {}
-                }
-            }
+        .with_ipc_handler({
+            let handler = std::rc::Rc::clone(&content_ipc);
+            move |message| handler(message.body())
         })
         .build_gtk(&gtk_fixed)
-        .expect("Failed to create Content WebView");
+        .expect("Failed to create Content WebView"))
+    };
 
-    // WRY initial URL loading
+    // The content view, from whichever engine was chosen above.
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    let content_created_at = rustkit_content_view.as_ref().map(|(_, at)| *at);
+    let content_webview: UnifiedContentWebView = match (content_webview_wry, rustkit_content_view) {
+        (Some(w), _) => UnifiedContentWebView::Wry(Arc::new(w)),
+        #[cfg(all(target_os = "linux", feature = "rustkit"))]
+        (None, Some((v, _))) => UnifiedContentWebView::RustKit(v),
+        _ => unreachable!("the content view is WebKit unless the RustKit view was built"),
+    };
+
+    // Initial page. The WebKit view starts on ABOUT_HTML (with_html above); the RustKit view has to be told.
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    if let UnifiedContentWebView::RustKit(_) = content_webview {
+        let issued = std::time::Instant::now();
+        content_webview.load_html(ABOUT_HTML);
+        info!(
+            since_view_created_ms = content_created_at.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0),
+            call_ms = issued.elapsed().as_millis() as u64,
+            "RustKit content view: initial load_html issued"
+        );
+    }
     if !is_new_tab_url(&initial_url) {
-        if let Err(e) = content_webview.load_url(&initial_url) {
-            error!("Failed to load initial URL: {}", e);
-        }
+        content_webview.load_url(&initial_url);
     }
     info!("Content WebView created (content area)");
 
@@ -2043,12 +2097,21 @@ fn main() {
     // Store WebViews in Arcs for event loop access
     let chrome_webview: Arc<wry::WebView> = Arc::new(chrome_webview);
     let shelf_webview: Option<Arc<wry::WebView>> = shelf_webview.map(Arc::new);
-    let content_webview: Arc<wry::WebView> = Arc::new(content_webview);
 
     let chrome_for_events: Arc<wry::WebView> = Arc::clone(&chrome_webview);
     let shelf_for_events: Option<Arc<wry::WebView>> = shelf_webview.clone();
 
-    let content_for_events: Arc<wry::WebView> = Arc::clone(&content_webview);
+    let content_for_events: UnifiedContentWebView = content_webview.clone();
+    // The RustKit page view is driven from the GTK main loop (its clock, ipc, navigation, title/url, a frame).
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    if let UnifiedContentWebView::RustKit(ref view) = content_webview {
+        rustkit_content::install_pump(
+            Arc::clone(view),
+            proxy.clone(),
+            std::rc::Rc::clone(&content_ipc),
+            content_created_at.unwrap_or_else(std::time::Instant::now),
+        );
+    }
     let state_for_events = Arc::clone(&state);
     let chrome_height_for_events = Arc::clone(&chrome_height);
     let shelf_height_for_events = Arc::clone(&shelf_height);
