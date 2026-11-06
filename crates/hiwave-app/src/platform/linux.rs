@@ -90,29 +90,14 @@ impl Default for LinuxPlatform {
 }
 
 impl PlatformManager for LinuxPlatform {
-    fn initialize_menu(&self, window: &Window, menu: &Menu) -> PlatformResult<()> {
-        // Create Edit menu
+    fn initialize_menu(&self, _window: &Window, menu: &Menu) -> PlatformResult<()> {
+        // The Edit menu is still built (the platform trait expects it) but it is NOT attached to the
+        // window. Attaching it put a GTK menu bar containing only "Edit" across the top of the window,
+        // which neither the macOS nor the Windows app has, and which took a strip of the window and
+        // pushed the chrome down. WebKitGTK handles cut/copy/paste/undo itself, and the RustKit views
+        // handle them in the engine, so nothing relies on the menu's accelerators on Linux.
         self.create_edit_menu(menu)?;
-
-        // Initialize menu for GTK window
-        use tao::platform::unix::WindowExtUnix;
-
-        // GTK window and display may not be available in headless environments
-        match (window.gtk_window(), window.default_vbox()) {
-            (gtk_window, Some(vbox)) => {
-                // Initialize menu for GTK window using the vbox container when available
-                menu.init_for_gtk_window(gtk_window, Some(vbox))
-                    .map_err(|e| {
-                        PlatformError::MenuInitFailed(format!("GTK init failed: {}", e))
-                    })?;
-            }
-            _ => {
-                warn!("GTK window not available for menu initialization");
-                // Don't fail - menu is optional on Linux
-            }
-        }
-
-        debug!("Linux menu initialized successfully");
+        debug!("Linux: menu built but not shown (no GTK menu bar)");
         Ok(())
     }
 

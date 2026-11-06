@@ -802,7 +802,29 @@ fn page_url_for_log_as(url: &str, whole: bool) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// WebKitGTK 2.4x+ draws through a DMA-BUF renderer. On NVIDIA's proprietary driver (especially under
+/// Wayland) that renderer commonly fails and the window opens but stays empty. The documented switch is
+/// `WEBKIT_DISABLE_DMABUF_RENDERER=1`. Set it for the user when that driver is present, unless they have
+/// set the variable themselves (so `WEBKIT_DISABLE_DMABUF_RENDERER=0` still wins). Must run before GTK
+/// or WebKit initialise. Returns whether the renderer is disabled by this rule, so `main` can log it once logging is up.
+#[cfg(target_os = "linux")]
+fn apply_gpu_workarounds() -> bool {
+    // Either marker: /proc/driver/nvidia/version is absent on some driver builds (this machine has the
+    // directory but no `version` file), while the control node and the directory are always there.
+    let nvidia_proprietary = ["/proc/driver/nvidia", "/dev/nvidiactl"]
+        .iter()
+        .any(|p| std::path::Path::new(p).exists());
+    if nvidia_proprietary && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+    // Report the STATE, not "did I just set it": the app re-executes itself once for its 16 MiB stack and
+    // the second process inherits the variable, so "did I set it" would be false there and log nothing.
+    nvidia_proprietary && std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").map(|v| v == "1").unwrap_or(false)
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    let dmabuf_renderer_disabled = apply_gpu_workarounds();
     #[cfg(target_os = "linux")]
     ensure_main_thread_stack_16mib();
 
@@ -821,6 +843,10 @@ fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
     info!("Starting HiWave...");
+    #[cfg(target_os = "linux")]
+    if dmabuf_renderer_disabled {
+        info!("NVIDIA proprietary driver detected: WebKit DMA-BUF renderer disabled (set WEBKIT_DISABLE_DMABUF_RENDERER=0 to override)");
+    }
     #[cfg(target_os = "linux")]
     info!(
         "Main thread stack: {} MiB",
