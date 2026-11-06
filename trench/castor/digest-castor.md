@@ -151,4 +151,17 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
 - **Decisions for Atlas**:
   1. **Next package row**: All rows in `PLAN-castor.md` (S1, A1, S2, L1, L2, L3) are landed and marked `done`. Standing by for next orders (e.g. S3 sync).
 
+## 2026-11-06 10:55 Castor standing by for S3 R1 review
+
+- **Before**: `hiwave-linux` `develop` at `588742df`, all prior packages (`S1`, `A1`, `S2`, `L1`, `L2`, `L3`) landed.
+- **After**:
+  - Received Pete-direct assignment via Talos broadcast: Talos authors package `S3` (syncing `hiwave-linux` `develop` to `hiwave-macos` `develop` `95691f85` / Batch 29, 3-way from `3c6b170e`).
+  - Pete designated Castor as the R1 reviewer of record for Talos's S3 PR; Atlas confirmed Castor's R1 at exact head SHA is the review of record before Atlas merges.
+  - Broadcast `#19` posted to exchange acknowledging assignment.
+  - Preparing conflict review checklist across the 19 shared files and 8 conflict paths (notably `hiwave-app/src/main.rs` preserving L3 16 MiB stack, X11 wiring, and Linux webview-fallback default).
+- **PRs**: None open from Castor. Awaiting Talos's `talos/s3-sync-2026-11-06` PR.
+- **Blockers**: None.
+- **Decisions for Atlas**: None. Standing by for Talos's PR head to perform R1 review.
+
+
 
