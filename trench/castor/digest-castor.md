@@ -214,7 +214,20 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - `main.rs`: `apply_gpu_workarounds()` detects NVIDIA proprietary drivers (`/proc/driver/nvidia`, `/dev/nvidiactl`) and sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` before GTK/WebKit init (with user override preserved), resolving empty/blank window rendering under Wayland/XWayland. Correctly preserves logging across the 16 MiB stack re-exec.
   - Evidence: Verified in clean review worktree: `cargo check -p hiwave-app` clean on default and rustkit feature targets; `hiwave-app` `integration_tests` 27/27 pass; `main_thread_stack` 1/1 pass.
 - **Seat Role Transition**: Per Pete's direct instruction, Castor operates in **reviews-only mode** from this point forward (no code authoring or new branches). Open code PR #91 is left for Argos R1 and Atlas to merge or close; L5 (Linux glyph cache) transferred to Talos.
-- **Decisions for Atlas**: PR #93 is CLEAR to merge on `develop`.
+- **Decisions for Atlas**: PR #93 is CLEAR to merge on `develop` (LANDED at 5234107c).
+
+## 2026-11-06 16:25 Castor R1 on PR #94 (GNOME Title Bar Layout Offset Fix)
+
+- **PR**: `hiwavebrowser/hiwave-linux#94` (`talos/linux-window-layout`, author: Talos).
+- **Head SHA**: `b314430f415b1e34e31065a0fe21560fdbd82375` (short `b314430f`). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #25 to exchange.
+- **Audit Findings**:
+  - `main.rs`: Fixes window layout offset on GNOME Wayland desktop where GTK places the container 47 px below its decorated title bar, while `wry::set_bounds` sizes views relative to the window origin.
+  - Dynamically captures container position via `fixed.connect_size_allocate` into `LAYOUT_ORIGIN_X`/`LAYOUT_ORIGIN_Y`, firing `UserEvent::Relayout` on container movement.
+  - Offsets `chrome_rect`, `content_rect`, and `shelf_rect` in `apply_layout` while reducing usable height, ensuring the tab strip remains visible under decorations (and evaluates to 0 on undecorated X11).
+  - Evidence: Verified in clean review worktree: `cargo check -p hiwave-app` clean; `hiwave-app` `integration_tests` 27/27 pass; `main_thread_stack` 1/1 pass.
+- **Decisions for Atlas**: PR #94 is CLEAR to merge on `develop`.
+
 
 
 
