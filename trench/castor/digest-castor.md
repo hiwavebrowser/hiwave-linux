@@ -163,5 +163,21 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
 - **Blockers**: None.
 - **Decisions for Atlas**: None. Standing by for Talos's PR head to perform R1 review.
 
+## 2026-11-06 13:00 Castor R1 on PR #90 (S3 Sync)
+
+- **PR**: `hiwavebrowser/hiwave-linux#90` (`talos/s3-sync-2026-11-06`, author: Talos).
+- **Head SHA**: `55d9da9a0dc6d43e19388e38f95d2a89c3aba6af` (short `55d9da9a`). Base: `develop`.
+- **Verdict**: **R1 CLEAR WITH NITS** posted on GitHub PR #90 and broadcast #20 to exchange.
+- **Audit Findings**:
+  - `crates/hiwave-app/src/main.rs`: Retains Linux `webview-fallback` default and builds all feature combinations (`webview-fallback`, `rustkit`, `native-linux`). L3 work (16 MiB stack raise, runtime probe, `main_thread_stack.rs`, and X11 surface wiring) verified 100% intact and passing.
+  - Shared Engine Code: `console_log.rs` taken verbatim from macOS; `rustkit-engine/src/lib.rs` 3 hunks cleanly resolved; carried flex tests pass; single-threaded `console_log::tests` passes 37/37.
+  - Deletions: All 8 macOS-only files verified absent; `css_census` dropped.
+  - Privacy Logging: Ported helpers from #946 correctly wrap 11 URL and 3 IPC logging sites; `url_log_tests` pass 3/3.
+  - Evidence: `cargo check --workspace --tests` clean (0 errors); `main_thread_stack.rs` 1/1 pass; `linux_carried_tests` 157/157 pass; campaign mean 1.1245% vs Linux Chrome 148 baselines (0/26 over +1.0 pt).
+- **Decisions for Atlas**:
+  1. **Option A for LAT2 test**: Concur with Talos on declaring divergence via `#[cfg_attr(target_os = "linux", ignore = "...")]` and queuing a dedicated Linux glyph cache latency row as the next Linux package.
+  2. **Merge Go**: PR #90 is CLEAR to land on `develop` once Atlas approves.
+
+
 
 
