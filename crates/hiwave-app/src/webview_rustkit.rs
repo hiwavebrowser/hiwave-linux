@@ -740,6 +740,59 @@ impl RustKitView {
         std::mem::take(&mut *self.chrome_updates.borrow_mut())
     }
 
+    /// Linux: read the X11 input waiting for this view and deliver it to the page, in arrival order (S1c).
+    /// Window thread; call it once a turn of the main loop, before `render`.
+    ///
+    /// Returns how many inputs were delivered. The mapping from the recorded events is the pure
+    /// `x11_deliveries`; this only executes it.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn pump_x11_input(&self) -> usize {
+        let events = if let Some(surface) = &self.surface {
+            // The page is on the content thread: this thread owns the surface and its viewhost.
+            surface.borrow().pump_input();
+            let id = surface.borrow().viewhost_id();
+            rustkit_viewhost::drain_input_view(id)
+        } else if let Some(endpoint) = &self.endpoint {
+            // The page is on this thread (the default): the endpoint's engine owns the viewhost. A load in
+            // progress holds the endpoint; the input stays queued for the next turn.
+            match endpoint.try_borrow() {
+                Ok(endpoint) => endpoint.drain_x11_input(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        if !events.is_empty() {
+            debug!(count = events.len(), "X11 input drained");
+        }
+        for e in &events {
+            self.note_input(e.at, e.seq);
+            match x11_delivery(&e.kind) {
+                X11Delivery::MouseDown { x, y, clicks, shift } => {
+                    // A press in the page is where the keyboard goes next.
+                    self.grab_keyboard();
+                    self.mouse_down_with(x, y, clicks, shift);
+                }
+                X11Delivery::MouseUp { x, y } => {
+                    self.click_at_point(x, y);
+                }
+                X11Delivery::SecondaryDown { x, y } => self.secondary_down(x, y),
+                X11Delivery::SecondaryUp { x, y } => self.secondary_up(x, y),
+                X11Delivery::MouseMove { x, y } => self.mouse_move_at_point(x, y),
+                X11Delivery::MouseLeave => self.mouse_leave(),
+                X11Delivery::Scroll { x, y, dx, dy } => {
+                    self.scroll_at(x, y, dx, dy);
+                }
+                X11Delivery::KeyDown { vk, text, ctrl, shift, alt } => {
+                    self.handle_text_key(vk, &text, ctrl, shift, alt);
+                }
+                X11Delivery::KeyUp { vk, text, ctrl, shift, alt } => self.handle_key_up(vk, &text, ctrl, shift, alt),
+                X11Delivery::Ignore => {}
+            }
+        }
+        events.len()
+    }
+
     /// The viewhost id the input of this view's NSView is tagged with.
     /// Content thread only (the flag-off engine owns its host view).
     pub fn input_view(&self) -> Option<rustkit_viewhost::ViewId> {
@@ -2626,5 +2679,90 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         assert!(content_engine_builder().config().interrupt_scripts_at_budget);
         // The engine's default (parity-capture, the board) lets it run on.
         assert!(!rustkit_engine::EngineConfig::default().interrupt_scripts_at_budget);
+    }
+}
+
+/// What one recorded X11 input does to the page: the pure half of `pump_x11_input`.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Debug, PartialEq)]
+pub(crate) enum X11Delivery {
+    MouseDown { x: f32, y: f32, clicks: u32, shift: bool },
+    MouseUp { x: f32, y: f32 },
+    SecondaryDown { x: f32, y: f32 },
+    SecondaryUp { x: f32, y: f32 },
+    MouseMove { x: f32, y: f32 },
+    MouseLeave,
+    /// `dy > 0` is wheel-up, as the window loop counts it.
+    Scroll { x: f32, y: f32, dx: f32, dy: f32 },
+    KeyDown { vk: u32, text: String, ctrl: bool, shift: bool, alt: bool },
+    KeyUp { vk: u32, text: String, ctrl: bool, shift: bool, alt: bool },
+    Ignore,
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn x11_delivery(kind: &rustkit_viewhost::InputKind) -> X11Delivery {
+    use rustkit_viewhost::{InputKind, PointerInput};
+    match kind {
+        InputKind::Pointer(p) => {
+            let (x, y) = (p.x as f32, p.y as f32);
+            match (p.input, p.down) {
+                (PointerInput::Button, true) => X11Delivery::MouseDown { x, y, clicks: p.clicks, shift: p.shift },
+                (PointerInput::Button, false) => X11Delivery::MouseUp { x, y },
+                (PointerInput::Secondary, true) => X11Delivery::SecondaryDown { x, y },
+                (PointerInput::Secondary, false) => X11Delivery::SecondaryUp { x, y },
+                (PointerInput::Move, _) => X11Delivery::MouseMove { x, y },
+                (PointerInput::Leave, _) => X11Delivery::MouseLeave,
+            }
+        }
+        InputKind::Wheel(w) => X11Delivery::Scroll { x: w.x as f32, y: w.y as f32, dx: w.dx as f32, dy: w.dy as f32 },
+        InputKind::Key(k) => {
+            // A key with no virtual key and no text (a bare modifier) means nothing to the page.
+            if k.mac_keycode == 0 && k.text.is_empty() {
+                return X11Delivery::Ignore;
+            }
+            let (vk, text) = (k.mac_keycode as u32, k.text.clone());
+            if k.up {
+                X11Delivery::KeyUp { vk, text, ctrl: k.ctrl, shift: k.shift, alt: k.alt }
+            } else {
+                X11Delivery::KeyDown { vk, text, ctrl: k.ctrl, shift: k.shift, alt: k.alt }
+            }
+        }
+        _ => X11Delivery::Ignore,
+    }
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod x11_delivery_tests {
+    use super::*;
+    use rustkit_viewhost::x11_input as xi;
+
+    #[test]
+    fn a_primary_press_then_release_is_mouse_down_then_up() {
+        let d = xi::button_input(1, true, 7.0, 9.0, 0, 2).unwrap();
+        assert_eq!(x11_delivery(&d), X11Delivery::MouseDown { x: 7.0, y: 9.0, clicks: 2, shift: false });
+        let u = xi::button_input(1, false, 7.0, 9.0, 0, 1).unwrap();
+        assert_eq!(x11_delivery(&u), X11Delivery::MouseUp { x: 7.0, y: 9.0 });
+    }
+
+    #[test]
+    fn wheel_move_leave_and_secondary_route_to_their_calls() {
+        let w = xi::button_input(5, true, 3.0, 4.0, 0, 1).unwrap();
+        assert_eq!(x11_delivery(&w), X11Delivery::Scroll { x: 3.0, y: 4.0, dx: 0.0, dy: -40.0 });
+        assert_eq!(x11_delivery(&xi::motion_input(1.0, 2.0, 0)), X11Delivery::MouseMove { x: 1.0, y: 2.0 });
+        assert_eq!(x11_delivery(&xi::leave_input()), X11Delivery::MouseLeave);
+        let s = xi::button_input(3, true, 1.0, 1.0, 0, 1).unwrap();
+        assert_eq!(x11_delivery(&s), X11Delivery::SecondaryDown { x: 1.0, y: 1.0 });
+    }
+
+    #[test]
+    fn keys_carry_the_virtual_key_and_text_and_a_bare_modifier_is_ignored() {
+        let k = xi::key_input(0x61, "a", 0, false);
+        assert_eq!(
+            x11_delivery(&k),
+            X11Delivery::KeyDown { vk: 0x41, text: "a".into(), ctrl: false, shift: false, alt: false }
+        );
+        assert!(matches!(x11_delivery(&xi::key_input(0x61, "a", 0, true)), X11Delivery::KeyUp { .. }));
+        // Shift_L: keysym 0xffe1, no text, no virtual key.
+        assert_eq!(x11_delivery(&xi::key_input(0xffe1, "", 1, false)), X11Delivery::Ignore);
     }
 }

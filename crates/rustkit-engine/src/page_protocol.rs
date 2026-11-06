@@ -1597,3 +1597,12 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(unix, not(target_os = "macos")))]
+impl PageEndpoint {
+    /// Linux (S1c): the X11 input recorded for this endpoint's view since the last call. Window thread; the
+    /// flag-off path, where the engine and its viewhost live here.
+    pub fn drain_x11_input(&self) -> Vec<rustkit_viewhost::InputEvent> {
+        self.engine.drain_view_input(self.view)
+    }
+}

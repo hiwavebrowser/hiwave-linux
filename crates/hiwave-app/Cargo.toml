@@ -11,8 +11,10 @@ name = "hiwave"
 path = "src/main.rs"
 
 [features]
-# Linux default stays GTK WebKit until RustKit chrome is hosted on Linux (follow-up package after S3)
-default = ["webview-fallback"]
+# Both engines are compiled in; WebKit is what runs unless HIWAVE_RUSTKIT_CONTENT=1 engages the RustKit page
+# view (see rustkit_content.rs). The old comment that the two were "mutually exclusive by construction" cannot
+# hold with a runtime choice; macOS also compiles both.
+default = ["webview-fallback", "rustkit"]
 # WebView: Uses system WebKit (GTK WebKit2) for everything
 webview-fallback = ["wry", "tao", "muda"]
 # The real-window checks' panel probe (HIWAVE_RUSTKIT_PANEL_PROBE, CH3.A4):

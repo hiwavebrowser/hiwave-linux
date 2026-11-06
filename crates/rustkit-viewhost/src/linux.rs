@@ -10,6 +10,8 @@
 //! - Event loop via XNextEvent
 //! - Surface integration via raw-window-handle
 
+use crate::input_queue::push_input;
+use crate::x11_input::{self, ClickTracker};
 use crate::{Bounds, EventCallback, MainWindowConfig, ViewEvent, ViewHostError, ViewId};
 use rustkit_core::{
     FocusEvent, FocusEventType, InputEvent, KeyCode, KeyEvent, KeyEventType, KeyboardState,
@@ -23,9 +25,10 @@ use tracing::{debug, error, info, trace, warn};
 use x11::xlib::{
     Display, Window, XCloseDisplay, XCreateSimpleWindow, XDefaultRootWindow, XDefaultScreen,
     XDestroyWindow, XFlush, XMapWindow, XMoveResizeWindow, XNextEvent, XOpenDisplay, XPending,
-    XRootWindow, XSelectInput, XStoreName, XUnmapWindow, ButtonPressMask, ButtonReleaseMask,
+    XRootWindow, XSelectInput, XSetInputFocus, RevertToParent, CurrentTime, XStoreName, XUnmapWindow, ButtonPressMask, ButtonReleaseMask,
     ExposureMask, FocusChangeMask, KeyPressMask, KeyReleaseMask, PointerMotionMask,
-    StructureNotifyMask,
+    StructureNotifyMask, EnterWindowMask, LeaveWindowMask, XEvent, XKeyEvent, XLookupString, KeySym,
+    ButtonPress, ButtonRelease, MotionNotify, KeyPress, KeyRelease, LeaveNotify,
 };
 use std::ffi::CString;
 use std::ptr;
@@ -39,6 +42,7 @@ struct X11ViewState {
     focused: bool,
     keyboard_state: KeyboardState,
     mouse_state: MouseState,
+    clicks: ClickTracker,
 }
 
 /// Linux X11 ViewHost implementation.
@@ -194,6 +198,8 @@ impl X11ViewHost {
                     | ButtonPressMask
                     | ButtonReleaseMask
                     | PointerMotionMask
+                    | EnterWindowMask
+                    | LeaveWindowMask
                     | FocusChangeMask,
             );
 
@@ -207,6 +213,7 @@ impl X11ViewHost {
                 focused: false,
                 keyboard_state: KeyboardState::default(),
                 mouse_state: MouseState::default(),
+                clicks: ClickTracker::default(),
             };
 
             self.views
@@ -217,6 +224,16 @@ impl X11ViewHost {
             debug!(?view_id, window, "X11 view created");
             Ok(view_id)
         }
+    }
+
+    /// Move the X11 input focus to a view's window.
+    pub fn focus_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
+        let window = self.get_x11_window(view_id)?;
+        unsafe {
+            XSetInputFocus(self.display, window, RevertToParent, CurrentTime);
+            XFlush(self.display);
+        }
+        Ok(())
     }
 
     /// Resize a view.
@@ -262,18 +279,66 @@ impl X11ViewHost {
         Ok(())
     }
 
-    /// Pump events from X11 (non-blocking).
+    /// Pump events from X11 (non-blocking): pointer, wheel and key events on a view's window are translated
+    /// (`x11_input`) and recorded in the input queue, tagged with the view, for the app to drain.
     pub fn pump_messages(&self) -> bool {
         unsafe {
             while XPending(self.display) > 0 {
-                let mut event = std::mem::zeroed();
+                let mut event: XEvent = std::mem::zeroed();
                 XNextEvent(self.display, &mut event);
-                
-                // TODO: Handle events and emit via callback
-                // For now, just process them to prevent queue backup
+                self.record(&mut event);
             }
         }
         true
+    }
+
+    #[allow(non_upper_case_globals)]
+    unsafe fn record(&self, event: &mut XEvent) {
+        let kind = event.get_type();
+        let window = event.any.window;
+        trace!(kind, window, "X11 event");
+        let Some((view, state)) = self
+            .views
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, s)| s.lock().map(|s| s.window == window).unwrap_or(false))
+            .map(|(id, s)| (*id, Arc::clone(s)))
+        else {
+            return;
+        };
+        let input = match kind {
+            ButtonPress | ButtonRelease => {
+                let b = event.button;
+                let down = kind == ButtonPress;
+                let (x, y) = (b.x as f64, b.y as f64);
+                let clicks = if down && b.button == 1 {
+                    state.lock().unwrap().clicks.press(std::time::Instant::now(), x, y)
+                } else {
+                    1
+                };
+                x11_input::button_input(b.button, down, x, y, b.state as u32, clicks)
+            }
+            MotionNotify => {
+                let m = event.motion;
+                Some(x11_input::motion_input(m.x as f64, m.y as f64, m.state as u32))
+            }
+            LeaveNotify => Some(x11_input::leave_input()),
+            KeyPress | KeyRelease => {
+                let k: &mut XKeyEvent = &mut event.key;
+                let mut buf = [0u8; 32];
+                let mut keysym: KeySym = 0;
+                let n = XLookupString(k, buf.as_mut_ptr() as *mut _, buf.len() as i32, &mut keysym, ptr::null_mut());
+                // Latin-1 text only: XLookupString without an input context. Other scripts and IME composing
+                // are a known gap for this stage.
+                let text: String = buf[..n.max(0) as usize].iter().map(|&b| b as char).collect();
+                Some(x11_input::key_input(keysym as u32, &text, k.state as u32, kind == KeyRelease))
+            }
+            _ => None,
+        };
+        if let Some(input) = input {
+            push_input(view, input);
+        }
     }
 
     /// Set the event callback.
