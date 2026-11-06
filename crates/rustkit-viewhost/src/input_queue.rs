@@ -21,14 +21,21 @@ pub struct PendingClick {
     pub y: f64,
     pub down: bool,
     pub input: PointerInput,
+    /// A press or release: which click of a multi-click it is (AppKit's
+    /// `clickCount`, 1 for a single click). 1 for the rest.
+    pub clicks: u32,
+    /// Shift was held (a press extends the selection).
+    pub shift: bool,
 }
 
 /// What a [`PendingClick`] records: a press or release of the primary
-/// button (`down` says which), the pointer moving over the view, or the
-/// pointer leaving it.
+/// button (`down` says which), of the secondary button (the context
+/// menu, CH2.E4), the pointer moving over the view (with a button held or
+/// not: the page knows which), or the pointer leaving it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerInput {
     Button,
+    Secondary,
     Move,
     Leave,
 }
@@ -64,12 +71,85 @@ pub struct PendingScroll {
     pub dy: f64,
 }
 
+/// What the platform's input method handed the content view through
+/// `NSTextInputClient` (CH2.E3): a dead key or an IME composing, and the
+/// text it commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImeInput {
+    /// `setMarkedText:` — compose `text`; an empty string cancels.
+    SetMarked(String),
+    /// `insertText:` — commit `text`. With text marked it replaces the
+    /// marked text. With nothing marked, `replace` is the UTF-16 range
+    /// (start, length) of the value it replaces, as the press-and-hold
+    /// accent popover replaces the letter typed before it; `None` inserts
+    /// at the selection.
+    Insert { text: String, replace: Option<(usize, usize)> },
+    /// `unmarkText` — keep what is marked and end the composition.
+    Unmark,
+}
+
+/// An Edit menu item's action sent to the content view, the first
+/// responder (`copy:`, `cut:`, `paste:`, `undo:`, `redo:`, `selectAll:`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditAction {
+    Copy,
+    Cut,
+    Paste,
+    Undo,
+    Redo,
+    SelectAll,
+}
+
 /// One recorded input.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputKind {
     Pointer(PendingClick),
     Key(PendingKey),
     Wheel(PendingScroll),
+    /// Marked or committed text from the input method (CH2.E3).
+    Ime(ImeInput),
+    /// An Edit menu item (CH2.E3).
+    Edit(EditAction),
+    /// A Cmd chord the view took in `performKeyEquivalent:` so the page
+    /// hears its keydown before the menu does (CH2.E3, Chromium's order).
+    /// The app hands `token` to `finish_key_equivalent`: a chord the page
+    /// did not claim goes on to the main menu.
+    KeyEquivalent { key: PendingKey, token: u64 },
+}
+
+/// A focused text field's state as the page last reported it, kept for the
+/// input method's synchronous questions (`selectedRange`, `markedRange`,
+/// `firstRectForCharacterRange:`), which AppKit asks inside its own event
+/// dispatch where the page cannot be asked. Offsets are UTF-16; the caret
+/// is view-local top-left points: x, y (top) and height.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TextInputMirror {
+    pub marked: Option<(usize, usize)>,
+    pub selected: (usize, usize),
+    pub caret: Option<(f64, f64, f64)>,
+}
+
+static TEXT_INPUT: Mutex<Vec<(ViewId, TextInputMirror)>> = Mutex::new(Vec::new());
+
+/// Record what the page reported for `view`'s focused text field; `None`
+/// when no text field has focus.
+pub fn set_text_input_state(view: ViewId, state: Option<TextInputMirror>) {
+    let mut all = TEXT_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|(v, _)| *v != view);
+    if let Some(state) = state {
+        all.push((view, state));
+    } else {
+        drop(all);
+        // The field lost the focus: its marked text goes with it (#918 R1).
+        #[cfg(target_os = "macos")]
+        crate::macos::forget_marked(view);
+    }
+}
+
+/// The last state recorded for `view`.
+pub fn text_input_state(view: ViewId) -> Option<TextInputMirror> {
+    let all = TEXT_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+    all.iter().find(|(v, _)| *v == view).map(|(_, s)| *s)
 }
 
 /// An input as the app drains it: `seq` is its place in arrival order
@@ -170,6 +250,16 @@ impl InputQueue {
         taken
     }
 
+    /// Take the recorded events of one view, in arrival order, leaving the
+    /// other views' events queued: the RustKit chrome's input is handled
+    /// while the page's waits for its load (CH3.A2 step 3b).
+    pub fn drain_view(&mut self, view: ViewId) -> Vec<InputEvent> {
+        let (taken, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.events).into_iter().partition(|e| e.view == view);
+        self.events = kept;
+        taken
+    }
+
     /// Drop what is queued for `view`: the view is gone, and an input
     /// recorded for it must not reach whatever view comes next.
     pub fn retire(&mut self, view: ViewId) {
@@ -202,6 +292,11 @@ pub fn drain_input_kind(keep: impl Fn(&InputKind) -> bool) -> Vec<InputEvent> {
     INPUT.lock().map(|mut q| q.drain_kind(keep)).unwrap_or_default()
 }
 
+/// The recorded events of one view, leaving the other views' queued.
+pub fn drain_input_view(view: ViewId) -> Vec<InputEvent> {
+    INPUT.lock().map(|mut q| q.drain_view(view)).unwrap_or_default()
+}
+
 /// Drop what is queued for a view that no longer exists.
 pub fn retire_view_input(view: ViewId) {
     if let Ok(mut q) = INPUT.lock() {
@@ -218,11 +313,11 @@ mod tests {
     }
 
     fn click(down: bool) -> InputKind {
-        InputKind::Pointer(PendingClick { x: 5.0, y: 5.0, down, input: PointerInput::Button })
+        InputKind::Pointer(PendingClick { x: 5.0, y: 5.0, down, input: PointerInput::Button, clicks: 1, shift: false })
     }
 
     fn mv(x: f64) -> InputKind {
-        InputKind::Pointer(PendingClick { x, y: 5.0, down: false, input: PointerInput::Move })
+        InputKind::Pointer(PendingClick { x, y: 5.0, down: false, input: PointerInput::Move, clicks: 1, shift: false })
     }
 
     fn key(text: &str) -> InputKind {
@@ -244,6 +339,7 @@ mod tests {
                 InputKind::Pointer(_) => "pointer",
                 InputKind::Wheel(_) => "wheel",
                 InputKind::Key(_) => "key",
+                _ => "other",
             })
             .collect()
     }
@@ -275,6 +371,24 @@ mod tests {
         q.push(view, click(false));
         q.push(view, key("b"));
         assert_eq!(kinds(&q.drain()), ["key", "pointer", "pointer", "key"]);
+    }
+
+    #[test]
+    fn draining_one_view_leaves_the_other_views_input_queued() {
+        let chrome = ViewId::new();
+        let page = ViewId::new();
+        let mut q = InputQueue::default();
+        q.push(page, click(true));
+        q.push(chrome, key("a"));
+        q.push(page, click(false));
+        q.push(chrome, key("b"));
+        let taken = q.drain_view(chrome);
+        assert_eq!(kinds(&taken), ["key", "key"], "the chrome's two keys");
+        assert!(taken.iter().all(|e| e.view == chrome));
+        assert!(taken[0].seq < taken[1].seq, "in arrival order");
+        let rest = q.drain();
+        assert_eq!(kinds(&rest), ["pointer", "pointer"], "the page's click is still queued");
+        assert!(rest.iter().all(|e| e.view == page));
     }
 
     #[test]
@@ -374,7 +488,7 @@ mod tests {
         let out = q.drain();
         assert_eq!(kinds(&out), ["wheel", "pointer", "wheel"], "another view's move keeps the sides apart");
         q.push(view, mv(1.0));
-        q.push(view, InputKind::Pointer(PendingClick { x: 0.0, y: 0.0, down: false, input: PointerInput::Leave }));
+        q.push(view, InputKind::Pointer(PendingClick { x: 0.0, y: 0.0, down: false, input: PointerInput::Leave, clicks: 1, shift: false }));
         q.push(view, mv(2.0));
         assert_eq!(q.drain().len(), 3, "the pointer leaving keeps the sides apart");
     }

@@ -73,7 +73,8 @@ struct Args {
     #[arg(long)]
     dump_layout: Option<String>,
 
-    /// JSON string or path to JSON file defining interaction sequence (wait/click/key/resize/capture)
+    /// JSON string or path to JSON file defining interaction sequence
+    /// (wait/click/hover/key/resize/capture; `key` takes `modifiers`)
     #[arg(long)]
     actions: Option<String>,
 
@@ -264,6 +265,9 @@ struct CaptureResult {
     /// rules are added once the load's records are in (`run_capture`).
     #[serde(skip)]
     page_report: Option<report::Report>,
+    /// `--live-ms`: milliseconds from the load's start to the window's end.
+    #[serde(skip)]
+    capture_ms: Option<f64>,
     /// True when this capture ran on the content thread (`HIWAVE_CONTENT_THREAD`).
     /// Absent means an older capture tool. `false` is the flag-off worker.
     #[serde(default)]
@@ -298,6 +302,10 @@ struct ActionItem {
     label: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// `key` only: modifier names held while the key is pressed, as
+    /// Playwright spells them (`Control`, `Shift`, `Alt`, `Meta`).
+    #[serde(default)]
+    modifiers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -356,6 +364,7 @@ impl CaptureResult {
             diagnostics_path: None,
             inspector: None,
             page_report: None,
+            capture_ms: None,
             content_thread: false,
         }
     }
@@ -522,6 +531,13 @@ fn main() {
         });
     }
 
+    // The Chrome baselines are captured with `--hide-scrollbars`
+    // (Playwright's default): styled scrollbars take no space there, so
+    // they take none here (CH2.E7). RUSTKIT_SHOW_SCROLLBARS=1 keeps them.
+    if std::env::var("RUSTKIT_SHOW_SCROLLBARS").map_or(true, |v| v != "1") {
+        rustkit_layout::scroll::set_scrollbars_hidden(true);
+    }
+
     let started = Instant::now();
     let args_clone = args.clone();
     // Flag off: today's worker. Flag on: the page thread's name and stack,
@@ -587,7 +603,8 @@ fn run_capture(args: &Args) -> CaptureResult {
         if let Some(mut page) = result.page_report.take() {
             let json: Vec<serde_json::Value> =
                 records.iter().filter_map(|r| serde_json::to_value(r).ok()).collect();
-            report::apply_events(&mut page, &json);
+            let facts = report::CaptureFacts { shield: args.shield, capture_ms: result.capture_ms };
+            report::apply_events(&mut page, &json, facts);
             write_report_files(args, &page);
         }
         if let Some(ref path) = args.event_log {
@@ -710,6 +727,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             Ok(rt) => rt,
             Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
         };
+        let load_began = Instant::now();
         if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
             return result.failed("error", format!("Failed to load URL: {:?}", e));
         }
@@ -737,6 +755,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         }
         if let Some(live_ms) = args.live_ms {
             result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
+            result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     } else if let Some(html) = html_content {
         if let Err(e) = engine.load_html(view_id, &html) {
@@ -1014,6 +1033,78 @@ fn parse_point(eval_res: &str) -> Option<(f32, f32)> {
     Some((x, y))
 }
 
+/// The focused control's value, for telling an engine-typed key from one the
+/// page swallowed.
+const ACTIVE_VALUE_JS: &str =
+    "(function(){ var el = document.activeElement; return String(el && 'value' in el ? el.value : ''); })()";
+/// A one-shot capture listener: did the engine's key reach the page? The
+/// listener is kept on `window` so a read for a key the page never heard
+/// can remove it; otherwise it would fire on the next key before that key
+/// was pressed.
+const KEY_SEEN_ARM_JS: &str = "(function(){ \
+    if (window.__parityCaptureKeyListener) { \
+        document.removeEventListener('keydown', window.__parityCaptureKeyListener, true); } \
+    window.__parityCaptureKeySeen = false; \
+    window.__parityCaptureKeyListener = function(){ window.__parityCaptureKeySeen = true; window.__parityCaptureKeyListener = null; }; \
+    document.addEventListener('keydown', window.__parityCaptureKeyListener, { once: true, capture: true }); })()";
+/// Two answers that are not substrings of each other: `execute_script`
+/// returns the value's debug form (`String("key-heard")`), so the read is a
+/// `contains`, and 'unseen' contains 'seen' (#898 R1).
+const KEY_SEEN_READ_JS: &str = "(function(){ \
+    if (window.__parityCaptureKeySeen) return 'key-heard'; \
+    if (window.__parityCaptureKeyListener) { \
+        document.removeEventListener('keydown', window.__parityCaptureKeyListener, true); \
+        window.__parityCaptureKeyListener = null; } \
+    return 'key-silent'; })()";
+
+/// Did the page hear the engine's key? Reads what `KEY_SEEN_READ_JS` returned.
+fn key_was_seen(read: &str) -> bool {
+    read.contains("key-heard")
+}
+
+/// A `selector` field may name several selectors to try in order, comma
+/// separated, as `click` has always read it. Top-level commas only: a comma
+/// inside `:is(a, b)`, `[title="x, y"]` or quotes belongs to the selector.
+fn split_selector_list(selector: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for ch in selector.chars() {
+        match quote {
+            Some(q) => {
+                current.push(ch);
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    current.push(ch);
+                }
+                '(' | '[' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                ')' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    out.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    out
+}
+
 fn execute_actions(
     engine: &mut rustkit_engine::Engine,
     view_id: rustkit_engine::EngineViewId,
@@ -1070,9 +1161,9 @@ fn execute_actions(
             }
             "click" => {
                 if let Some(ref sel) = a.selector {
-                    let selectors: Vec<&str> = sel.split(',').map(|s| s.trim()).collect();
+                    let selectors = split_selector_list(sel);
                     let mut clicked = false;
-                    for s in selectors {
+                    for s in selectors.iter().map(String::as_str) {
                         let s_json = serde_json::to_string(s).unwrap_or_default();
                         let query_js = format!(
                             r#"(function() {{
@@ -1141,7 +1232,62 @@ fn execute_actions(
                     a_res.error = Some("click action requires selector or (x, y)".to_string());
                 }
             }
+            "hover" => {
+                // A pointer move to the element's centre and nothing else: the
+                // page sees mousemove/mouseover and `:hover` applies, no press.
+                let point = match (a.selector.as_ref(), a.x, a.y) {
+                    (Some(sel), _, _) => split_selector_list(sel).into_iter().find_map(|s| {
+                        let sel_json = serde_json::to_string(&s).unwrap_or_default();
+                        let query_js = format!(
+                            r#"(function() {{
+                                var el = document.querySelector({0});
+                                if (!el || typeof el.getBoundingClientRect !== 'function') return 'missing';
+                                var r = el.getBoundingClientRect();
+                                if (!r || !(r.width > 0 && r.height > 0)) return 'missing';
+                                return 'point:' + (r.left + r.width / 2.0) + ':' + (r.top + r.height / 2.0);
+                            }})()"#,
+                            sel_json
+                        );
+                        let found = engine
+                            .execute_script(view_id, &query_js)
+                            .ok()
+                            .and_then(|res| parse_point(&res));
+                        if found.is_some() {
+                            a_res.selector_used = Some(s);
+                        }
+                        found
+                    }),
+                    (None, Some(x), Some(y)) => Some((x, y)),
+                    _ => None,
+                };
+                match point {
+                    Some((cx, cy)) => {
+                        engine.mouse_move_at_point(view_id, cx, cy);
+                        let _ = engine.relayout(view_id);
+                        a_res.method = Some(format!("engine_point({:.1}, {:.1})", cx, cy));
+                    }
+                    None if a.selector.is_some() => {
+                        a_res.status = "selector_not_found".to_string();
+                        a_res.error = Some(format!(
+                            "no matching element found for selector {}",
+                            a.selector.as_deref().unwrap_or("")
+                        ));
+                    }
+                    None => {
+                        a_res.status = "error".to_string();
+                        a_res.error = Some("hover action requires selector or (x, y)".to_string());
+                    }
+                }
+            }
             "key" => {
+                let held = |name: &str| {
+                    a.modifiers
+                        .as_ref()
+                        .map(|m| m.iter().any(|x| x.eq_ignore_ascii_case(name)))
+                        .unwrap_or(false)
+                };
+                let (ctrl, shift, alt, meta) =
+                    (held("Control"), held("Shift"), held("Alt"), held("Meta"));
                 if let Some(ref sel) = a.selector {
                     let sel_json = serde_json::to_string(sel).unwrap_or_default();
                     let focus_js = format!(
@@ -1151,19 +1297,39 @@ fn execute_actions(
                     let _ = engine.execute_script(view_id, &focus_js);
                 }
                 if let Some(ref text) = a.text {
-                    let text_json = serde_json::to_string(text).unwrap_or_default();
-                    let key_js = format!(
-                        r#"(function() {{
-                            var el = document.activeElement;
-                            if (el && 'value' in el) {{
-                                el.value = (el.value || '') + {0};
-                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            }}
-                        }})()"#,
-                        text_json
-                    );
-                    let _ = engine.execute_script(view_id, &key_js);
+                    // Typed through the engine's keyboard, a key at a time, as
+                    // Playwright's keyboard.type does: the page hears a keydown
+                    // per character and the focused control edits its own
+                    // value (selection replaced, caret moved). The value is
+                    // written from script only when no control took the keys.
+                    let before = engine
+                        .execute_script(view_id, ACTIVE_VALUE_JS)
+                        .unwrap_or_default();
+                    for ch in text.chars() {
+                        let key = ch.to_string();
+                        let _ = engine.handle_text_key(view_id, 0, &key, false, false, false);
+                    }
+                    let after = engine
+                        .execute_script(view_id, ACTIVE_VALUE_JS)
+                        .unwrap_or_default();
+                    if after == before {
+                        let text_json = serde_json::to_string(text).unwrap_or_default();
+                        let key_js = format!(
+                            r#"(function() {{
+                                var el = document.activeElement;
+                                if (el && 'value' in el) {{
+                                    el.value = (el.value || '') + {0};
+                                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                }}
+                            }})()"#,
+                            text_json
+                        );
+                        let _ = engine.execute_script(view_id, &key_js);
+                        a_res.method = Some("script_value".to_string());
+                    } else {
+                        a_res.method = Some("engine_keys".to_string());
+                    }
                     let _ = engine.relayout(view_id);
                 } else if let Some(ref key) = a.key {
                     let key_code = match key.as_str() {
@@ -1173,19 +1339,37 @@ fn execute_actions(
                         "Tab" => 9,
                         _ => 0,
                     };
-                    let _ = engine.handle_text_key(view_id, key_code, key, false, false, false);
-                    let key_json = serde_json::to_string(key).unwrap_or_default();
-                    let event_js = format!(
-                        r#"(function() {{
-                            var el = document.activeElement || document.body;
-                            if (el) {{
-                                el.dispatchEvent(new KeyboardEvent('keydown', {{ key: {0}, bubbles: true }}));
-                                el.dispatchEvent(new KeyboardEvent('keyup', {{ key: {0}, bubbles: true }}));
-                            }}
-                        }})()"#,
-                        key_json
-                    );
-                    let _ = engine.execute_script(view_id, &event_js);
+                    // The engine fires the DOM keydown itself (fire_key). The
+                    // synthetic event below is only for a key the engine did
+                    // not route to the page; sending both made every listener
+                    // hear the key twice and a toggle undo itself.
+                    let _ = engine.execute_script(view_id, KEY_SEEN_ARM_JS);
+                    // The engine's keyboard has no meta flag; Meta is Ctrl's
+                    // equivalent on macOS and the chrome takes either.
+                    let _ = engine.handle_text_key(view_id, key_code, key, ctrl || meta, shift, alt);
+                    let seen = engine
+                        .execute_script(view_id, KEY_SEEN_READ_JS)
+                        .map(|r| key_was_seen(&r))
+                        .unwrap_or(false);
+                    if seen {
+                        a_res.method = Some("engine_key".to_string());
+                    } else {
+                        let key_json = serde_json::to_string(key).unwrap_or_default();
+                        let event_js = format!(
+                            r#"(function() {{
+                                var el = document.activeElement || document.body;
+                                if (el) {{
+                                    var init = {{ key: {0}, bubbles: true, cancelable: true,
+                                                  ctrlKey: {1}, shiftKey: {2}, altKey: {3}, metaKey: {4} }};
+                                    el.dispatchEvent(new KeyboardEvent('keydown', init));
+                                    el.dispatchEvent(new KeyboardEvent('keyup', init));
+                                }}
+                            }})()"#,
+                            key_json, ctrl, shift, alt, meta
+                        );
+                        let _ = engine.execute_script(view_id, &event_js);
+                        a_res.method = Some("synthetic_key".to_string());
+                    }
                     let _ = engine.relayout(view_id);
                 }
             }
@@ -1764,6 +1948,7 @@ mod tests {
     /// arrives, not on the live window's last turn.
     #[test]
     fn an_inserted_script_runs_when_its_fetch_arrives_not_at_the_end_of_the_window() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::{BufRead, BufReader};
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2032,15 +2217,23 @@ mod tests {
         assert_eq!(got, "page");
     }
 
+    /// `set_live_wake` is one slot per process: a second live window in the
+    /// same test binary takes the first one's wake.
+    static LIVE_WAKE_IS_GLOBAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// `--report` and `--report-text` on a fixture: the report JSON and text.
     fn report_for(name: &str, html: &str) -> (serde_json::Value, String) {
+        report_with(name, html, &[])
+    }
+
+    fn report_with(name: &str, html: &str, extra: &[&str]) -> (serde_json::Value, String) {
         let dir = std::env::temp_dir().join(format!("parity-capture-report-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let page = dir.join("page.html");
         fs::write(&page, html).unwrap();
         let (json, text) = (dir.join("report.json"), dir.join("report.txt"));
-        let args = Args::try_parse_from([
+        let mut argv = vec![
             "parity-capture",
             "--html-file",
             page.to_str().unwrap(),
@@ -2048,8 +2241,9 @@ mod tests {
             json.to_str().unwrap(),
             "--report-text",
             text.to_str().unwrap(),
-        ])
-        .unwrap();
+        ];
+        argv.extend_from_slice(extra);
+        let args = Args::try_parse_from(argv).unwrap();
         let result = run_capture(&args);
         assert_eq!(result.status, "ok", "{:?}", result.error);
         let report = serde_json::from_str(&fs::read_to_string(&json).expect("report written")).unwrap();
@@ -2138,5 +2332,350 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         // develop has no T2/T3 records: those rules are named as skipped.
         let skipped: Vec<&str> = report["not_checked"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
         assert!(skipped.iter().any(|n| n.starts_with("R3, R4")) && skipped.iter().any(|n| n.starts_with("R7")), "{skipped:?}");
+    }
+
+    /// T9 gap 1: yahoo's feed was grey rows and the bands read as content.
+    /// Ten rows count (colour or gradient); what follows them does not: a dot,
+    /// a hairline, a transparent box, a box with a picture for a background,
+    /// a form control, a hidden box, a positioned scrim and a box holding text.
+    #[test]
+    fn a_band_of_empty_painted_boxes_is_named_as_a_possible_skeleton() {
+        let rows = "<div style=\"height:20px;margin:4px;background:#eee\"></div>".repeat(8)
+            + &"<div style=\"height:20px;margin:4px;background:linear-gradient(#eee,#ddd)\"></div>".repeat(2);
+        let others = "<div style=\"width:8px;height:8px;background:#eee\"></div>
+<div style=\"height:1px;background:#eee\"></div>
+<div style=\"height:20px\"></div>
+<div style=\"height:20px;background:url(pic.png)\"></div>
+<input style=\"background:#eee\">
+<div style=\"height:20px;background:#eee;visibility:hidden\"></div>
+<div style=\"height:20px;background:#eee;opacity:0\"></div>
+<div style=\"position:absolute;left:0;width:100px;height:20px;background:linear-gradient(#eee,#ddd)\"></div>
+<div style=\"height:20px;background:#eee\">words</div>";
+        let html = format!(
+            "<html><body style=\"margin:0\"><p>top</p><div style=\"height:800px\"></div><p>mid</p><div style=\"height:800px\"></div>{rows}{others}</body></html>"
+        );
+        let (report, text) = report_for("skeleton", &html);
+        assert_eq!(report["bands"][2]["empty_painted"], 10, "{text}");
+        assert_eq!(report["bands"][0]["empty_painted"], 0, "{text}");
+        assert_eq!(causes(&report), vec!["R11 y 1600..2400: 10 painted boxes with no text and no image (skeleton?)"], "{text}");
+        assert!(text.contains("  y 1600..2400: text 1, images 0, empty painted 10, overlapping 0, past right edge 0\n"), "{text}");
+    }
+
+    /// T9 gap 6, through a real layout: three rows pulled over the one before,
+    /// three pushed past the right edge. A clipped strip of slides and an
+    /// out-of-flow label on a row count as neither.
+    #[test]
+    fn overlap_and_overflow_below_the_fold_are_named_from_a_real_layout() {
+        let over = "<div style=\"height:40px;margin-top:-30px\">row</div>".repeat(3);
+        let wide = "<div style=\"width:1500px;height:20px\">wide</div>".repeat(3);
+        let clipped = "<div style=\"overflow:hidden;height:40px\"><div style=\"width:3000px;height:40px\">slides</div></div>";
+        let label = "<div style=\"position:relative;height:40px\">row<div style=\"position:absolute;top:0;left:0\">ad</div></div>";
+        let html = format!(
+            "<html><body style=\"margin:0\"><p>top</p><div style=\"height:800px\"></div><p>mid</p><div style=\"height:800px\"></div><div style=\"height:40px\">first</div>{over}<div style=\"height:40px\"></div>{wide}{clipped}{label}</body></html>"
+        );
+        let (report, text) = report_for("misplaced", &html);
+        assert_eq!(report["bands"][2]["overlapping"], 3, "{text}");
+        assert_eq!(report["bands"][2]["past_right"], 3, "{text}");
+        assert_eq!(causes(&report), vec!["R12 y 1600..2400: 3 boxes overlap other content, 3 run past the right edge"], "{text}");
+    }
+
+    /// A few empty boxes are a page's decoration, not a placeholder feed.
+    #[test]
+    fn a_few_empty_painted_boxes_fire_no_rule() {
+        let rows = "<div style=\"height:20px;margin:4px;background:#eee\"></div>".repeat(7);
+        let (report, text) = report_for("few-empty", &format!("<html><body style=\"margin:0\"><p>top</p>{rows}</body></html>"));
+        assert_eq!(report["bands"][0]["empty_painted"], 7, "{text}");
+        assert_eq!(causes(&report), Vec::<String>::new(), "{text}");
+    }
+
+    /// The flag reaches the report: T9's three runs had no shield and the
+    /// report could not say so.
+    #[test]
+    fn the_report_says_whether_the_shield_was_installed() {
+        const LINE: &str = "R6 shield: not installed, nothing could be blocked";
+        let page = "<html><body><p>a</p></body></html>";
+        let (without, text) = report_for("no-shield", page);
+        assert_eq!(without["shield"], false, "{text}");
+        assert!(text.contains(LINE), "{text}");
+        let (with, text) = report_with("shield", page, &["--shield", "--shield-wait-ms", "0"]);
+        assert_eq!(with["shield"], true, "{text}");
+        assert!(!text.contains(LINE), "{text}");
+    }
+
+    /// `--live-ms` end to end: the window's end is the capture's end. A request
+    /// still open at the end is pinned in `report.rs`: here a fetch started
+    /// inside the load holds the load, so it answers before the window opens.
+    #[test]
+    fn a_live_capture_reports_whether_the_page_settled() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = "<html><body><p>x</p></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-settled-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let json = dir.join("report.json");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--live-ms",
+            "4000",
+            "--report",
+            json.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let report: serde_json::Value = serde_json::from_str(&fs::read_to_string(&json).unwrap()).unwrap();
+        let settled = &report["settled"];
+        assert_eq!(settled["changing"], false, "{settled}");
+        assert_eq!(settled["open_requests"], 0, "{settled}");
+        assert_eq!(settled["navigated"], false, "{settled}");
+        // The layout came with the load, the whole window before the end.
+        let before = settled["last_relayout_ms_before"].as_f64().expect("a layout was recorded");
+        assert!(before >= 3000.0, "{settled}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// T9 gap 7, through the engine's own console record: a string logged by
+    /// the page's inline script reaches R5, and its text does not.
+    #[test]
+    fn a_string_console_error_from_the_page_reaches_r5_as_a_shape() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = [0u8; 2048];
+                    let _ = stream.read(&mut request);
+                    let body = "<html><body><p>top</p><script>console.error('SECRET-TEXT');</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-string-error-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (json, log) = (dir.join("report.json"), dir.join("events.jsonl"));
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--event-log",
+            log.to_str().unwrap(),
+            "--report",
+            json.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let written = fs::read_to_string(&json).unwrap();
+        assert!(!written.contains("SECRET-TEXT"), "{written}");
+        let report: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let lines = causes(&report);
+        assert!(
+            lines.iter().any(|l| l.starts_with("R5 the page's own script: logged string in inline#1:1:9;")),
+            "{lines:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // CH3.A1 (chrome board): the board drives HiWave's own chrome pages
+    // through the same action list in RustKit and in Chromium. Two states
+    // need actions the list did not have: "hover on the second tab" (a
+    // pointer move with no press) and "focus mode" (Ctrl+Shift+F — a key
+    // with modifiers). Playwright has `page.hover` and `Control+Shift+F`;
+    // these tests pin the RustKit side.
+    fn board_view(html: &str) -> (rustkit_engine::Engine, rustkit_engine::EngineViewId) {
+        let mut engine = EngineBuilder::new().javascript_enabled(true).build().expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+            .expect("view");
+        engine.load_html(view, html).expect("load_html");
+        (engine, view)
+    }
+
+    #[test]
+    fn a_hover_action_moves_the_pointer_over_the_selector_without_pressing() {
+        let (mut engine, view) = board_view(
+            "<html><head><style>#t{width:100px;height:40px}</style></head><body>\
+             <div id=\"t\"></div><script>\
+             document.addEventListener('mousedown', function(){ document.body.setAttribute('data-pressed','1'); });\
+             document.addEventListener('click', function(){ document.body.setAttribute('data-pressed','1'); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r##"[{"type":"hover","selector":"#t"}]"##).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let res = &result.action_results.as_ref().expect("action results")[0];
+        assert_eq!(res.status, "ok", "hover is an action: {res:?}");
+        assert!(
+            res.method.as_deref().unwrap_or("").starts_with("engine_point("),
+            "hover moves the engine pointer to the element's centre: {res:?}"
+        );
+        let pressed = engine
+            .execute_script(view, "String(document.body.getAttribute('data-pressed'))")
+            .unwrap_or_default();
+        assert!(!pressed.contains('1'), "a hover never presses: {pressed}");
+    }
+
+    #[test]
+    fn a_key_action_carries_its_modifiers_into_the_keyboard_event() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             document.addEventListener('keydown', function(e){\
+               document.body.setAttribute('data-k', (e.ctrlKey?'c':'') + (e.shiftKey?'s':'') + (e.metaKey?'m':'') + (e.altKey?'a':'') + e.key);\
+             });</script></body></html>",
+        );
+        let actions = parse_actions(
+            r#"[{"type":"key","key":"F","modifiers":["Control","Shift"]}]"#,
+        )
+        .expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-k'))")
+            .unwrap_or_default();
+        assert!(seen.contains("csF"), "the page's keydown listener saw Ctrl+Shift+F: {seen}");
+    }
+
+    // The engine's `handle_text_key` fires the DOM keydown itself (fire_key),
+    // and the action then dispatched a synthetic one on top: a page listener
+    // heard every key twice, and a toggle (the chrome's Ctrl+Shift+F focus
+    // mode) switched on and straight off again (chrome board, 2026-11-05).
+    #[test]
+    fn a_key_action_reaches_the_page_listener_once() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             var n = 0;\
+             document.addEventListener('keydown', function(e){ n += 1; document.body.setAttribute('data-n', String(n)); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r#"[{"type":"key","key":"F3"}]"#).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-n'))")
+            .unwrap_or_default();
+        assert!(seen.contains('1') && !seen.contains('2'), "one keydown per key action: {seen}");
+    }
+
+    // `key` with `text` wrote the string onto the control's value from
+    // script: no keydown, no selection replaced. Playwright types it. The
+    // chrome's address bar selects all on focus, so Chromium showed the typed
+    // URL and RustKit the old one with the typed URL appended (chrome board,
+    // 2026-11-05). Typed text goes through the engine's keyboard, a key at a
+    // time, as a user's does.
+    #[test]
+    fn typed_text_goes_through_the_engines_keyboard_a_key_at_a_time() {
+        let (mut engine, view) = board_view(
+            "<html><body><input id=\"i\" value=\"abc\"><script>\
+             var keys = [];\
+             document.addEventListener('keydown', function(e){ keys.push(e.key); document.body.setAttribute('data-keys', keys.join('')); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r##"[{"type":"key","selector":"#i","text":"xy"}]"##).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let keys = engine
+            .execute_script(view, "String(document.body.getAttribute('data-keys'))")
+            .unwrap_or_default();
+        assert!(keys.contains("xy"), "the page heard a keydown per typed character: {keys}");
+        let value = engine
+            .execute_script(view, "String(document.getElementById('i').value)")
+            .unwrap_or_default();
+        assert!(value.contains("abcxy"), "the text landed in the focused control: {value}");
+    }
+
+    // #898 R1 (Prometheus): `KEY_SEEN_READ_JS` answers 'unseen' and the check
+    // was `contains("seen")` — true either way, so the synthetic-key fallback
+    // was dead and every key was labelled engine_key.
+    #[test]
+    fn a_key_the_page_did_not_hear_reads_as_not_seen() {
+        assert!(!key_was_seen("String(\"unseen\")"), "'unseen' is not seen");
+        assert!(!key_was_seen("String(\"key-silent\")"), "the silent answer is not seen");
+        assert!(key_was_seen("String(\"key-heard\")"), "the heard answer is seen");
+    }
+
+    // The one-shot listener armed for a key the page never heard must not
+    // stay armed: the next key would read as seen before it was pressed.
+    #[test]
+    fn an_unheard_key_leaves_no_armed_listener_behind() {
+        let (mut engine, view) = board_view("<html><body></body></html>");
+        let _ = engine.execute_script(view, KEY_SEEN_ARM_JS);
+        let read = engine.execute_script(view, KEY_SEEN_READ_JS).unwrap_or_default();
+        assert!(!key_was_seen(&read), "nothing pressed: {read}");
+        let later = engine
+            .execute_script(
+                view,
+                "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true })); \
+                 String(window.__parityCaptureKeySeen)",
+            )
+            .unwrap_or_default();
+        assert!(later.contains("false"), "the stale listener was cleared: {later}");
+    }
+
+    // Meta is Ctrl's equivalent on macOS and the chrome's shortcuts take either
+    // (`e.ctrlKey || e.metaKey`); the engine's keyboard has no meta flag, so a
+    // Meta chord goes through as Ctrl.
+    #[test]
+    fn a_meta_chord_reaches_the_page_as_a_control_chord() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             document.addEventListener('keydown', function(e){\
+               document.body.setAttribute('data-k', (e.ctrlKey||e.metaKey?'c':'') + (e.shiftKey?'s':'') + e.key);\
+             });</script></body></html>",
+        );
+        let actions = parse_actions(r#"[{"type":"key","key":"F","modifiers":["Meta","Shift"]}]"#)
+            .expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-k'))")
+            .unwrap_or_default();
+        assert!(seen.contains("csF"), "Meta+Shift+F reached the page as a modifier chord: {seen}");
+    }
+
+    // A selector list splits on top-level commas only: `:is(a, b)` is one
+    // selector, not two broken ones.
+    #[test]
+    fn a_selector_list_splits_on_top_level_commas_only() {
+        assert_eq!(split_selector_list("#a, .b"), vec!["#a", ".b"]);
+        assert_eq!(
+            split_selector_list(":is(#a, .b) > span, [title=\"x, y\"]"),
+            vec![":is(#a, .b) > span", "[title=\"x, y\"]"]
+        );
     }
 }

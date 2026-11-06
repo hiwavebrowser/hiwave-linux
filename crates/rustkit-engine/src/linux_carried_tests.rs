@@ -84,6 +84,8 @@ fn selector_matches_compat(
 fn shim_engine() -> Engine {
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     Engine {
+        clipboard: MemoryClipboard::shared(),
+        clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -546,6 +548,8 @@ mod box_shadow_paint_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -730,6 +734,8 @@ mod box_shorthand_and_auto_margins {
             <body><div id=c>x</div></body></html>"#;
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -768,6 +774,8 @@ mod canvas_background_propagation {
     fn first_command(html: &str) -> String {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -944,6 +952,8 @@ mod child_combinator_tests {
         // would pass every test above and change nothing on screen.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -1102,6 +1112,8 @@ mod external_stylesheet_tests {
         // specificity because external is placed first.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -1150,6 +1162,8 @@ mod external_stylesheet_tests {
     fn engine_for_test() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -1209,6 +1223,8 @@ mod external_stylesheet_tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -1245,6 +1261,8 @@ mod flex_column_cross_stretch {
     fn laid_out(html: &str, w: f32) -> Vec<(bool, f32, f32)> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -1496,6 +1514,8 @@ mod flexbox_45_automatic_minimum {
         );
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -1534,6 +1554,8 @@ mod flexbox_45_automatic_minimum {
         );
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -1673,6 +1695,8 @@ mod font_size_cascade_absolutise {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -1937,6 +1961,8 @@ mod grid_intrinsic_track_sizing {
         );
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -2040,6 +2066,8 @@ mod html_root_inheritance {
     fn text_style(html: &str) -> ComputedStyle {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -2124,6 +2152,8 @@ mod inheritance_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -2311,6 +2341,8 @@ mod l1_live_relative_units_reach_flex_and_grid {
     fn element_xs(html: &str) -> Vec<f32> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -2727,6 +2759,8 @@ mod position_wire_tests {
         // resting on my own helper being called.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -2936,6 +2970,8 @@ mod rounded_rect_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -3167,6 +3203,8 @@ mod text_decoration_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(test_compositor())),
@@ -3484,6 +3522,7 @@ mod x11_content_path {
 
         let images = rustkit_image::ImageManager::new();
         let commit = FrameCommit {
+            modal_popup: false,
             generation: 1,
             nav_generation: 1,
             list: Some(Arc::new(DisplayList::new())),

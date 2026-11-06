@@ -84,7 +84,7 @@ struct Boot {
 /// Dropping it signals Stop and Close and returns. It does not join the
 /// thread: a caller that is the window must not wait out page work.
 pub struct ContentThread {
-    cmd: Sender<PageCmd>,
+    cmd: CmdSender,
     events: Receiver<PageEvent>,
     boot_rx: Mutex<Option<Receiver<Result<Boot, String>>>>,
     boot: Mutex<Option<Result<Boot, String>>>,
@@ -92,6 +92,25 @@ pub struct ContentThread {
     join: Mutex<Option<JoinHandle<()>>>,
     exited: Arc<AtomicBool>,
     stack_bytes: usize,
+}
+
+/// The window's end of the page's command channel. Every command also
+/// wakes the content thread, which otherwise sleeps until its page's next
+/// timer (up to 50 ms) before it looks at the channel again (CH3.A9: the
+/// RustKit chrome's Cmd+T waited out that sleep).
+struct CmdSender {
+    tx: Sender<PageCmd>,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl CmdSender {
+    fn send(&self, cmd: PageCmd) -> Result<(), mpsc::SendError<PageCmd>> {
+        let sent = self.tx.send(cmd);
+        // A permit is kept when the thread is not waiting yet, so a
+        // command sent during a turn still ends the sleep after it.
+        self.wake.notify_one();
+        sent
+    }
 }
 
 impl ContentThread {
@@ -105,6 +124,8 @@ impl ContentThread {
         stack_bytes: usize,
     ) -> Result<Self, ContentThreadError> {
         let (cmd_tx, cmd_rx) = mpsc::channel();
+        let cmd_wake = Arc::new(tokio::sync::Notify::new());
+        let cmd_wake_for_thread = Arc::clone(&cmd_wake);
         let (ev_tx, ev_rx) = mpsc::channel();
         let (boot_tx, boot_rx) = mpsc::channel();
         let nav_seq = Arc::new(AtomicU64::new(0));
@@ -141,6 +162,7 @@ impl ContentThread {
                     let mut endpoint = adopt(engine, view, cmd_rx, ev_tx);
                     endpoint.set_settle_keys(true);
                     endpoint.set_wake_window(true);
+                    endpoint.set_command_wake(cmd_wake_for_thread);
                     let _ = boot_tx.send(Ok(Boot {
                         control,
                         canceller,
@@ -164,7 +186,7 @@ impl ContentThread {
             })
             .map_err(|e| ContentThreadError::Spawn(e.to_string()))?;
         Ok(Self {
-            cmd: cmd_tx,
+            cmd: CmdSender { tx: cmd_tx, wake: cmd_wake },
             events: ev_rx,
             boot_rx: Mutex::new(Some(boot_rx)),
             boot: Mutex::new(None),
@@ -315,6 +337,13 @@ impl ContentThread {
 
     pub fn input(&self, input: PageInput) {
         let _ = self.cmd.send(PageCmd::Input(input));
+    }
+
+    /// CH3.A7: the app owns this view (see [`crate::Engine::set_app_owned`]).
+    /// Queued like any command, so it applies to every document loaded
+    /// after it.
+    pub fn set_app_owned(&self, owned: bool) {
+        let _ = self.cmd.send(PageCmd::SetAppOwned { owned });
     }
 
     pub fn set_host_reentry(&self, limit: usize) {
@@ -545,13 +574,17 @@ mod tests {
         let mut loaded = page.load_html(&html);
         let load = wait_recv(&mut loaded, Duration::from_secs(20)).expect("load reply");
         assert!(load.is_ok(), "{load:?}");
+        // CH3.A7: the content view is not app-owned, so the page has no
+        // `window.ipc`: its DOMContentLoaded `loadReport` fails at once and
+        // says so (before, it waited forever on an IPC nothing read).
         let mut seen = page.eval(
-            "typeof Chart + ',' + typeof loadReport + ',' + document.getElementById('loading').style.display",
+            "typeof Chart + ',' + typeof loadReport + ',' + document.getElementById('loading').style.display \
+             + ',' + /Failed to load analytics data/.test(document.getElementById('error-container').textContent)",
         );
         let seen = wait_recv(&mut seen, Duration::from_secs(10))
             .expect("eval reply")
             .expect("eval");
-        assert!(seen.contains("function,function,block"), "Chart.js, the page script, DOMContentLoaded: {seen}");
+        assert!(seen.contains("function,function,none,true"), "Chart.js, the page script, DOMContentLoaded: {seen}");
     }
 
     #[test]
@@ -1073,6 +1106,82 @@ mod tests {
         assert!(text.contains("shown"), "the 205 replaced the document on screen: {text}");
     }
 
+    /// Content-thread Stop cancels the in-flight load first (`signal_stop`),
+    /// so the page reports `Failed { "cancelled" }` — not `"stopped"` (that
+    /// string is for `Engine::stop` on a yielded load_tail). The shown
+    /// document must stay and the held navigation must not Complete.
+    #[test]
+    fn stop_during_a_held_navigation_fails_as_cancelled_and_keeps_the_shown_page() {
+        let (port, release, seen) = serve(|path, release_flag| {
+            if path == "/slow" {
+                let start = Instant::now();
+                while !release_flag.load(Ordering::Acquire)
+                    && start.elapsed() < Duration::from_secs(8)
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                return (200, "text/html", b"<p id=t>slow</p>".to_vec());
+            }
+            (200, "text/html", b"<p id=t>shown</p>".to_vec())
+        });
+        let page = page();
+        let first = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        wait_complete(&page, first);
+
+        let nav_id = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/slow")).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|p| p == "/slow")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            seen.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|p| p == "/slow"),
+            "the held navigation never reached the server"
+        );
+
+        page.stop();
+        release.store(true, Ordering::Release);
+
+        let events = events_for(&page, nav_id, Duration::from_secs(3));
+        assert_eq!(failed_count(&events), 1, "{events:?}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PageEvent::LoadState {
+                    state: LoadState::Failed { error },
+                    ..
+                } if error == "cancelled"
+            )),
+            "content-thread Stop must fail the held load as cancelled: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "the held navigation must not complete after Stop: {events:?}"
+        );
+        let mut text = page.eval(
+            "document.getElementById('t') ? document.getElementById('t').textContent : 'gone'",
+        );
+        let text = wait_recv(&mut text, Duration::from_secs(5))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(
+            text.contains("shown"),
+            "Stop must leave the previous document on screen: {text}"
+        );
+    }
+
     #[test]
     fn a_failed_navigation_is_reported_failed_once() {
         // #730 follow-up (e): an empty error response failed in the engine
@@ -1131,6 +1240,104 @@ mod tests {
             last_focused(&page, Duration::from_millis(300)),
             Some(false),
             "the new document has no focused field and the window was not told"
+        );
+    }
+
+    /// The newest `TextFocused` report among the events seen within `budget`.
+    fn last_text_focused(page: &ContentThread, budget: Duration) -> Option<bool> {
+        let deadline = Instant::now() + budget;
+        let mut last = None;
+        while Instant::now() < deadline {
+            for event in page.poll() {
+                if let PageEvent::TextFocused(text) = event {
+                    last = Some(text);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        last
+    }
+
+    #[test]
+    fn the_window_hears_whether_the_focused_element_is_a_text_field() {
+        // CH2.E1 R1: the window sends Cmd+A/C/V/X/Z and Cmd+arrows to the
+        // page only for a focused text field, not a focused <select>.
+        let page = page();
+        let mut loaded = page.load_html("<input id=\"i\"><select id=\"s\"><option>a</option></select>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = page.poll();
+        let mut focused = page.eval("document.getElementById('i').focus(); 1");
+        assert!(wait_recv(&mut focused, Duration::from_secs(5)).is_some());
+        assert_eq!(last_text_focused(&page, Duration::from_millis(300)), Some(true), "input");
+        let mut select = page.eval("document.getElementById('s').focus(); 1");
+        assert!(wait_recv(&mut select, Duration::from_secs(5)).is_some());
+        assert_eq!(last_text_focused(&page, Duration::from_millis(300)), Some(false), "select");
+    }
+
+    /// The `Ipc` payloads seen within `budget`.
+    fn ipc_payloads(page: &ContentThread, budget: Duration) -> Vec<String> {
+        let deadline = Instant::now() + budget;
+        let mut seen = Vec::new();
+        while Instant::now() < deadline {
+            for event in page.poll() {
+                if let PageEvent::Ipc { payload, .. } = event {
+                    seen.push(payload);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        seen
+    }
+
+    /// CH3.A7: a web page on the content thread has no app bridge
+    /// (Chromium 143: both `undefined`), and nothing it does reaches the
+    /// window as IPC.
+    #[test]
+    fn a_web_page_on_the_content_thread_has_no_app_bridge() {
+        let page = page();
+        let mut loaded = page.load_html("<p>web</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = page.poll();
+        let mut probe = page.eval(
+            "[typeof window.ipc, typeof window.hiwaveChrome, typeof __rk_ipc_post].join(',')",
+        );
+        let got = wait_recv(&mut probe, Duration::from_secs(5)).expect("eval answered");
+        // The answer is the value's Debug form (`String("...")`).
+        assert!(
+            got.as_deref().is_ok_and(|v| v.contains("\"undefined,undefined,undefined\"")),
+            "{got:?}"
+        );
+        let mut posted = page.eval(
+            "try { window.ipc.postMessage('{\"cmd\":\"navigate\"}'); } catch (e) {} 1",
+        );
+        assert!(wait_recv(&mut posted, Duration::from_secs(5)).is_some());
+        assert!(ipc_payloads(&page, Duration::from_millis(300)).is_empty());
+    }
+
+    #[test]
+    fn the_window_is_sent_what_the_page_posts_on_window_ipc() {
+        // CH2.E9: `window.ipc.postMessage` filled a queue only a poll of
+        // the engine could read, and nothing polled it: the chrome's
+        // messages from a RustKit view went nowhere. The chrome is an
+        // app-owned view (CH3.A7): web content has no `window.ipc`.
+        let page = page();
+        page.set_app_owned(true);
+        let mut loaded = page.load_html("<p>chrome</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = page.poll();
+        let mut posted = page.eval(r#"window.ipc.postMessage('{"cmd":"navigate","url":"https://example.com/"}'); 1"#);
+        assert!(wait_recv(&mut posted, Duration::from_secs(5)).is_some());
+        assert_eq!(
+            ipc_payloads(&page, Duration::from_millis(300)),
+            vec![r#"{"cmd":"navigate","url":"https://example.com/"}"#.to_string()],
+            "a message from a script was not sent to the window"
+        );
+        let mut timer = page.eval("setTimeout(function () { window.ipc.postMessage('later'); }, 20); 1");
+        assert!(wait_recv(&mut timer, Duration::from_secs(5)).is_some());
+        assert_eq!(
+            ipc_payloads(&page, Duration::from_millis(500)),
+            vec!["later".to_string()],
+            "a message from a timer was not sent to the window"
         );
     }
 
@@ -1343,7 +1550,7 @@ mod tests {
                 scale: 1.0,
                 reply: b,
             },
-            PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 2.0 }),
+            PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 2.0, clicks: 1, shift: false }),
             PageCmd::Resize {
                 bounds: bounds(30),
                 scale: 2.0,
@@ -1360,6 +1567,106 @@ mod tests {
         assert!(
             matches!(out[2], PageCmd::Resize { bounds, scale, .. } if bounds.height == 30 && scale == 2.0)
         );
+    }
+
+    /// Z row S2 (Pete's hand test 11-03, reddit): a navigation typed while
+    /// the pointer moved waited 5.5 s behind eleven queued moves of the page
+    /// being left, each a ~430 ms hover restyle there, and their 288
+    /// listener calls were then cut by the navigation. Chromium dispatches
+    /// one move per frame from the latest position (coalesced pointer
+    /// events). A move replaces an earlier one when only input marks and
+    /// renders sit between; a press, key or click is never passed. (A
+    /// navigation is not passed either; since S2's reopening the moves
+    /// ahead of one are dropped outright, the test below.)
+    #[test]
+    fn coalesce_keeps_only_the_latest_of_adjacent_moves() {
+        let mv = |x: f32| PageCmd::Input(PageInput::MouseMove { x, y: 0.0 });
+        let note = |seq| PageCmd::NoteInput { at: Instant::now(), seq };
+        let batch = vec![
+            note(1),
+            mv(1.0),
+            note(2),
+            mv(2.0),
+            PageCmd::Render { every: false },
+            note(3),
+            mv(3.0),
+            PageCmd::Input(PageInput::MouseDown { x: 3.0, y: 0.0, clicks: 1, shift: false }),
+        ];
+        let out = coalesce(batch);
+        let moves: Vec<f32> = out
+            .iter()
+            .filter_map(|c| match c {
+                PageCmd::Input(PageInput::MouseMove { x, .. }) => Some(*x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moves, vec![3.0], "one move, from the latest position");
+        assert_eq!(
+            out.iter().filter(|c| matches!(c, PageCmd::NoteInput { .. })).count(),
+            3,
+            "every input mark is kept for the latency figure"
+        );
+        assert!(matches!(out.last(), Some(PageCmd::Input(PageInput::MouseDown { .. }))), "the press stays last");
+
+        // A press between moves keeps both: the page hears where it went down.
+        let batch = vec![mv(1.0), PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 0.0, clicks: 1, shift: false }), mv(2.0)];
+        let out = coalesce(batch);
+        assert_eq!(out.len(), 3, "a move jumped the press");
+        assert!(matches!(out[0], PageCmd::Input(PageInput::MouseMove { x, .. }) if x == 1.0));
+        assert!(matches!(out[1], PageCmd::Input(PageInput::MouseDown { .. })));
+    }
+
+    /// Z row S2, reopened (Pete's hand test 11-04, reddit): a load held the
+    /// page thread for 11 s while the pointer moved; the user closed the
+    /// tab; the thread then dispatched thirty queued moves, leaves, presses
+    /// and clicks to the document being left (a ~100 ms hover restyle each,
+    /// every listener refused by the navigation's interrupt word and logged
+    /// as a budget stop, 678 lines) before it loaded the new page, three
+    /// seconds late. Pointer input queued ahead of a navigation is for a
+    /// document the user has left: it is dropped, a queued click answered
+    /// with nothing. Input marks stay for the latency figure, and input
+    /// behind the navigation is kept.
+    #[test]
+    fn coalesce_drops_pointer_input_queued_ahead_of_a_navigation() {
+        let mv = |x: f32| PageCmd::Input(PageInput::MouseMove { x, y: 0.0 });
+        let note = |seq| PageCmd::NoteInput { at: Instant::now(), seq };
+        let (click_reply, mut clicked) = oneshot::channel();
+        let (html_reply, _) = oneshot::channel();
+        let batch = vec![
+            note(1),
+            mv(1.0),
+            PageCmd::Input(PageInput::MouseLeave),
+            note(2),
+            PageCmd::Input(PageInput::MouseDown { x: 2.0, y: 0.0, clicks: 1, shift: false }),
+            mv(2.0),
+            PageCmd::Input(PageInput::Click { x: 2.0, y: 0.0, reply: click_reply }),
+            PageCmd::LoadHtml { html: "<p>next</p>".into(), nav_id: 9, reply: html_reply },
+            mv(3.0),
+        ];
+        let out = coalesce(batch);
+        let kinds: Vec<&str> = out
+            .iter()
+            .map(|c| match c {
+                PageCmd::NoteInput { .. } => "note",
+                PageCmd::Input(PageInput::MouseMove { .. }) => "move",
+                PageCmd::Input(PageInput::MouseLeave) => "leave",
+                PageCmd::Input(PageInput::MouseDown { .. }) => "down",
+                PageCmd::Input(PageInput::Click { .. }) => "click",
+                PageCmd::LoadHtml { .. } => "load_html",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["note", "note", "load_html", "move"], "{kinds:?}");
+        assert!(matches!(out[2], PageCmd::LoadHtml { nav_id: 9, .. }));
+        assert!(matches!(out[3], PageCmd::Input(PageInput::MouseMove { x, .. }) if x == 3.0));
+        let outcome = clicked.try_recv().expect("the dropped click is answered");
+        assert!(outcome.navigate.is_none() && outcome.focused.is_none(), "{outcome:?}");
+
+        // A navigation command is what the pointer input waits behind; a
+        // Stop keeps the document and its input.
+        let (stop_reply, _) = oneshot::channel();
+        let out = coalesce(vec![mv(1.0), PageCmd::Stop { reply: stop_reply }]);
+        assert_eq!(out.len(), 2, "a Stop dropped the move");
     }
 
     fn poll_until(page: &ContentThread, budget: Duration, mut done: impl FnMut(&[PageEvent]) -> bool) -> Vec<PageEvent> {

@@ -12,6 +12,25 @@ python3 tools/real_window/driver.py --list
 Build the app from the worktree you are testing and pass that binary. The
 driver prints its path and sha256 and writes them to `result.json`.
 
+The `a4_*` checks (the RustKit shelf, Inspector and settings) read the panel
+probe, which is compiled into debug builds and into a release build only
+with `cargo build --release -p hiwave-app --features test-hooks`; on a
+binary without it they report `NOT RUN`. The probe reports shapes only (box,
+match count, `checked`, value length), never text or values. The driver
+starts the app with `HIWAVE_TEST_HOOKS=1`, which lets it run
+`HIWAVE_RUSTKIT_CHROME_EVAL` and log chrome IPC bodies; a RustKit panel's IPC
+is logged as its `cmd` and size only, always.
+
+## Which chrome
+
+The RustKit chrome (chrome.html, the shelf, the Inspector and the settings
+page as RustKit views) is the app's default on macOS (CH3.A5a), so every
+check runs on it unless it says otherwise; the app logs
+`Chrome: RustKit (default; ...)` at startup. `HIWAVE_RUSTKIT_CHROME=0` keeps
+the WebKit chrome (the escape hatch). Only the checks that cover the escape
+hatch set it: `e9_redirect_webkit` and the flag-off half of
+`a7_no_bridge_in_content`.
+
 ## What a run does
 
 For each check it starts a fresh app on a throwaway profile, restored on one
@@ -28,7 +47,10 @@ page from `pages/` served by a local fixture server, and asserts on:
 The app's profile is isolated by setting `HOME` for the app process only (it
 reads its data directory from `$HOME`), so the person's tabs, history and
 vault are not read or written. The first launch lets the app write its own
-`workspace_state.json`; the driver only swaps the tab URL in it.
+`workspace_state.json`; the driver only swaps the tab URL in it. That
+first-run profile is kept as `profile-seed/` in the output directory and
+copied back before every check, so a check never starts on what an earlier
+check saved (settings, the vault, the focus blocklist).
 
 ## Results
 
@@ -46,6 +68,7 @@ one `<check>.app.log` per check and the captured frames.
 | frames | Screen Recording grant, screen unlocked |
 | move, click, wheel, keys | Accessibility grant, screen unlocked |
 | resize | Accessibility grant, screen unlocked |
+| `hwdrive find` (elements of the chrome and settings WebViews by their accessible text or role) | Accessibility grant |
 
 The grants belong to the program that starts the driver (the terminal, or
 the program a launchd job runs), not to the script. `hwdrive request`, run by
@@ -77,6 +100,17 @@ of a run (about a minute for all checks).
 | `i0a_layout` | I0(a): very expensive layout | `i0a_layout.html?n=150`: 3000 wrapping flex items, every one resized each 700 ms | controls only |
 | `i0a_nav` | I0(a): repeated navigation while loading | `i0a_nav.html?n=1` to `?n=5`: each visit starts the next, then meets a script held 1.5 s and an image held 3 s | controls only |
 | `i0a_close` | I0(a): closing a busy tab | `i0a_spin.html`, then Cmd+W | yes |
+| `e4_contextmenu` | CH2.E4 right press | `e4_mouse.html?words`: `contextmenu` (button 2) reaches the page and the native menu opens (`hwdrive menus`); Escape closes it | yes |
+| `e4_contextmenu_prevented` | CH2.E4 | `e4_mouse.html?words&prevent`: the page cancels it, no menu, the release is an `auxclick` | yes |
+| `e4_dblclick_selects_word` | CH2.E4 click count | `e4_mouse.html?words`: `hwdrive dblclick`; `dblclick` with detail 2 finds "bravo" selected | yes |
+| `e4_drag` | CH2.E4 | `hwdrive drag`: `pointermove` with `buttons` 1 | yes |
+| `e4_cursor_hand` | CH2.E4 CSS cursor | `e4_mouse.html`: `hwdrive cursor` reads the system cursor: hand over the link, left-right over `ew-resize`, arrow in the title bar | yes |
+| `e4_tooltip` | CH2.E4 `title` | the link's `title` is the view's tooltip (debug log) and a tooltip window shows after a rest | yes |
+| `e9_redirect` | CH2.E9 redirect | `e9_start` redirects to `e9_final.html`: the saved tab holds the committed URL and the title | no |
+| `e9_redirect_webkit` | CH2.E9, `HIWAVE_RUSTKIT_CHROME=0` | as `e9_redirect`, on the WebKit chrome (the escape hatch) | no |
+| `a7_no_bridge_in_content` | CH3.A7 | `a7_bridge.html`: the page sees no `window.ipc` / `window.hiwaveChrome`, with `HIWAVE_RUSTKIT_CHROME=0` and by default | no |
+| `e4_chrome_tab` | CH2.E4, RustKit chrome (the default) | hand over a chrome tab; a right press on it reaches chrome.html's handler (Tab Actions panel in the saved frame), no native menu | yes |
+| `b11_settings_save` | CH2.B11 Save Settings | `e9_final.html`; the sidebar's Settings, the 'Sidebar Open on Startup' toggle and Save Settings, found by `hwdrive find` (Accessibility) and clicked; asserts settings.json changed and that the page said 'Settings saved!' only when it was written | yes, and Accessibility |
 
 ### The I0(a) checks
 

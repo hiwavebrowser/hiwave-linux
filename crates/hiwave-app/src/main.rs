@@ -730,6 +730,78 @@ fn probe_10mib_stack_recursion(depth: usize) -> u8 {
     }
 }
 
+// ---- Logging that never writes a secret (ported from hiwave-macos CH3.A6/#946, S3 sync 2026-11-06) ----
+// A URL in a log line is scheme, host and path only; an IPC message is its `cmd` and size unless
+// HIWAVE_DEBUG=1 / HIWAVE_TEST_HOOKS=1. Linux logged both whole before this.
+/// The `cmd` of an IPC message, for the log (#907 R1 nit 1): `?` when it
+/// has none, or when it is not a command name (letters, digits, `_`; a page
+/// can post anything to the content view's handler).
+fn ipc_cmd(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|msg| msg.get("cmd").and_then(|c| c.as_str()).map(str::to_string))
+        .filter(|cmd| !cmd.is_empty() && cmd.len() <= 64 && cmd.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Whether IPC messages are logged whole: only with `HIWAVE_DEBUG=1` (the
+/// app's verbose switch) or `HIWAVE_TEST_HOOKS=1` (the real-window checks,
+/// which read them). By default a line says the message's `cmd` and size:
+/// a body carries URLs with their queries and find-in-page text. The
+/// RustKit panels' messages are never logged whole (`panel_ipc_log_line`).
+fn ipc_bodies_logged() -> bool {
+    static LOGGED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LOGGED.get_or_init(|| {
+        ["HIWAVE_DEBUG", "HIWAVE_TEST_HOOKS"]
+            .iter()
+            .any(|name| std::env::var(name).map(|v| v == "1").unwrap_or(false))
+    })
+}
+
+/// One IPC message in the log, as `ipc_bodies_logged` allows.
+fn log_ipc(what: &str, body: &str) {
+    if ipc_bodies_logged() {
+        info!(%body, "{}", what);
+    } else {
+        info!(cmd = %ipc_cmd(body), len = body.len(), "{}", what);
+    }
+}
+
+/// A URL for the log (#910 R1 nit 3, CH3.A6): scheme, host and path —
+/// without its query, fragment or userinfo; a `data:` URL only up to its
+/// media type (the rest is the page).
+fn url_for_log(url: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if url.len() >= 5 && url[..5].eq_ignore_ascii_case("data:") {
+        let end = url.find(',').unwrap_or(url.len());
+        return Cow::Borrowed(&url[..end]);
+    }
+    let url = url.find(['?', '#']).map_or(url, |at| &url[..at]);
+    if let Some(scheme_end) = url.find("://") {
+        let auth_start = scheme_end + 3;
+        let auth_end = url[auth_start..].find('/').map_or(url.len(), |i| auth_start + i);
+        if let Some(at) = url[auth_start..auth_end].rfind('@') {
+            return Cow::Owned(format!("{}{}", &url[..auth_start], &url[auth_start + at + 1..]));
+        }
+    }
+    Cow::Borrowed(url)
+}
+
+/// A page URL for an info line (CH3.A6): whole only when IPC bodies are
+/// logged whole (`HIWAVE_DEBUG=1`, or `HIWAVE_TEST_HOOKS=1` for the
+/// real-window checks, which read queries); `url_for_log` otherwise.
+fn page_url_for_log(url: &str) -> std::borrow::Cow<'_, str> {
+    page_url_for_log_as(url, ipc_bodies_logged())
+}
+
+fn page_url_for_log_as(url: &str, whole: bool) -> std::borrow::Cow<'_, str> {
+    if whole {
+        std::borrow::Cow::Borrowed(url)
+    } else {
+        url_for_log(url)
+    }
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     ensure_main_thread_stack_16mib();
@@ -922,7 +994,7 @@ fn main() {
         .with_bounds(chrome_bounds)
         .with_ipc_handler(move |message| {
             let body = message.body();
-            info!("Chrome IPC: {}", body);
+            log_ipc("Chrome IPC", &body);
 
             match serde_json::from_str::<IpcMessage>(body) {
                 Ok(msg) => match &msg {
@@ -973,7 +1045,7 @@ fn main() {
                         if let Ok(s) = chrome_state.lock() {
                             if let Some(active_tab) = s.shell.get_active_tab() {
                                 let url = active_tab.url.to_string();
-                                info!("Navigating to new active tab after close: {}", url);
+                                info!("Navigating to new active tab after close: {}", crate::page_url_for_log(&url));
                                 let _ = chrome_proxy.send_event(UserEvent::Navigate(url));
                             }
                         }
@@ -992,7 +1064,7 @@ fn main() {
                         if !already_active {
                             if let ipc::IpcResponse::Success { data } = response {
                                 if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
-                                    info!("Navigating to tab URL: {}", url);
+                                    info!("Navigating to tab URL: {}", crate::page_url_for_log(&url));
                                     let _ = chrome_proxy
                                         .send_event(UserEvent::Navigate(url.to_string()));
                                 }
@@ -1392,7 +1464,7 @@ fn main() {
         .with_focused(true)
         .with_bounds(content_bounds)
         .with_navigation_handler(move |url| {
-            info!("Content navigating to: {}", url);
+            info!("Content navigating to: {}", crate::page_url_for_log(&url));
 
             // Check if current tab URL is an internal URL before processing data URLs
             // This prevents overwriting hiwave://about when loading the about page via load_html()
@@ -1500,13 +1572,13 @@ fn main() {
         .with_new_window_req_handler(move |url| {
             // Allow Cloudflare challenges to stay as iframes (required for verification)
             if url.contains("challenges.cloudflare.com") || url.contains("turnstile") {
-                info!("Allowing Cloudflare challenge iframe: {}", url);
+                info!("Allowing Cloudflare challenge iframe: {}", crate::page_url_for_log(&url));
                 return true; // Allow the iframe/popup to render in-place
             }
 
             // Allow Proton authentication popups/iframes
             if url.contains("proton.me") || url.contains("protonmail.com") {
-                info!("Allowing Proton auth iframe: {}", url);
+                info!("Allowing Proton auth iframe: {}", crate::page_url_for_log(&url));
                 return true; // Allow the iframe/popup to render in-place
             }
 
@@ -1518,7 +1590,7 @@ fn main() {
 
             // Filter out unwanted popup/iframe requests using platform layer
             if platform::is_definitely_popup(&url) {
-                info!("New window request blocked (filtered): {}", url);
+                info!("New window request blocked (filtered): {}", crate::page_url_for_log(&url));
                 return false;
             }
 
@@ -1526,7 +1598,7 @@ fn main() {
             if let Ok(mut s) = content_state2.lock() {
                 // Check user blocklist first (hot-editable)
                 if s.user_blocklist.should_block(&url) {
-                    info!("New window request blocked (user blocklist): {}", url);
+                    info!("New window request blocked (user blocklist): {}", crate::page_url_for_log(&url));
                     // Increment Shield counters so all blocks show in UI
                     s.shield.increment_block_count();
                     // Track user blocklist blocks in analytics as popup, tracker, and ad
@@ -1606,7 +1678,7 @@ fn main() {
                                     workspace_id.as_deref()
                                 );
                             }
-                            info!("New window request blocked (Shield): {}", url);
+                            info!("New window request blocked (Shield): {}", crate::page_url_for_log(&url));
                             drop(s);
                             let _ = content_proxy_new_window.send_event(UserEvent::SyncShieldStats);
                             return false;
@@ -1615,7 +1687,7 @@ fn main() {
                 }
             }
 
-            info!("New window request -> new tab: {}", url);
+            info!("New window request -> new tab: {}", crate::page_url_for_log(&url));
             let response = ipc::commands::handle_message(
                 &content_state2,
                 IpcMessage::CreateTab {
@@ -1629,7 +1701,7 @@ fn main() {
         })
         .with_ipc_handler(move |message| {
             let body = message.body();
-            info!("Content IPC: {}", body);
+            log_ipc("Content IPC", &body);
             if let Ok(msg) = serde_json::from_str::<IpcMessage>(body) {
                 match &msg {
                     IpcMessage::GoBack => {
@@ -1769,7 +1841,7 @@ fn main() {
                         let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
                     }
                     IpcMessage::OpenExternal { url } => {
-                        info!("Opening external URL from content: {}", url);
+                        info!("Opening external URL from content: {}", crate::page_url_for_log(&url));
                         let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
                     }
                     _ => {}
@@ -1802,7 +1874,7 @@ fn main() {
             .with_bounds(shelf_bounds)
             .with_ipc_handler(move |message| {
                 let body = message.body();
-                info!("Shelf IPC: {}", body);
+                log_ipc("Shelf IPC", &body);
 
                 match serde_json::from_str::<IpcMessage>(body) {
                     Ok(msg) => {
@@ -2026,7 +2098,7 @@ fn main() {
             Event::UserEvent(user_event) => {
                 match user_event {
                     UserEvent::Navigate(url) => {
-                        info!("Navigating content to: {}", url);
+                        info!("Navigating content to: {}", crate::page_url_for_log(&url));
                         if is_new_tab_url(&url) {
                             load_new_tab(&content_for_events);
                             chrome_for_events.evaluate_script(
@@ -3836,4 +3908,36 @@ fn main() {
 
     });
     } // end cfg(not(feature = "native-linux"))
+}
+
+#[cfg(test)]
+mod url_log_tests {
+    use super::*;
+    const SECRET: &str = "hunter2-a4-secret";
+
+    #[test]
+    fn a_url_in_the_log_has_no_query_or_fragment() {
+        assert_eq!(url_for_log(&format!("https://a.test/p/q?x={SECRET}#{SECRET}")), "https://a.test/p/q");
+        assert_eq!(url_for_log(&format!("https://a.test/p#{SECRET}")), "https://a.test/p");
+        assert_eq!(url_for_log("about:blank"), "about:blank");
+    }
+
+    #[test]
+    fn a_page_url_in_the_log_keeps_scheme_host_and_path_only() {
+        // userinfo is a credential; a data: URL's payload is the page.
+        assert_eq!(url_for_log(&format!("https://u:{SECRET}@a.test/p?q=1")), "https://a.test/p");
+        assert_eq!(url_for_log(&format!("https://{SECRET}@a.test")), "https://a.test");
+        // An '@' in the path is not userinfo.
+        assert_eq!(url_for_log("https://a.test/@user/x"), "https://a.test/@user/x");
+        assert_eq!(url_for_log(&format!("data:text/html,<p>{SECRET}</p>")), "data:text/html");
+        assert_eq!(url_for_log(&format!("data:text/html;base64,{SECRET}")), "data:text/html;base64");
+        assert_eq!(url_for_log("hiwave://newtab"), "hiwave://newtab");
+    }
+
+    #[test]
+    fn a_navigation_line_has_the_full_url_only_when_bodies_are_logged() {
+        let url = format!("https://a.test/login?token={SECRET}#{SECRET}");
+        assert_eq!(page_url_for_log_as(&url, false), "https://a.test/login");
+        assert_eq!(page_url_for_log_as(&url, true), url);
+    }
 }

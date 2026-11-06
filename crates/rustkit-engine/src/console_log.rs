@@ -15,7 +15,9 @@
 //! page thread.
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(not(test))]
+use std::sync::OnceLock;
 
 use rustkit_js::{ErrorReport, LogLevel, ScriptPosition};
 
@@ -33,24 +35,28 @@ struct AliasMap {
     entries: VecDeque<(String, String)>,
 }
 
+/// Run `f` on the label map. The process shares one; each test thread has
+/// its own, emptied by [`force_for_test`], so parallel tests that both
+/// record `inserted#1` never read each other's URL (CA1 item 5).
 #[cfg(not(test))]
-fn aliases() -> &'static Mutex<AliasMap> {
+fn with_aliases<R>(f: impl FnOnce(&mut AliasMap) -> R) -> Option<R> {
     static ALIASES: OnceLock<Mutex<AliasMap>> = OnceLock::new();
-    ALIASES.get_or_init(|| Mutex::new(AliasMap { entries: VecDeque::new() }))
+    let mut map = ALIASES.get_or_init(|| Mutex::new(AliasMap { entries: VecDeque::new() })).lock().ok()?;
+    Some(f(&mut map))
+}
+
+#[cfg(test)]
+fn with_aliases<R>(f: impl FnOnce(&mut AliasMap) -> R) -> Option<R> {
+    TEST_ALIASES.with(|map| Some(f(&mut map.borrow_mut())))
 }
 
 #[cfg(test)]
 thread_local! {
+    static TEST_ALIASES: std::cell::RefCell<AliasMap> =
+        const { std::cell::RefCell::new(AliasMap { entries: VecDeque::new() }) };
     static FORCE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static SINK: std::cell::RefCell<Option<std::sync::Arc<Mutex<Vec<String>>>>> =
         const { std::cell::RefCell::new(None) };
-    static TEST_ALIASES: std::cell::RefCell<AliasMap> =
-        const { std::cell::RefCell::new(AliasMap { entries: VecDeque::new() }) };
-}
-
-#[cfg(test)]
-fn clear_test_aliases() {
-    TEST_ALIASES.with(|cell| cell.borrow_mut().entries.clear());
 }
 
 /// `HIWAVE_CONSOLE_LOG=1`. Empty, `0`, and anything else are off.
@@ -65,7 +71,7 @@ pub(crate) fn enabled() -> bool {
 #[cfg(test)]
 pub(crate) fn force_for_test(on: Option<bool>) {
     FORCE.with(|cell| cell.set(on));
-    clear_test_aliases();
+    TEST_ALIASES.with(|map| map.borrow_mut().entries.clear());
     sync_diag_armed();
 }
 
@@ -98,52 +104,19 @@ pub(crate) fn alias(name: &str, url: &str) {
     if !enabled() {
         return;
     }
-    #[cfg(test)]
-    {
-        TEST_ALIASES.with(|cell| {
-            let mut map = cell.borrow_mut();
-            if map.entries.len() >= ALIAS_CAP {
-                map.entries.pop_front();
-            }
-            map.entries.push_back((name.to_string(), url.to_string()));
-        });
-    }
-    #[cfg(not(test))]
-    {
-        let Ok(mut map) = aliases().lock() else {
-            return;
-        };
+    with_aliases(|map| {
         if map.entries.len() >= ALIAS_CAP {
             map.entries.pop_front();
         }
         map.entries.push_back((name.to_string(), url.to_string()));
-    }
+    });
 }
 
 /// The URL an engine script label stands for, or `path` itself; either
 /// way through [`brief_place`].
 fn resolve(path: &str) -> String {
-    #[cfg(test)]
-    {
-        return TEST_ALIASES.with(|cell| {
-            let map = cell.borrow();
-            let place = map
-                .entries
-                .iter()
-                .rev()
-                .find(|(name, _)| name == path)
-                .map_or(path, |(_, url)| url.as_str());
-            brief_place(place)
-        });
-    }
-    #[cfg(not(test))]
-    {
-        let Ok(map) = aliases().lock() else {
-            return brief_place(path);
-        };
-        let place = map.entries.iter().rev().find(|(name, _)| name == path).map_or(path, |(_, url)| url.as_str());
-        brief_place(place)
-    }
+    let url = with_aliases(|map| map.entries.iter().rev().find(|(name, _)| name == path).map(|(_, url)| url.clone()));
+    brief_place(url.flatten().as_deref().unwrap_or(path))
 }
 
 fn emit(line: String) {
@@ -534,6 +507,33 @@ mod tests {
             force_for_test(None);
             install_sink(None);
         }
+    }
+
+    /// CA1 item 5: test threads ran with one process-wide alias map, so a
+    /// label another test recorded (`inserted#1` from a different page) won
+    /// the reverse lookup and a parallel run read its URL.
+    #[test]
+    fn a_label_recorded_on_another_test_thread_does_not_resolve_here() {
+        let _reset = Reset;
+        force_for_test(Some(true));
+        alias("inserted#90001", "https://mine.example/a.js");
+        std::thread::spawn(|| {
+            force_for_test(Some(true));
+            alias("inserted#90001", "https://theirs.example/b.js");
+            force_for_test(None);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(resolve("inserted#90001"), "https://mine.example/a.js");
+    }
+
+    #[test]
+    fn forcing_the_switch_starts_with_no_labels() {
+        let _reset = Reset;
+        force_for_test(Some(true));
+        alias("inserted#90002", "https://old.example/a.js");
+        force_for_test(Some(true));
+        assert_eq!(resolve("inserted#90002"), "inserted#90002");
     }
 
     #[test]
@@ -985,52 +985,6 @@ mod tests {
         assert!(line.contains("histogram=\"set x=512\""), "{line}");
         assert!(line.contains("frames=\"set x > set x\""), "{line}");
         assert!(!line.contains('\n'), "{line}");
-    }
-
-    #[test]
-    fn aliases_do_not_race_across_threads_or_leak_across_force_for_test() {
-        let _reset = Reset;
-        // 1. Simulate a test (like inspector_engine_tests) that calls
-        // force_for_test(Some(true)), records inline#1, and calls
-        // force_for_test(None) without dropping console_log::tests::Reset.
-        force_for_test(Some(true));
-        alias("inline#1", "https://stale-from-earlier-test.example/");
-        force_for_test(None);
-
-        // 2. Now start a fresh forced test on this thread and also run a
-        // concurrent Reset on another thread between alias() and console_message().
-        force_for_test(Some(true));
-        let sink = Arc::new(Mutex::new(Vec::new()));
-        install_sink(Some(Arc::clone(&sink)));
-        alias("chunk#thread-a", "https://thread-a.example/app.js");
-
-        std::thread::spawn(|| {
-            let _other_reset = Reset;
-            force_for_test(Some(true));
-            alias("chunk#thread-b", "https://thread-b.example/other.js");
-        })
-        .join()
-        .expect("other thread");
-
-        console_message(
-            LogLevel::Log,
-            "from-a",
-            Some(&ScriptPosition { path: "chunk#thread-a".into(), line: 1, column: 1 }),
-        );
-        console_message(
-            LogLevel::Log,
-            "inline-a",
-            Some(&ScriptPosition { path: "inline#1".into(), line: 1, column: 1 }),
-        );
-        let text = sink.lock().unwrap().join("\n");
-        assert!(
-            text.contains("console log https://thread-a.example/app.js:1:1 from-a"),
-            "concurrent Reset on another thread cleared this thread's alias: {text}"
-        );
-        assert!(
-            text.contains("console log inline#1:1:1 inline-a"),
-            "stale alias from before force_for_test(None) leaked into new test: {text}"
-        );
     }
 }
 

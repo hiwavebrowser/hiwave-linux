@@ -48,6 +48,7 @@ pub(crate) fn note_location(url: &str, replace: bool) {
     hook(url, replace);
 }
 mod net_bridge;
+pub use dom::editing::SharedEditStates;
 pub use net_bridge::{NetDelivery, NetRequest};
 pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
 #[cfg(test)]
@@ -62,6 +63,8 @@ mod web_components_tests;
 mod web_streams_tests;
 #[cfg(test)]
 mod web_interfaces_tests;
+#[cfg(test)]
+mod dnd_tests;
 #[cfg(test)]
 mod web_blob_tests;
 #[cfg(test)]
@@ -83,7 +86,11 @@ mod meta_refresh_noscript_tests;
 #[cfg(test)]
 mod geometry_tests;
 #[cfg(test)]
+mod forced_layout_budget_tests;
+#[cfg(test)]
 mod range_tests;
+#[cfg(test)]
+mod selection_tests;
 #[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]
@@ -93,6 +100,8 @@ mod shadow_tests;
 #[cfg(test)]
 mod raw_text_inner_html_tests;
 #[cfg(test)]
+mod svg_name_case_tests;
+#[cfg(test)]
 mod rejection_event_tests;
 #[cfg(test)]
 mod event_target_ctor_tests;
@@ -100,6 +109,8 @@ mod event_target_ctor_tests;
 mod legacy_tests;
 #[cfg(test)]
 mod reflect_tests;
+#[cfg(test)]
+mod editing_tests;
 #[cfg(test)]
 mod traversal_tests;
 #[cfg(test)]
@@ -112,15 +123,24 @@ mod web_match_media_tests;
 mod mutation_observer_tests;
 #[cfg(test)]
 mod web_messaging_tests;
+#[cfg(test)]
+mod web_named_access_tests;
+mod web_canvas;
+#[cfg(test)]
+mod web_canvas_tests;
 mod web_crypto;
 mod web_match_media;
 mod web_scroll;
 mod web_url;
 
 pub use dom::{
-    BoxGeometry, ControlWrites, ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn,
+    AnimatedStyles, BoxGeometry, ControlWrites, CssAnimationControl, CssAnimationInfo, ElementScrolls,
+    ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn, SharedAnimatedStyles,
+    SharedElementScrolls,
 };
 pub mod events;
+pub use rustkit_canvas as canvas;
+pub use web_canvas::{CanvasSnapshot, CanvasSource, CanvasTextExtent, CanvasTextMeasurer};
 
 pub use events::{
     AnimationEventData, DataTransfer, DragEventData, DroppedFile, Event, EventDispatcher,
@@ -217,6 +237,9 @@ pub struct MouseEventBindingData {
     /// The element the pointer came from or went to (raw NodeId), for the
     /// over/out/enter/leave events.
     pub related_target: Option<usize>,
+    /// `UIEvent.detail` (the click count). `None`: 1 for a press, a
+    /// release or a `click`, else 0.
+    pub detail: Option<u32>,
 }
 
 /// Keyboard event data for JavaScript binding.
@@ -445,12 +468,17 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// The Web API members the bindings report as unimplemented when page
 /// script reaches them (`__rk.unsupported` in the bindings' scripts, a
 /// native page script cannot reach). Nothing else is ever reported.
-pub const UNSUPPORTED_MEMBERS: [(&str, &str); 5] = [
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
+    ("Element", "animate(pseudoElement)"),
+    ("CSSAnimation", "currentTime"),
+    ("CSSAnimation", "playbackRate"),
+    ("CSSTransition", "pause"),
     ("XMLHttpRequest", "open(async=false)"),
     ("XMLHttpRequest", "responseXML"),
     ("CustomElementRegistry", "define(extends)"),
     ("ReadableStream", "getReader(byob)"),
     ("DOMParser", "parseFromString(XML)"),
+    ("Window", "named access (iframe name)"),
 ];
 
 const PAGE_LIFECYCLE_JS: &str = r#"
@@ -681,6 +709,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         return yielded ? -ran : ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
+    // The virtual clock as it stands: the engine's animation clock.
+    window.__rustkit_now = function () { return now; };
     window.__rustkit_next_timer = function () {
         var due = -1;
         for (var i = 0; i < timers.length; i++) {
@@ -728,15 +758,37 @@ pub enum DomDirty {
 pub(crate) struct DirtyMark {
     bucket: Cell<DomDirty>,
     since_layout: Cell<bool>,
+    /// The pending bucket holds a mark other than Web Animations' write of
+    /// the animated-style layer (`mark_animation_layer`). Every other mark
+    /// sets it, recorded in the `MutationLog` or not (`adoptedStyleSheets`,
+    /// `attachShadow`, `customElements.define`, a CSS animation control,
+    /// the embedder's `mark_dirty`), so the engine's paint-only animation
+    /// frame is taken only when the layer write is all that changed.
+    beyond_animation_layer: Cell<bool>,
 }
 
 impl DirtyMark {
     /// A script write that invalidated `bucket`.
     pub(crate) fn mark(&self, bucket: DomDirty) {
         if bucket != DomDirty::Clean {
+            self.beyond_animation_layer.set(true);
+            self.mark_animation_layer(bucket);
+        }
+    }
+
+    /// Web Animations wrote an element's animated-style layer, and nothing
+    /// else: the one mark that leaves `beyond_animation_layer` alone.
+    pub(crate) fn mark_animation_layer(&self, bucket: DomDirty) {
+        if bucket != DomDirty::Clean {
             self.bucket.set(self.bucket.get().max(bucket));
             self.since_layout.set(true);
         }
+    }
+
+    /// Whether the pending bucket holds a mark other than the animated-style
+    /// layer's.
+    pub(crate) fn beyond_animation_layer(&self) -> bool {
+        self.beyond_animation_layer.get()
     }
 
     pub(crate) fn get(&self) -> DomDirty {
@@ -744,6 +796,7 @@ impl DirtyMark {
     }
 
     fn take(&self) -> DomDirty {
+        self.beyond_animation_layer.set(false);
         self.bucket.replace(DomDirty::Clean)
     }
 
@@ -899,8 +952,9 @@ pub struct DomBindings {
     event_listeners: RefCell<Vec<EventListener>>,
     /// The document `document`/`Node`/`Element` read from (see `dom`).
     dom_host: dom::SharedDomHost,
-    /// Queue of IPC messages from JavaScript
-    _ipc_queue: RefCell<Vec<IpcMessage>>,
+    /// What the page posted with `window.ipc.postMessage`, held on the
+    /// Rust side (`__rk_ipc_post`), so a drain runs no script.
+    ipc_queue: Rc<RefCell<Vec<IpcMessage>>>,
     /// Pending invalidation from script DOM writes (see `DomDirty`).
     /// Shared with the tree-write host functions, which mark it.
     dirty: Rc<DirtyMark>,
@@ -910,6 +964,10 @@ pub struct DomBindings {
     mutation_log: Rc<RefCell<MutationLog>>,
     /// The scroll offset script reads and writes (see `web_scroll`).
     scroll: web_scroll::SharedScroll,
+    /// The clipboard and edit states edit commands use (see `dom::editing`).
+    edit: Rc<dom::editing::EditContext>,
+    /// Canvas 2D contexts and what they drew (see `web_canvas`).
+    canvases: web_canvas::SharedCanvases,
 }
 
 impl DomBindings {
@@ -918,14 +976,47 @@ impl DomBindings {
         self.runtime.borrow_mut().install_reentry_probe();
     }
 
-    /// Create new DOM bindings.
-    pub fn new(mut runtime: JsRuntime) -> Result<Self, BindingError> {
-        debug!("Initializing DOM bindings");
+    /// Create DOM bindings for a web document: no app bridge. The page
+    /// sees no `window.ipc`, `window.hiwaveChrome` or `__rk_ipc_post`, as
+    /// in Chromium (CH3.A7).
+    pub fn new(runtime: JsRuntime) -> Result<Self, BindingError> {
+        Self::build(runtime, false)
+    }
+
+    /// Create DOM bindings for one of the app's own documents (the chrome,
+    /// a panel): with the app bridge, `window.ipc.postMessage` and
+    /// `window.hiwaveChrome.postMessage`, whose messages
+    /// [`Self::drain_ipc_queue`] hands to the app (CH2.E9, CH3.A7).
+    pub fn new_app_owned(runtime: JsRuntime) -> Result<Self, BindingError> {
+        Self::build(runtime, true)
+    }
+
+    fn build(mut runtime: JsRuntime, app_bridge: bool) -> Result<Self, BindingError> {
+        debug!(app_bridge, "Initializing DOM bindings");
+
+        // `window.ipc.postMessage` lands here (CH2.E9), in an app-owned
+        // document only (CH3.A7). Registered before the setup scripts: a
+        // global added after them made every page load measurably slower
+        // (two app tests 1.4 s -> 3.0 s).
+        let ipc_queue = Rc::new(RefCell::new(Vec::new()));
+        if app_bridge {
+            let queue = Rc::clone(&ipc_queue);
+            runtime.register_host_function(
+                "__rk_ipc_post",
+                1,
+                Box::new(move |args| {
+                    if let Some(JsValue::String(payload)) = args.first() {
+                        queue.borrow_mut().push(IpcMessage { payload: payload.clone() });
+                    }
+                    JsValue::Undefined
+                }),
+            )?;
+        }
 
         // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
         runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
-        Self::inject_globals(&mut runtime)?;
+        Self::inject_globals(&mut runtime, app_bridge)?;
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(DirtyMark::default());
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
@@ -934,6 +1025,13 @@ impl DomBindings {
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
+        // A constructible DataTransfer and the drag data store the engine's drag and
+        // drop drives (web_dnd.js); replaces web_interfaces.js's interface-only one.
+        runtime.evaluate_script(include_str!("web_dnd.js"))?;
+        // Named access on the Window object: `<div id=x>` makes bare `x` the
+        // element, through a WindowProperties object on the prototype chain
+        // that asks the document when read (web_named_access.js).
+        runtime.evaluate_with_host(include_str!("web_named_access.js"))?;
         // window.matchMedia over the engine's @media evaluator, MediaQueryList with
         // change events after a resize (web_match_media.js); needs MediaQueryList and
         // MediaQueryListEvent from web_interfaces.js.
@@ -956,6 +1054,10 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
         // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
         runtime.evaluate_script(include_str!("web_forms.js"))?;
+        // execCommand, navigator.clipboard and the user's edit commands over
+        // rustkit-dom's TextEditState (dom/editing.js); needs InputEvent.
+        let edit = Rc::new(dom::editing::EditContext::default());
+        dom::editing::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
         runtime.evaluate_script(include_str!("web_history.js"))?;
@@ -963,6 +1065,10 @@ impl DomBindings {
         let scroll = web_scroll::SharedScroll::default();
         dom_host.borrow_mut().scroll_state = scroll.clone();
         web_scroll::install(&mut runtime, &scroll, &dom_host, &dirty)?;
+        // canvas.getContext('2d'), CanvasRenderingContext2D and canvas.width/height,
+        // recorded by rustkit-canvas for the engine to paint (web_canvas.js).
+        let canvases = web_canvas::SharedCanvases::default();
+        web_canvas::install(&mut runtime, &canvases, &dom_host)?;
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
         runtime.evaluate_with_host(include_str!("web_observers_live.js"))?;
@@ -973,18 +1079,61 @@ impl DomBindings {
         runtime.evaluate_with_host(include_str!("web_messaging.js"))?;
         // Script elements script inserts are prepared and run (web_scripts.js).
         runtime.evaluate_with_host(include_str!("web_scripts.js"))?;
+        // Element.animate(), Animation, KeyframeEffect, document.timeline, getAnimations()
+        // over the animation-frame clock; the values go into the inline style (web_animations.js).
+        runtime.evaluate_with_host(include_str!("web_animations.js"))?;
+        // CH3.A7: the engine's own globals (`__rustkit_*`, `__rk*`) stay
+        // out of `Object.keys(window)` and for-in, which list none of them
+        // in Chromium. They stay configurable: setup scripts redefine some.
+        runtime.evaluate_script(
+            "Object.getOwnPropertyNames(globalThis).forEach(function (n) { \
+               if (n.indexOf('__rustkit_') !== 0 && n.indexOf('__rk') !== 0) return; \
+               var d = Object.getOwnPropertyDescriptor(globalThis, n); \
+               if (d && d.enumerable && d.configurable) { d.enumerable = false; Object.defineProperty(globalThis, n, d); } \
+             });",
+        )?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
             window: RefCell::new(WindowState::default()),
             event_listeners: RefCell::new(Vec::new()),
             dom_host,
-            _ipc_queue: RefCell::new(Vec::new()),
+            ipc_queue,
             dirty,
             mutations,
             mutation_log,
             scroll,
+            edit,
+            canvases,
         })
+    }
+
+    /// What the canvas element `node` has drawn on its 2D context: `None`
+    /// when script never asked it for one.
+    pub fn canvas_snapshot(&self, node: usize) -> Option<CanvasSnapshot> {
+        self.canvases.borrow().snapshot(node)
+    }
+
+    /// A handle on this page's canvases that outlives a borrow of the
+    /// bindings (the engine's display list reads it).
+    pub fn canvas_source(&self) -> CanvasSource {
+        CanvasSource(self.canvases.clone())
+    }
+
+    /// Whether any canvas drew, cleared or was resized since the last call:
+    /// the engine paints again when it did.
+    pub fn take_canvas_painted(&self) -> bool {
+        self.canvases.borrow_mut().take_painted()
+    }
+
+    /// The text shaper `measureText` and canvas text use (the engine's).
+    pub fn set_canvas_text_measurer(&self, measurer: Option<CanvasTextMeasurer>) {
+        self.canvases.borrow_mut().set_measurer(measurer);
+    }
+
+    /// Measure `text` in the canvas `font` the way the canvas does.
+    pub fn measure_canvas_text(&self, font: &str, text: &str) -> CanvasTextExtent {
+        self.canvases.borrow().measure_font(font, text)
     }
 
     /// Record that script invalidated `bucket`. Marks combine: the pending
@@ -992,7 +1141,19 @@ impl DomBindings {
     pub fn mark_dirty(&self, bucket: DomDirty) {
         // The embedder's marks are for its own flush, not script writes:
         // they do not make a geometry read lay the page out.
+        if bucket != DomDirty::Clean {
+            self.dirty.beyond_animation_layer.set(true);
+        }
         self.dirty.bucket.set(self.dirty.get().max(bucket));
+    }
+
+    /// Whether the invalidation pending (until `take_dirty`) holds anything
+    /// besides Web Animations' writes of the animated-style layer: any other
+    /// script write, with a `MutationLog` record or without one, or a
+    /// `mark_dirty` from the embedder. Read before `take_dirty`. The engine
+    /// paints an animation frame without a layout only when this is false.
+    pub fn dirty_beyond_animation_layer(&self) -> bool {
+        self.dirty.beyond_animation_layer()
     }
 
     /// The invalidation pending since the last call, which is reset to
@@ -1101,6 +1262,113 @@ impl DomBindings {
         Ok(())
     }
 
+    /// Use `clipboard` for this page's edit commands and
+    /// `navigator.clipboard` (the engine's platform clipboard).
+    pub fn set_clipboard(&self, clipboard: rustkit_dom::clipboard::SharedClipboard) {
+        *self.edit.clipboard.borrow_mut() = clipboard;
+    }
+
+    /// The clipboard this page's edit commands use.
+    pub fn clipboard(&self) -> rustkit_dom::clipboard::SharedClipboard {
+        self.edit.clipboard.borrow().clone()
+    }
+
+    /// Whether script may read the clipboard (`navigator.clipboard.readText`,
+    /// `execCommand('paste')`). Off by default, for web content: the
+    /// clipboard is shared across views, so reading it would leak what the
+    /// user copied elsewhere. Trusted pages (HiWave's chrome) opt in. The
+    /// user's own paste is always allowed.
+    pub fn set_clipboard_read_allowed(&self, allowed: bool) {
+        self.edit.script_read.set(allowed);
+    }
+
+    /// The user activated the page (a trusted key or mouse press): for
+    /// the next few seconds script may write the clipboard
+    /// (`navigator.clipboard.writeText`). [`Self::fire_key_event`] and
+    /// [`Self::fire_mouse_event`] call it for the events that activate.
+    pub fn notify_user_activation(&self) {
+        self.edit.activate();
+    }
+
+    /// Whether the page has transient user activation.
+    pub fn has_transient_activation(&self) -> bool {
+        self.edit.has_activation()
+    }
+
+    /// Run edit commands on `states` (the engine's edit states for this
+    /// view) instead of the bindings' own map.
+    pub fn share_edit_states(&self, states: SharedEditStates) {
+        *self.edit.states.borrow_mut() = states;
+    }
+
+    /// The user asked for `command` in the control `node` (a shortcut):
+    /// `beforeinput` (cancelable) for a command that edits, the edit on
+    /// the control's edit state, then `input`. What the command did, or
+    /// the default (nothing) when the control is not a text control or a
+    /// listener cancelled.
+    pub fn user_edit(
+        &self,
+        node: usize,
+        command: &rustkit_dom::forms::EditCommand,
+    ) -> Result<rustkit_dom::forms::EditOutcome, BindingError> {
+        use rustkit_dom::forms::EditCommand as C;
+        let (name, value) = match command {
+            C::Copy => ("copy", None),
+            C::Cut => ("cut", None),
+            C::Paste => ("paste", None),
+            C::SelectAll => ("selectAll", None),
+            C::Undo => ("undo", None),
+            C::Redo => ("redo", None),
+            C::InsertText(t) => ("insertText", Some(t.as_str())),
+            C::DeleteWordBackward => ("deleteWordBackward", None),
+            C::DeleteWordForward => ("deleteWordForward", None),
+        };
+        let value = value.map_or("null".to_string(), |v| {
+            serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())
+        });
+        let script = format!("document.__rkUserEdit({node}, {name:?}, {value})");
+        let report = match self.runtime.borrow_mut().evaluate_script(&script)? {
+            JsValue::String(json) => json,
+            _ => return Ok(Default::default()),
+        };
+        let r: serde_json::Value = serde_json::from_str(&report).unwrap_or_default();
+        let changed = r["changed"].as_bool().unwrap_or(false);
+        Ok(rustkit_dom::forms::EditOutcome {
+            handled: r["handled"].as_bool().unwrap_or(false),
+            changed,
+            selection_changed: !changed && r["handled"].as_bool().unwrap_or(false),
+            input_type: command.input_type().filter(|_| changed),
+            data: r["data"].as_str().map(str::to_string),
+        })
+    }
+
+    /// The platform's marked text in the text control `node` (CH2.E3,
+    /// macOS `NSTextInputClient`): `action` is "mark" (`setMarkedText:`),
+    /// "commit" (`insertText:` while text is marked), "unmark"
+    /// (`unmarkText`) or "state". Composition events, `beforeinput` and
+    /// `input` fire as Chrome's do. The JSON report, or `None` when `node`
+    /// is not a text control or, for "commit", nothing is marked.
+    pub fn user_compose(
+        &self,
+        node: usize,
+        action: &str,
+        text: &str,
+    ) -> Result<Option<serde_json::Value>, BindingError> {
+        let text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+        let script = format!("document.__rkCompose({node}, {action:?}, {text})");
+        Ok(match self.runtime.borrow_mut().evaluate_script(&script)? {
+            JsValue::String(json) => serde_json::from_str(&json).ok(),
+            _ => None,
+        })
+    }
+
+    /// How many times script has set a text control's selection
+    /// (`select()`, `setSelectionRange`). The engine compares it across a
+    /// press's focus change (CH2.E12).
+    pub fn script_selections(&self) -> u64 {
+        self.edit.script_selections.get()
+    }
+
     /// Tell script what the user typed into a control, so its `value`
     /// reads the edit state's text rather than the default.
     pub fn sync_control_value(&self, node: usize, value: String) {
@@ -1108,7 +1376,7 @@ impl DomBindings {
     }
 
     /// Inject global JavaScript objects.
-    fn inject_globals(runtime: &mut JsRuntime) -> Result<(), BindingError> {
+    fn inject_globals(runtime: &mut JsRuntime, app_bridge: bool) -> Result<(), BindingError> {
         // Window object stub. `window` IS the global object, as in every
         // browser: page bundles write `window.x = ...` and read bare `x`
         // (webpack's `self.webpackChunk*`), and that only works if the two
@@ -1211,24 +1479,16 @@ impl DomBindings {
         // Intl (en-US only) and the toLocale*String methods over it (web_intl.js).
         runtime.evaluate_script(include_str!("web_intl.js"))?;
 
-        // IPC bridge for communication with Rust
+        // IPC bridge for communication with Rust: the app's own documents
+        // only (CH3.A7). A web page gets none of it, as in Chromium.
         let ipc_js = r#"
-            // IPC queue for postMessage calls
-            window.__ipcQueue = [];
-
-            // IPC object for browser-to-Rust communication
+            // IPC object for browser-to-Rust communication. The message
+            // goes to a queue on the Rust side (`__rk_ipc_post`, installed
+            // after the globals); a non-string is sent as its JSON.
             window.ipc = {
                 postMessage: function(message) {
-                    // Store message in queue for Rust to poll
-                    window.__ipcQueue.push(message);
+                    __rk_ipc_post(typeof message === 'string' ? message : JSON.stringify(message));
                 }
-            };
-
-            // Helper to drain the IPC queue (called from Rust)
-            window.__drainIpcQueue = function() {
-                var queue = window.__ipcQueue;
-                window.__ipcQueue = [];
-                return JSON.stringify(queue);
             };
 
             // HiWave Chrome API (for Chrome UI compatibility)
@@ -1239,7 +1499,9 @@ impl DomBindings {
             };
         "#;
 
-        runtime.evaluate_script(ipc_js)?;
+        if app_bridge {
+            runtime.evaluate_script(ipc_js)?;
+        }
 
         // Document object stub
         let document_js = r#"
@@ -1609,6 +1871,18 @@ impl DomBindings {
         host.renew_forced_budget();
     }
 
+    /// Keep element scroll offsets in the view's table.
+    /// Share the view's animated-style layer (`AnimatedStyles`): script's
+    /// Web Animations write it, the engine's build reads it and publishes
+    /// its CSS animations into it.
+    pub fn share_animated_styles(&self, animated: SharedAnimatedStyles) {
+        self.dom_host.borrow_mut().animated = animated;
+    }
+
+    pub fn share_element_scrolls(&self, scrolls: SharedElementScrolls) {
+        self.dom_host.borrow_mut().element_scrolls = scrolls;
+    }
+
     /// How a read of geometry after a script write in the same task lays
     /// the page out (forced layout). The engine installs one with each
     /// layout it publishes; a new document drops it. Without one, such a
@@ -1662,6 +1936,13 @@ impl DomBindings {
         let _ = self.evaluate("typeof __rkUserScrolled === 'function' && __rkUserScrolled()");
     }
 
+    /// Tell the page the user scrolled an element: `scroll` fires at it.
+    pub fn notify_element_scrolled(&self, node: usize) {
+        let _ = self.evaluate(&format!(
+            "typeof __rkUserScrolledElement === 'function' && __rkUserScrolledElement({node})"
+        ));
+    }
+
     /// Publish the computed style of each laid-out element (raw NodeId to
     /// `name\tvalue` lines joined by newlines), for `getComputedStyle`.
     pub fn set_computed_styles(&self, styles: std::collections::HashMap<usize, String>) {
@@ -1689,6 +1970,7 @@ impl DomBindings {
         // Rebind the DOM wrappers. Wrappers handed out for a previous
         // document stop resolving (their generation no longer matches).
         let generation = self.dom_host.borrow_mut().bind(document);
+        self.canvases.borrow_mut().clear();
         runtime.evaluate_script(&format!("__rustkit_dom_reset({generation});"))?;
 
         debug!("Document bound to JS context");
@@ -1714,7 +1996,7 @@ impl DomBindings {
             window.location.port = {:?};
             window.location.pathname = {:?};
             window.location.search = {:?};
-            window.location.hash = {:?};
+            if (window.__rustkit_location_hash_sync) window.__rustkit_location_hash_sync({:?});
             window.location.origin = {:?};
             document.URL = {:?};
             if (window.__rustkit_history_reset) window.__rustkit_history_reset();
@@ -1936,10 +2218,14 @@ impl DomBindings {
         event_type: &str,
         data: &MouseEventBindingData,
     ) -> Result<bool, BindingError> {
+        // Activation-triggering input events (HTML §6.4.3).
+        if matches!(event_type, "mousedown" | "pointerdown" | "mouseup" | "pointerup") {
+            self.notify_user_activation();
+        }
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
              screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
-             altKey: {}, shiftKey: {}, metaKey: {}, movementX: {}, movementY: {}, related: {} }})",
+             altKey: {}, shiftKey: {}, metaKey: {}, movementX: {}, movementY: {}, related: {}, detail: {} }})",
             data.client_x,
             data.client_y,
             data.screen_x,
@@ -1955,8 +2241,52 @@ impl DomBindings {
             data.movement_x,
             data.movement_y,
             data.related_target.map_or("null".to_string(), |n| n.to_string()),
+            data.detail.map_or("null".to_string(), |n| n.to_string()),
         ))?;
         Ok(!matches!(result, JsValue::Boolean(false)))
+    }
+
+    /// Fire one event of the engine's drag-and-drop processing model at an
+    /// element (by node id) as a trusted, bubbling `DragEvent` whose
+    /// `dataTransfer` is the drag's (web_dnd.js). `dragstart` begins a new
+    /// drag data store, `dragend` (or a cancelled `dragstart`) retires it.
+    /// `operation` is the current drag operation (`none`, `copy`, `link`,
+    /// `move`): the `dropEffect` of `dragleave`, `drop` and `dragend`.
+    /// Returns whether no listener called `preventDefault()`, and the
+    /// operation the `dataTransfer`'s `effectAllowed` and `dropEffect` give
+    /// once the listeners ran.
+    pub fn fire_drag_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        data: &MouseEventBindingData,
+        operation: &str,
+    ) -> Result<(bool, String), BindingError> {
+        let result = self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireDrag({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
+             screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
+             altKey: {}, shiftKey: {}, metaKey: {}, related: {} }}, {operation:?})",
+            data.client_x,
+            data.client_y,
+            data.screen_x,
+            data.screen_y,
+            data.offset_x,
+            data.offset_y,
+            data.button,
+            data.buttons,
+            data.ctrl_key,
+            data.alt_key,
+            data.shift_key,
+            data.meta_key,
+            data.related_target.map_or("null".to_string(), |n| n.to_string()),
+        ))?;
+        Ok(match result {
+            JsValue::String(s) => {
+                let (flag, op) = s.split_once(':').unwrap_or(("1", "none"));
+                (flag != "0", op.to_string())
+            }
+            _ => (true, "none".to_string()),
+        })
     }
 
     /// Fire the user's key press or release at an element (by node id) as
@@ -1970,6 +2300,10 @@ impl DomBindings {
         event_type: &str,
         data: &KeyboardEventBindingData,
     ) -> Result<bool, BindingError> {
+        // A keydown activates the page, except Escape (HTML §6.4.3).
+        if event_type == "keydown" && data.key != "Escape" {
+            self.notify_user_activation();
+        }
         let node = node.map_or("null".to_string(), |n| n.to_string());
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireKey({node}, {event_type:?}, {{ key: {:?}, code: {:?}, repeat: {}, \
@@ -2002,6 +2336,49 @@ impl DomBindings {
         }
     }
 
+    /// The user moved the document selection (a drag, a double-click):
+    /// `Some((anchor, anchor_offset, focus, focus_offset))` by node id and
+    /// UTF-16 offset, or `None` to clear it. Script sees it through
+    /// `getSelection()` and hears `selectionchange`; the move is not echoed
+    /// back by [`Self::take_selection_change`].
+    pub fn set_selection(&self, ends: Option<(usize, usize, usize, usize)>) -> Result<(), BindingError> {
+        let call = match ends {
+            Some((a, ao, f, fo)) => format!("document.__rkSetSelection({a}, {ao}, {f}, {fo});"),
+            None => "document.__rkSetSelection(null, 0, null, 0);".to_string(),
+        };
+        self.runtime.borrow_mut().evaluate_script(&call)?;
+        Ok(())
+    }
+
+    /// An editing key in the contenteditable host `host` (by node id):
+    /// `op` is `insert` (with `text`), `enter`, `back`, `del`, `left`,
+    /// `right` or `all`. The page's DOM and selection change as a plain-text
+    /// editor would change them, and the host hears `input`. Returns whether
+    /// anything changed.
+    pub fn edit_key(&self, host: usize, op: &str, text: &str) -> Result<bool, BindingError> {
+        let result = self
+            .runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkEditKey({host}, {op:?}, {text:?})"))?;
+        Ok(matches!(result, JsValue::Boolean(true)))
+    }
+
+    /// The document selection, when script changed it since the last call
+    /// (or since [`Self::set_selection`]): `Some(Some(ends))` as in
+    /// `set_selection`, `Some(None)` for no selection, `None` when it has
+    /// not changed.
+    #[allow(clippy::type_complexity)]
+    pub fn take_selection_change(&self) -> Option<Option<(usize, usize, usize, usize)>> {
+        match self.evaluate("document.__rkTakeSelection ? document.__rkTakeSelection() : null") {
+            Ok(JsValue::String(s)) if s.is_empty() => Some(None),
+            Ok(JsValue::String(s)) => {
+                let n: Vec<usize> = s.split(' ').filter_map(|p| p.parse().ok()).collect();
+                (n.len() == 4).then(|| Some((n[0], n[1], n[2], n[3])))
+            }
+            _ => None,
+        }
+    }
+
     /// Fire `input` at a control (by node id) whose value the user's typing
     /// changed. `data` is the inserted text, `None` for a deletion.
     pub fn fire_input_event(&self, node: usize, data: Option<&str>) -> Result<(), BindingError> {
@@ -2010,6 +2387,19 @@ impl DomBindings {
             .borrow_mut()
             .evaluate_script(&format!("document.__rkFireInput({node}, {data});"))?;
         Ok(())
+    }
+
+    /// The user picked option `index` of the select `node` (by node id) in
+    /// its drop-down or with a key: its selectedness moves there and the
+    /// select hears `input` and `change`. Returns whether the selection
+    /// changed (a disabled option, or the one already selected, does not
+    /// change it and fires nothing).
+    pub fn pick_option(&self, node: usize, index: usize) -> Result<bool, BindingError> {
+        let picked = self
+            .runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkPickOption({node}, {index})"))?;
+        Ok(matches!(picked, JsValue::Boolean(true)))
     }
 
     /// Enter in a field (by node id): implicit submission of its form. An
@@ -2186,6 +2576,57 @@ impl DomBindings {
         })
     }
 
+    /// The page's virtual clock, in ms: what its timers and animation
+    /// frames have run up to. The engine's CSS transitions run on it.
+    pub fn clock_now_ms(&self) -> f64 {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_bookkeeping("window.__rustkit_now()")
+        {
+            Ok(JsValue::Number(n)) if n.is_finite() => n,
+            _ => 0.0,
+        }
+    }
+
+    /// Fire a `TransitionEvent` (`transitionrun`, `transitionstart`,
+    /// `transitionend`, `transitioncancel`) at an element (by node id), as
+    /// the engine's transitions change phase. Bubbles; `transitionend` can
+    /// be cancelled. Listener exceptions are queued, see
+    /// [`Self::take_reported_errors`].
+    pub fn fire_transition_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        property: &str,
+        elapsed_s: f32,
+    ) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireTransition({node}, {event_type:?}, {{ propertyName: {property:?}, \
+             elapsedTime: {elapsed_s}, pseudoElement: '' }});"
+        ))?;
+        Ok(())
+    }
+
+    /// Fire an `AnimationEvent` (`animationstart`, `animationiteration`,
+    /// `animationend`, `animationcancel`) at an element (by node id), as
+    /// the engine's `@keyframes` animations change phase. Bubbles, not
+    /// cancelable. Listener exceptions are queued, see
+    /// [`Self::take_reported_errors`].
+    pub fn fire_animation_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        name: &str,
+        elapsed_s: f32,
+    ) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireAnimation({node}, {event_type:?}, {{ animationName: {name:?}, \
+             elapsedTime: {elapsed_s}, pseudoElement: '' }});"
+        ))?;
+        Ok(())
+    }
+
     /// Milliseconds until the page's next timer is due on the virtual clock
     /// (0 when one is overdue). `None` when no timer is set.
     pub fn next_timer_delay(&self) -> Option<u64> {
@@ -2212,45 +2653,12 @@ impl DomBindings {
     ///
     /// Returns a Vec of IpcMessage structs.
     pub fn drain_ipc_queue(&self) -> Vec<IpcMessage> {
-        // Call JS to drain the queue and get JSON
-        let result = self.runtime
-            .borrow_mut()
-            .evaluate_script("window.__drainIpcQueue()");
-
-        match result {
-            Ok(JsValue::String(json)) => {
-                // Parse the JSON array
-                match serde_json::from_str::<Vec<String>>(&json) {
-                    Ok(messages) => {
-                        messages
-                            .into_iter()
-                            .map(|payload| IpcMessage { payload })
-                            .collect()
-                    }
-                    Err(e) => {
-                        trace!(error = %e, "Failed to parse IPC queue JSON");
-                        Vec::new()
-                    }
-                }
-            }
-            Ok(_) => {
-                trace!("IPC queue returned non-string value");
-                Vec::new()
-            }
-            Err(e) => {
-                trace!(error = %e, "Failed to drain IPC queue");
-                Vec::new()
-            }
-        }
+        std::mem::take(&mut *self.ipc_queue.borrow_mut())
     }
 
     /// Check if there are pending IPC messages.
     pub fn has_pending_ipc(&self) -> bool {
-        let result = self.runtime
-            .borrow_mut()
-            .evaluate_script("window.__ipcQueue.length > 0");
-
-        matches!(result, Ok(JsValue::Boolean(true)))
+        !self.ipc_queue.borrow().is_empty()
     }
 
     /// Add an event listener.
@@ -2943,6 +3351,8 @@ mod tests {
             include_str!("web_xhr.js"),
             include_str!("web_components.js"),
             include_str!("web_streams.js"),
+            include_str!("web_named_access.js"),
+            include_str!("web_animations.js"),
             dom::WRAPPERS_JS_FOR_TESTS,
         ]
         .concat();

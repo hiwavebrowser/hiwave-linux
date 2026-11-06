@@ -954,7 +954,7 @@ impl AppState {
         if is_duplicate {
             tracing::warn!(
                 "Popup blocked (duplicate): {} - same URL requested within 500ms",
-                url
+                crate::page_url_for_log(url)
             );
             return false;
         }
@@ -963,7 +963,7 @@ impl AppState {
         if self.recent_popups.len() >= max_popups_per_window {
             tracing::warn!(
                 "Popup blocked (flood): {} - {} popups in last 2 seconds",
-                url,
+                crate::page_url_for_log(url),
                 self.recent_popups.len()
             );
             return false;
