@@ -27,6 +27,7 @@ pub mod x11_input;
 pub use linux::shape_supported as x11_shape_supported;
 pub mod region;
 pub mod cursor;
+pub use cursor::x11_cursor_shape;
 
 // Platform-agnostic trait seam (ported from the reference tree in the wave-4
 // engine adoption; this is the one-engine Phase-2 shape). On this platform
@@ -506,11 +507,18 @@ impl ViewHost {
         self.x11()?.set_region(view_id, region)
     }
 
+    /// Show the X11 font cursor `shape` over a view's window.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn set_x11_cursor(&self, view_id: ViewId, shape: u32) -> Result<(), ViewHostError> {
+        self.x11()?.set_cursor(view_id, shape)
+    }
+
     /// Give the X input focus to window `window` (a raw `XSetInputFocus`).
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn focus_x11_window(&self, window: u64) {
-        if let Ok(host) = self.x11() {
-            host.focus_window(window);
+        match self.x11() {
+            Ok(host) => host.focus_window(window),
+            Err(_) => tracing::warn!("focus_x11_window: no X11 host (the app window is not an X11 window?)"),
         }
     }
 

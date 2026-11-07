@@ -325,6 +325,19 @@ impl X11ViewHost {
         }
     }
 
+    /// Show the X11 font cursor `shape` (`cursorfont.h`) over a view's window.
+    pub fn set_cursor(&self, view_id: ViewId, shape: u32) -> Result<(), ViewHostError> {
+        let window = self.get_x11_window(view_id)?;
+        unsafe {
+            let cursor = x11::xlib::XCreateFontCursor(self.display, shape);
+            x11::xlib::XDefineCursor(self.display, window, cursor);
+            // The server keeps the cursor the window uses; the client's handle can go.
+            x11::xlib::XFreeCursor(self.display, cursor);
+            XFlush(self.display);
+        }
+        Ok(())
+    }
+
     /// Raise a view's window above its siblings.
     pub fn raise_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
         let window = self.get_x11_window(view_id)?;

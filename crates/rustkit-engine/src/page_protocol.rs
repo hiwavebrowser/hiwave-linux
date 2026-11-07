@@ -1611,6 +1611,11 @@ impl PageEndpoint {
         self.engine.set_view_region(self.view, region);
     }
 
+    /// Linux (S3): the cursor glyph over this endpoint's view.
+    pub fn set_x11_cursor(&self, shape: u32) {
+        self.engine.set_view_cursor(self.view, shape);
+    }
+
     /// Linux (S3): give the X input focus to window `window`.
     pub fn focus_x11_window(&self, window: u64) {
         self.engine.focus_x11_window(window);

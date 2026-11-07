@@ -111,7 +111,10 @@ pub fn toplevel_xid(window: &tao::window::Window) -> Option<u64> {
 pub fn return_focus_on_page_click(content: &wry::WebView, chrome: Arc<RustKitView>, window: &tao::window::Window) {
     use gtk::prelude::*;
     use wry::WebViewExtUnix;
-    let Some(toplevel) = toplevel_xid(window) else { return };
+    let Some(toplevel) = toplevel_xid(window) else {
+        warn!("RustKit chrome: the app window has no X11 id, keyboard focus will not return after a page click");
+        return;
+    };
     content.webview().connect_button_press_event(move |_, _| {
         chrome.focus_x11_window(toplevel);
         gtk::glib::Propagation::Proceed

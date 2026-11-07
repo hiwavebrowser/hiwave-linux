@@ -3121,6 +3121,14 @@ impl Engine {
         }
     }
 
+    /// Linux (S3): show the X11 font cursor `shape` over view `id`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn set_view_cursor(&self, id: EngineViewId, shape: u32) {
+        if let Some(view) = self.views.get(&id) {
+            let _ = self.viewhost().set_x11_cursor(view.viewhost_id, shape);
+        }
+    }
+
     /// Linux (S3): give the X input focus to window `window` (the app's toplevel).
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn focus_x11_window(&self, window: u64) {

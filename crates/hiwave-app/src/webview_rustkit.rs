@@ -1502,6 +1502,11 @@ impl RustKitView {
         match event {
             #[cfg(target_os = "macos")]
             PageEvent::Cursor(css) => rustkit_viewhost::set_view_cursor(self.host_view, css),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            PageEvent::Cursor(css) => {
+                let shape = rustkit_viewhost::x11_cursor_shape(css);
+                self.with_x11_view(|surface| surface.set_cursor(shape), |endpoint| endpoint.set_x11_cursor(shape));
+            }
             #[cfg(target_os = "macos")]
             PageEvent::Tooltip(title) => rustkit_viewhost::set_view_tooltip(self.host_view, title.as_deref()),
             PageEvent::ContextMenu { x, y } => self.context_menu.set(Some((*x, *y))),
@@ -2735,17 +2740,26 @@ pub(crate) enum X11Delivery {
 /// character; empty for keys with none (arrows, function keys: the engine names those from the virtual key).
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn chord_key(vk: u32, shift: bool) -> String {
+    // US layout: the character a shifted key types. Other layouts differ; a chord's `e.key` for them is a known gap.
     let c = match vk {
         0x41..=0x5A => {
             let c = (vk as u8) as char;
             if shift { c } else { c.to_ascii_lowercase() }
         }
-        0x30..=0x39 => (vk as u8) as char,
+        0x30..=0x39 => {
+            if shift { b")!@#$%^&*("[(vk - 0x30) as usize] as char } else { (vk as u8) as char }
+        }
+        0xBA => if shift { ':' } else { ';' },
         0xBB => if shift { '+' } else { '=' },
+        0xBC => if shift { '<' } else { ',' },
         0xBD => if shift { '_' } else { '-' },
-        0xBC => ',',
-        0xBE => '.',
-        0xBF => '/',
+        0xBE => if shift { '>' } else { '.' },
+        0xBF => if shift { '?' } else { '/' },
+        0xC0 => if shift { '~' } else { '`' },
+        0xDB => if shift { '{' } else { '[' },
+        0xDC => if shift { '|' } else { '\\' },
+        0xDD => if shift { '}' } else { ']' },
+        0xDE => if shift { '"' } else { '\'' },
         _ => return String::new(),
     };
     c.to_string()
@@ -2820,6 +2834,13 @@ mod x11_delivery_tests {
         let ctrl_shift_f = xi::key_input(0x46, "\u{6}", xi::CONTROL_MASK | xi::SHIFT_MASK, false);
         assert!(matches!(x11_delivery(&ctrl_shift_f), X11Delivery::KeyDown { ref text, .. } if text == "F"));
         assert_eq!(chord_key(0xBD, false), "-");
+        // Shifted digits and punctuation type their shifted character on a US layout.
+        assert_eq!(chord_key(0x31, true), "!");
+        assert_eq!(chord_key(0x39, true), "(");
+        assert_eq!(chord_key(0x30, true), ")");
+        assert_eq!(chord_key(0xBF, true), "?");
+        assert_eq!(chord_key(0xDC, false), "\\");
+        assert_eq!(chord_key(0xDE, true), "\"");
         assert_eq!(chord_key(0x25, false), "", "arrows have no character");
     }
 
