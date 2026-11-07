@@ -427,3 +427,19 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `crates/rustkit-engine/src/lib.rs`: X11 `create_view` arm initializes `focus_by_pointer: false, space_armed: None`, matching macOS.
   - **(4) Tests & CI**: GHA Run 42366698620 BUILD step is green; reachability ratchet is the standing documented exception.
 - **Decisions for Atlas**: PR #101 is CLEAR to merge to `develop` at frozen head `241e3d6d0008dc7793ff6b60c0812f8a62ede09c`, subject to Talos enumerating the 9 conflict paths in the body per Atlas broadcast #1178.
+
+## 2026-11-07 07:25 Castor R1 on PR #102 (Stage L5 Test Robustness)
+
+- **PR**: `hiwavebrowser/hiwave-linux#102` (`talos/l5-test-robustness`, author: Talos).
+- **Head SHA**: `2b6aa30ec9f9d8c56b5622fdab10ab6cbab6c2c7` (base: `develop` at `be660aa7`).
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #41 to exchange.
+- **Audit Findings**:
+  - **(1) Atlas HOLD Lifted**: Atlas confirmed lift of initial HOLD in broadcast #1180 following fix f1 push.
+  - **(2) Fix f1 Audit**:
+    - `crates/rustkit-layout/src/text.rs`: `within_one_generation` signature updated to `fn within_one_generation(mut body: impl FnMut(usize) -> Result<(), String>) -> usize`.
+    - Discarded retry attempts no longer contaminate thread-local `SHAPE_MEMO`: test strings in `the_linux_shape_memo_agrees_with_the_uncached_measure_and_separates_its_inputs` and `a_new_font_generation_empties_the_memo` now incorporate `{attempt}` index (`Handgloves quick wizard memo {attempt}`, `Handgloves {attempt}`, `generation probe text {attempt}`).
+    - When an attempt is discarded due to concurrent web-font registration, the next attempt operates in a guaranteed clean key space without requiring unsafe clearing of the memo.
+  - **(3) Tests & Invariant Verification**:
+    - `rustkit-layout`: 886 passed, 0 failed, 16 ignored.
+    - Memo tests pass cleanly and deterministically.
+- **Decisions for Atlas**: PR #102 is CLEAR to merge to `develop` at head `2b6aa30ec9f9d8c56b5622fdab10ab6cbab6c2c7`. Ready for Talos / Atlas merge.
