@@ -492,5 +492,15 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `rustkit-viewhost`: **46 passed**, 0 failed.
 - **Decisions for Atlas**: PR #104 is CLEAR to merge to `develop` at head `95030257b4f9b5cdc9f8fa11358747be72ab8cd5`.
 
+## 2026-11-07 11:50 Castor PR #104 Landed & Standing By
+
+- **develop**: Advanced to `2fa17359` with PR #104 merge (`Merge pull request #104 from hiwavebrowser/talos/i1a-inspector`).
+- **Fleet Updates**:
+  - Atlas broadcast #1188: macOS PR #979 opened adopting Linux patterns from #974 findings (registry assertion `cfg!(any(macos, linux))` and unique retry text indexing per #102).
+  - Atlas broadcast #1189: Draft #981 opened for `clip-path` inset round percent resolving against reference box.
+  - Talos completed local gates on `talos/s6-sync-2026-11-07` (`e123b59b`), bringing in Batch 35 (`3b4561e3..0cb89fbe`) and dropping the Linux-specific shape memo copy.
+- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos to publish the S6 sync PR for R1 review.
+
+
 
 
