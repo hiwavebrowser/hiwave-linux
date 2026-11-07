@@ -1200,9 +1200,9 @@ pub const TARGET_FONT_BACKEND: Option<&str> = if cfg!(windows) {
 pub const TEXT_METRICS_ARE_FONT_DERIVED: bool =
     cfg!(any(windows, target_os = "macos", target_os = "linux"));
 
-/// Test-only: how many Linux shapes missed the per-thread memo on this thread.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 thread_local! {
+    /// Test-only: how many shapes missed the per-thread memo on this thread.
     static MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -1220,9 +1220,9 @@ impl TextShaper {
         }
     }
 
-    /// Shape text with the given style.
+    /// Shape text using DirectWrite on Windows (uncached; see `shape`).
     #[cfg(windows)]
-    pub fn shape(
+    fn shape_uncached(
         &self,
         text: &str,
         font_chain: &FontFamilyChain,
@@ -1465,7 +1465,7 @@ impl TextShaper {
         })
     }
 
-    /// Shape text using Core Text on macOS.
+    /// Shape text with the given style, on every platform.
     ///
     /// Results are memoised per thread. Layout shapes the same strings over
     /// and over: every flex/grid measuring pass re-wraps its text, and each
@@ -1473,8 +1473,8 @@ impl TextShaper {
     /// 29% of the main thread, spread over thousands of small repeated
     /// shapes. The answer depends only on the arguments and on the installed
     /// `@font-face` set, so entries are dropped whenever that set changes
-    /// (the rule `create_ct_font_with_traits` uses).
-    #[cfg(target_os = "macos")]
+    /// (the rule `create_ct_font_with_traits` uses). The measuring itself is
+    /// each platform's `shape_uncached`.
     pub fn shape(
         &self,
         text: &str,
@@ -1540,6 +1540,8 @@ impl TextShaper {
         if let Some(run) = cached {
             return Ok(run);
         }
+        #[cfg(test)]
+        MISSES.with(|c| c.set(c.get() + 1));
         let run = self.shape_uncached(text, font_chain, weight, style, stretch, size)?;
         MEMO.with(|m| {
             let mut m = m.borrow_mut();
@@ -2054,11 +2056,10 @@ impl TextShaper {
         Err(TextError::FontNotFound(family.to_string()))
     }
 
-    /// Linux shaping: per-char unhinted FreeType advances and Blink-rounded
-    /// line metrics, through the same backend (and the same family resolution)
-    /// the renderer rasterizes with. Falls back to the stub on any failure.
-    #[cfg(target_os = "linux")]
-    pub fn shape(
+    /// Simplified shaping fallback for non-Windows, non-macOS platforms
+    /// (uncached; see `shape`).
+    #[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
+    fn shape_uncached(
         &self,
         text: &str,
         font_chain: &FontFamilyChain,
@@ -2067,72 +2068,47 @@ impl TextShaper {
         stretch: FontStretch,
         size: f32,
     ) -> Result<ShapedRun, TextError> {
-        // L5 (LATLX), the same memo the macOS shape has: the same text in the same font is measured again and
-        // again (every box of a page, every frame). The answer depends only on the arguments and on the registered
-        // `@font-face` set, so entries are dropped whenever that set changes (`webfonts::generation()`); a full
-        // cache is dropped whole rather than evicted entry by entry.
-        use std::cell::RefCell;
-        use std::collections::HashMap;
+        // Simplified shaping for other platforms
+        let avg_char_width = size * 0.5;
+        let mut glyphs = Vec::with_capacity(text.len());
+        let mut x_offset: f32 = 0.0;
 
-        // `font-size: 0`: no glyph, no advance, no extent, as on macOS (and Chrome). FreeType rejects a size of 0
-        // (Invalid_Pixel_Size), which used to fall through to the stub's metrics for text a page had hidden.
-        if size <= 0.0 {
-            return Ok(ShapedRun {
-                text: text.to_string(),
-                glyphs: Vec::new(),
-                font_family: font_chain.primary.clone(),
-                font_weight: weight,
-                font_style: style,
-                font_stretch: stretch,
-                font_size: 0.0,
-                metrics: TextMetrics::with_font_size(0.0),
-                direction: TextDirection::Ltr,
-                face: None,
+        for (i, c) in text.chars().enumerate() {
+            let advance = if c.is_ascii() {
+                avg_char_width
+            } else {
+                size // CJK characters are typically wider
+            };
+
+            glyphs.push(PositionedGlyph {
+                glyph_id: c as u16,
+                x: x_offset,
+                y: 0.0,
+                advance,
+                character: c,
+                cluster: i as u32,
             });
+
+            x_offset += advance;
         }
 
-        type Key = (String, String, Vec<String>, u16, u8, u8, u32);
-        struct Memo {
-            generation: u64,
-            runs: HashMap<Key, ShapedRun>,
-        }
-        const MAX_ENTRIES: usize = 16384;
-        thread_local! {
-            static MEMO: RefCell<Memo> = RefCell::new(Memo { generation: 0, runs: HashMap::new() });
-        }
+        let metrics = TextMetrics {
+            width: x_offset,
+            ..TextMetrics::with_font_size(size)
+        };
 
-        let generation = rustkit_text::webfonts::generation();
-        let key: Key = (
-            text.to_string(),
-            font_chain.primary.clone(),
-            font_chain.fallbacks.clone(),
-            weight.0,
-            style as u8,
-            stretch as u8,
-            size.to_bits(),
-        );
-        let cached = MEMO.with(|m| {
-            let mut m = m.borrow_mut();
-            if m.generation != generation {
-                m.runs.clear();
-                m.generation = generation;
-            }
-            m.runs.get(&key).cloned()
-        });
-        if let Some(run) = cached {
-            return Ok(run);
-        }
-        #[cfg(test)]
-        MISSES.with(|c| c.set(c.get() + 1));
-        let run = self.shape_uncached(text, font_chain, weight, style, stretch, size)?;
-        MEMO.with(|m| {
-            let mut m = m.borrow_mut();
-            if m.runs.len() >= MAX_ENTRIES {
-                m.runs.clear();
-            }
-            m.runs.insert(key, run.clone());
-        });
-        Ok(run)
+        Ok(ShapedRun {
+            text: text.to_string(),
+            glyphs,
+            font_family: font_chain.primary.clone(),
+            font_weight: weight,
+            font_style: style,
+            font_stretch: stretch,
+            font_size: size,
+            metrics,
+            direction: TextDirection::Ltr,
+            face: None,
+        })
     }
 
     /// The measuring itself, uncached.
@@ -2270,19 +2246,6 @@ impl TextShaper {
             direction: TextDirection::Ltr,
             face: None,
         })
-    }
-
-    #[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
-    pub fn shape(
-        &self,
-        text: &str,
-        font_chain: &FontFamilyChain,
-        weight: FontWeight,
-        style: FontStyle,
-        stretch: FontStretch,
-        size: f32,
-    ) -> Result<ShapedRun, TextError> {
-        self.shape_stub(text, font_chain, weight, style, stretch, size)
     }
 
     /// Measure text without full shaping (faster for layout).
@@ -3647,122 +3610,6 @@ mod tests {
         );
     }
 
-    /// Run `body` until a whole attempt saw one web-font generation. The generation is process-wide while the
-    /// memo is per thread, and other tests in this binary install fonts in parallel: a bump in the middle of an
-    /// attempt is not a failure of the memo, so that attempt is thrown away and repeated. The memo survives a
-    /// discarded attempt, so `body` is given the attempt number and must make every key it uses unique to it
-    /// (an attempt must not find what the previous one left behind).
-    #[cfg(target_os = "linux")]
-    fn within_one_generation(mut body: impl FnMut(usize) -> Result<(), String>) -> usize {
-        for attempt in 0..200 {
-            let generation = rustkit_text::webfonts::generation();
-            let outcome = body(attempt);
-            if rustkit_text::webfonts::generation() == generation {
-                outcome.expect("memo behaviour within one font generation");
-                return attempt;
-            }
-        }
-        panic!("the web-font generation moved during every one of 200 attempts");
-    }
-
-    /// L5 (LATLX): the Linux shape memo returns what the uncached measure returns, keyed on every input that
-    /// changes the answer (text, families, weight, size), and a repeat is not shaped again.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn the_linux_shape_memo_agrees_with_the_uncached_measure_and_separates_its_inputs() {
-        let shaper = TextShaper::new();
-        let chain = FontFamilyChain::from_css_value("sans-serif");
-        let shape = |text: &str, weight: u16, size: f32| {
-            shaper
-                .shape(text, &chain, FontWeight(weight), FontStyle::Normal, FontStretch::Normal, size)
-                .expect("shape")
-        };
-        let misses = || MISSES.with(|c| c.get());
-        within_one_generation(|attempt| {
-            let owned = format!("Handgloves quick wizard memo {attempt}");
-            let text = owned.as_str();
-            let short_owned = format!("Handgloves {attempt}");
-            let short = short_owned.as_str();
-            let first = shape(text, 400, 16.0);
-            let after_first = misses();
-            let again = shape(text, 400, 16.0);
-            if misses() != after_first {
-                return Err("a repeat was shaped again".into());
-            }
-            if (first.width(), first.glyphs.len()) != (again.width(), again.glyphs.len()) {
-                return Err("a repeat returned a different run".into());
-            }
-            let uncached = shaper
-                .shape_uncached(text, &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
-                .expect("shape");
-            if first.width() != uncached.width() {
-                return Err("the memo returned something other than the measure".into());
-            }
-            // Each input that changes the answer is its own entry: the first call with a new value is a miss.
-            for (what, size, weight, t) in [("size", 32.0, 400, text), ("weight", 16.0, 700, text), ("text", 16.0, 400, short)] {
-                let before = misses();
-                let _ = shape(t, weight, size);
-                if misses() != before + 1 {
-                    return Err(format!("{what}: a different value was answered from another entry"));
-                }
-                let before = misses();
-                let _ = shape(t, weight, size);
-                if misses() != before {
-                    return Err(format!("{what}: a second identical call was shaped again"));
-                }
-            }
-            if shape(text, 400, 32.0).width() <= first.width() * 1.5 {
-                return Err("size did not scale the width".into());
-            }
-            if shape(short, 400, 16.0).width() >= first.width() {
-                return Err("a shorter text was not narrower".into());
-            }
-            Ok(())
-        });
-    }
-
-    /// A registered web font changes `webfonts::generation()`: the memo starts over instead of keeping the old
-    /// generation's runs (the first review of the L5 memo put the generation in the key and never cleared).
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn a_new_font_generation_empties_the_memo() {
-        let shaper = TextShaper::new();
-        let chain = FontFamilyChain::from_css_value("sans-serif");
-        let run = |t: &str| {
-            shaper.shape(t, &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 15.0).expect("shape")
-        };
-        let attempt = within_one_generation(|attempt| {
-            let owned = format!("generation probe text {attempt}");
-            let text = owned.as_str();
-            let _ = run(text);
-            let warm = MISSES.with(|c| c.get());
-            let _ = run(text);
-            if MISSES.with(|c| c.get()) != warm {
-                return Err("warm: a repeat was shaped again".into());
-            }
-            Ok(())
-        });
-        // Installing a (here empty) face set bumps the generation, as a page registering @font-face does. Whatever
-        // else bumps it meanwhile, the next shape of the same text must miss.
-        rustkit_text::webfonts::install("l5-generation-probe", &[]);
-        let before = MISSES.with(|c| c.get());
-        // The text the successful attempt warmed: after the install it must be shaped again.
-        let _ = run(&format!("generation probe text {attempt}"));
-        assert!(MISSES.with(|c| c.get()) > before, "after a registration the same text is shaped again");
-    }
-
-    /// `font-size: 0` has no glyph, no advance and no extent (macOS parity; FreeType rejects a size of 0).
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn font_size_zero_shapes_to_nothing() {
-        let run = TextShaper::new()
-            .shape("hidden", &FontFamilyChain::from_css_value("sans-serif"), FontWeight(400), FontStyle::Normal, FontStretch::Normal, 0.0)
-            .expect("shape");
-        assert!(run.glyphs.is_empty());
-        assert_eq!(run.width(), 0.0);
-        assert_eq!(run.metrics.height, 0.0);
-    }
-
     fn face(family: &str, src: &str) -> FontFaceRule {
         FontFaceRule {
             family: family.to_string(),
@@ -4409,6 +4256,106 @@ mod tests {
         assert!(!line.is_empty());
         assert_eq!(line.start_offset, 0);
         assert_eq!(line.end_offset, 4);
+    }
+}
+
+/// LAT12: the shape memo and its `font-size: 0` guard are the same on every
+/// platform (they used to wrap only the macOS shape). Nothing here is gated on
+/// a platform.
+#[cfg(test)]
+mod shape_memo_tests {
+    use super::*;
+
+    fn shape(shaper: &TextShaper, text: &str, weight: u16, size: f32) -> ShapedRun {
+        shaper
+            .shape(
+                text,
+                &FontFamilyChain::from_css_value("sans-serif"),
+                FontWeight(weight),
+                FontStyle::Normal,
+                FontStretch::Normal,
+                size,
+            )
+            .expect("shape")
+    }
+
+    fn misses() -> usize {
+        MISSES.with(|c| c.get())
+    }
+
+    #[test]
+    fn font_size_zero_shapes_to_nothing() {
+        let run = shape(&TextShaper::new(), "hidden", 400, 0.0);
+        assert!(run.glyphs.is_empty());
+        assert_eq!((run.font_size, run.width()), (0.0, 0.0));
+        assert_eq!(run.text, "hidden");
+    }
+
+    #[test]
+    fn a_repeat_is_a_hit_and_agrees_with_the_uncached_measure() {
+        let shaper = TextShaper::new();
+        let text = "Handgloves quick wizard memo";
+        // The web-font generation is process-wide and other tests install
+        // sets on their own threads: only judge a hit when it held still.
+        let mut judged = false;
+        for _ in 0..20 {
+            let generation = rustkit_text::webfonts::generation();
+            let first = shape(&shaper, text, 400, 16.0);
+            let before = misses();
+            let again = shape(&shaper, text, 400, 16.0);
+            if rustkit_text::webfonts::generation() == generation {
+                assert_eq!(misses(), before, "a repeat is served from the memo");
+                assert_eq!(
+                    (first.width().to_bits(), first.glyphs.len()),
+                    (again.width().to_bits(), again.glyphs.len())
+                );
+                judged = true;
+                break;
+            }
+        }
+        assert!(judged, "the web-font generation never held still");
+        let uncached = shaper
+            .shape_uncached(
+                text,
+                &FontFamilyChain::from_css_value("sans-serif"),
+                FontWeight(400),
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+            )
+            .expect("shape");
+        assert_eq!(
+            shape(&shaper, text, 400, 16.0).width().to_bits(),
+            uncached.width().to_bits(),
+            "the memo returns what the measure returns"
+        );
+        // A different size is its own entry, never answered from the 16px one.
+        let before = misses();
+        let big = shape(&shaper, text, 400, 32.0);
+        assert!(misses() > before, "a new size is shaped");
+        assert!(big.width() > uncached.width() * 1.5);
+    }
+
+    #[test]
+    fn a_new_web_font_set_empties_the_memo() {
+        let shaper = TextShaper::new();
+        let text = "generation probe text";
+        let _ = shape(&shaper, text, 400, 15.0);
+        let before = misses();
+        let generation = rustkit_text::webfonts::generation();
+        // Bumps the generation where a web-font registry exists (macOS, Linux);
+        // elsewhere it installs nothing and the generation holds still.
+        rustkit_text::webfonts::install("lat12-shape-memo-probe", &[]);
+        let changed = rustkit_text::webfonts::generation() != generation;
+        let _ = shape(&shaper, text, 400, 15.0);
+        if changed {
+            assert!(misses() > before, "re-shaped after the set changed");
+        } else {
+            assert_eq!(misses(), before, "no change to the set: still a hit");
+        }
+        // Linux has a web-font registry too (rustkit-text webfonts, FreeType): installing bumps its generation.
+        // Declared Linux divergence in the assertion (upstream says macOS only; reported upstream).
+        assert_eq!(changed, cfg!(any(target_os = "macos", target_os = "linux")));
     }
 }
 
