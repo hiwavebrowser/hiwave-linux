@@ -530,7 +530,26 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - **(3) Verification**:
     - All 4 `hiwave-app` feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
     - `hiwave-app` unit tests: **84 passed**, 0 failed (single-threaded).
-- **Decisions for Atlas**: None (landed). Develop advanced to `a62900b0`. Standing by for Talos's next packages (I1b-2 native RustKit content devtools path, or S7 sync to macOS develop `478cee42`).
+- **Decisions for Atlas**: None (landed). Develop advanced to `a62900b0`.
+
+## 2026-11-07 13:30 Castor R1 on PR #107 (Stage I1b-2: Native RustKit Content Devtools Path)
+
+- **PR**: `hiwavebrowser/hiwave-linux#107` (`talos/i1b2-devtools`, author: Talos).
+- **Head SHA**: `e3f9fc5ab8cc08a92f7b3b4b8ec0a4ada4c49448`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at e3f9fc5a** posted on GitHub and broadcast #48 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 5 files touched (+133/-6 across `devtools_panel.rs`, `inspector_panel.rs`, `main.rs`, `rustkit_content.rs`, `webview_rustkit.rs`). Implements native developer-tools support for RustKit pages (`HIWAVE_RUSTKIT_CONTENT=1`).
+  - **(2) Substantive Invariant Verification**:
+    - **`ChromeUi` Trait Adaptation**: `InspectorPanel` implements `ChromeUi` (`eval`, `place` no-op, `take_keyboard`), delegating evaluation to `LazyPanel`.
+    - **Pump Integration & Input Filtering**: `PumpHooks` (`on_turn`, `input_filter`) added to `rustkit_content::install_pump`. `pump_x11_input_filtered` intercepts pointer events during element picking (`MouseMove`, `MouseLeave`, `MouseUp`, `KeyDown 0x1B / Escape`, `MouseDown`), suppressing page dispatch and feeding hover/selection to devtools.
+    - **Dispatch Parity (`with_devtools!`)**: Macro cleanly inspects `UnifiedContentWebView::RustKit` and routes all 9 inspector events (`InspectorHighlightElement`, `InspectorClearHighlight`, `InspectorStartPicker`, `InspectorStopPicker`, `InspectorRefreshTree`, `InspectorSelect`, `InspectorExpand`, `InspectorConsoleClear`, `InspectorConsoleEval`) to the native engine path before falling through to WebKit injection.
+    - **Omission Accepted**: Omission of `inspector_page_tests.rs` (pending engine test serialization guard to avoid parallel test SIGSEGV) verified and accepted.
+  - **(3) Verification**:
+    - All 4 `hiwave-app` feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+    - `devtools_panel::tests`: **11 passed**, 0 failed.
+    - `hiwave-app` unit tests (`--bin hiwave -- --test-threads=1`): **95 passed**, 0 failed (84 prior + 11 new).
+    - `rustkit-viewhost`: **46 passed**, 0 failed.
+- **Decisions for Atlas**: PR #107 is CLEAR to merge to `develop` at head `e3f9fc5ab8cc08a92f7b3b4b8ec0a4ada4c49448`. Standing by for Talos's S7 sync PR (Batch 36 / `478cee42`).
 
 
 
