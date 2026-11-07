@@ -1626,8 +1626,34 @@ impl RustKitView {
     fn set_region(&self, region: Vec<rustkit_viewhost::RegionRect>) {
         #[cfg(target_os = "macos")]
         rustkit_viewhost::set_raw_view_region(self.host_view, Some(region));
-        #[cfg(not(target_os = "macos"))]
+        // X11: the same region as an XShape on the view's window (S2).
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.with_x11_view(|surface| surface.set_region(Some(&region)), |endpoint| endpoint.set_x11_region(Some(&region)));
+        #[cfg(not(any(target_os = "macos", all(unix, not(target_os = "macos")))))]
         let _ = region;
+    }
+
+    /// Run `on_surface` when the page is on the content thread (this thread owns the surface) or `on_endpoint`
+    /// when it is on this thread (the endpoint's engine owns the viewhost). A busy endpoint skips the call.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn with_x11_view(
+        &self,
+        on_surface: impl FnOnce(&WindowSurface),
+        on_endpoint: impl FnOnce(&PageEndpoint),
+    ) {
+        if let Some(surface) = &self.surface {
+            on_surface(&surface.borrow());
+        } else if let Some(endpoint) = &self.endpoint {
+            if let Ok(endpoint) = endpoint.try_borrow() {
+                on_endpoint(&endpoint);
+            }
+        }
+    }
+
+    /// Raise this view's window above its siblings (S2: the RustKit chrome stays over the page).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn raise(&self) {
+        self.with_x11_view(|surface| surface.raise(), |endpoint| endpoint.raise_x11_view());
     }
 }
 

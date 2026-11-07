@@ -33,6 +33,45 @@ use x11::xlib::{
 use std::ffi::CString;
 use std::ptr;
 
+
+// XShape (libXext). The `x11` crate has no binding for it, so the three calls the region route needs are
+// declared here; `libXext` is a dependency of every X11 desktop.
+#[link(name = "Xext")]
+extern "C" {
+    fn XShapeCombineRectangles(
+        display: *mut Display,
+        dest: Window,
+        dest_kind: i32,
+        x_off: i32,
+        y_off: i32,
+        rectangles: *mut x11::xlib::XRectangle,
+        n_rects: i32,
+        op: i32,
+        ordering: i32,
+    );
+    fn XShapeCombineMask(display: *mut Display, dest: Window, dest_kind: i32, x_off: i32, y_off: i32, src: x11::xlib::Pixmap, op: i32);
+}
+const SHAPE_BOUNDING: i32 = 0;
+const SHAPE_INPUT: i32 = 2;
+const SHAPE_SET: i32 = 0;
+const SHAPE_UNSORTED: i32 = 0;
+
+/// View-local region rectangles (floating point, top-left) as X rectangles: rounded outward to whole pixels,
+/// clamped to what the protocol can carry, empty ones dropped. Pure.
+pub fn region_to_xrects(region: &[crate::RegionRect]) -> Vec<(i16, i16, u16, u16)> {
+    region
+        .iter()
+        .filter_map(|r| {
+            let x0 = r.x.floor().clamp(i16::MIN as f64, i16::MAX as f64);
+            let y0 = r.y.floor().clamp(i16::MIN as f64, i16::MAX as f64);
+            let x1 = (r.x + r.width).ceil().clamp(i16::MIN as f64, i16::MAX as f64);
+            let y1 = (r.y + r.height).ceil().clamp(i16::MIN as f64, i16::MAX as f64);
+            let (w, h) = ((x1 - x0).max(0.0), (y1 - y0).max(0.0));
+            (w > 0.0 && h > 0.0).then_some((x0 as i16, y0 as i16, w as u16, h as u16))
+        })
+        .collect()
+}
+
 /// View state for Linux X11.
 struct X11ViewState {
     id: ViewId,
@@ -236,6 +275,39 @@ impl X11ViewHost {
         Ok(())
     }
 
+    /// Show and hit-test a view only inside `region` (view-local rectangles); `None` restores the whole window.
+    /// The X11 form of the macOS region route: the view's bounding AND input shapes are set, so what the region
+    /// leaves out shows the views beneath it and passes the pointer through to them.
+    pub fn set_region(&self, view_id: ViewId, region: Option<&[crate::RegionRect]>) -> Result<(), ViewHostError> {
+        let window = self.get_x11_window(view_id)?;
+        unsafe {
+            for kind in [SHAPE_BOUNDING, SHAPE_INPUT] {
+                match region {
+                    Some(region) => {
+                        let mut rects: Vec<x11::xlib::XRectangle> = region_to_xrects(region)
+                            .into_iter()
+                            .map(|(x, y, width, height)| x11::xlib::XRectangle { x, y, width, height })
+                            .collect();
+                        XShapeCombineRectangles(self.display, window, kind, 0, 0, rects.as_mut_ptr(), rects.len() as i32, SHAPE_SET, SHAPE_UNSORTED);
+                    }
+                    None => XShapeCombineMask(self.display, window, kind, 0, 0, 0, SHAPE_SET),
+                }
+            }
+            XFlush(self.display);
+        }
+        Ok(())
+    }
+
+    /// Raise a view's window above its siblings.
+    pub fn raise_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
+        let window = self.get_x11_window(view_id)?;
+        unsafe {
+            x11::xlib::XRaiseWindow(self.display, window);
+            XFlush(self.display);
+        }
+        Ok(())
+    }
+
     /// Resize a view.
     pub fn resize_view(&self, view_id: ViewId, bounds: Bounds) -> Result<(), ViewHostError> {
         let views = self.views.read().unwrap();
@@ -376,3 +448,28 @@ mod tests {
     // These are integration tests that should be run manually
 }
 
+
+#[cfg(test)]
+mod region_tests {
+    use super::region_to_xrects;
+    use crate::RegionRect;
+
+    #[test]
+    fn rectangles_round_outward_and_empty_ones_are_dropped() {
+        let r = region_to_xrects(&[
+            RegionRect::new(0.4, 10.2, 99.2, 20.1),
+            RegionRect::new(5.0, 5.0, 0.0, 10.0),
+            RegionRect::new(5.0, 5.0, 10.0, 0.0),
+        ]);
+        assert_eq!(r, vec![(0, 10, 100, 21)]);
+    }
+
+    #[test]
+    fn huge_and_negative_rectangles_are_clamped_to_what_x11_can_carry() {
+        let r = region_to_xrects(&[RegionRect::new(-40000.0, -5.0, 200000.0, 100.0)]);
+        assert_eq!(r.len(), 1);
+        let (x, y, w, _h) = r[0];
+        assert_eq!((x, y), (i16::MIN, -5));
+        assert!(w as i64 <= u16::MAX as i64);
+    }
+}
