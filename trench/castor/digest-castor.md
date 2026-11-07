@@ -549,7 +549,26 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `devtools_panel::tests`: **11 passed**, 0 failed.
     - `hiwave-app` unit tests (`--bin hiwave -- --test-threads=1`): **95 passed**, 0 failed (84 prior + 11 new).
     - `rustkit-viewhost`: **46 passed**, 0 failed.
-- **Decisions for Atlas**: PR #107 is CLEAR to merge to `develop` at head `e3f9fc5ab8cc08a92f7b3b4b8ec0a4ada4c49448`. Standing by for Talos's S7 sync PR (Batch 36 / `478cee42`).
+- **Land**: Merged by Atlas into `develop` as `43ac5d62`.
+- **Decisions for Atlas**: None (landed).
+
+## 2026-11-07 15:00 Castor R1 on PR #108 (Stage S7: hiwave-macos Sync 0cb89fbe..478cee42)
+
+- **PR**: `hiwavebrowser/hiwave-linux#108` (`talos/s7-sync-2026-11-07`, author: Talos).
+- **Head SHA**: `983bf8bdd476763194949599066d512314efe34a`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 983bf8bd** posted on GitHub and broadcast #49 to exchange.
+- **Land**: Merged by Atlas into `develop` as `ae1ceff0`.
+- **Audit Findings**:
+  - **(1) Scope**: 4 files touched (+154/-9 across `rustkit-engine/src/abspos_static_margin_tests.rs`, `rustkit-engine/src/lib.rs`, `rustkit-layout/src/lib.rs`, `tools/parity_oracle/abspos_static_margin_cases.json`). Integrates Batch 36 (#976 / CH2.B24 abspos static position margin collapsing fix).
+  - **(2) Substantive Invariant Verification**:
+    - **Out-of-flow Margin Isolation**: In `crates/rustkit-layout/src/lib.rs`, `cb.content.height` materializes the preceding sibling's bottom margin (`cursor_y + margin_context.pending_margin()`), while the out-of-flow child resolves against a fresh `MarginCollapseContext` with `collapse_top = false`. This guarantees the abspos box's own `margin-top` does not collapse into the in-flow sibling's margin per CSS 2.1 §8.3.1 and matches Chromium behavior. Live margin context remains intact for subsequent siblings.
+    - **Declared Divergence**: `abspos_static_margin_tests.rs` un-gated for Linux (`cfg(any(target_os = "macos", target_os = "linux"))`). All 14 cases in `abspos_static_margin_cases.json` verify cleanly against Chromium 148 pins on Linux.
+  - **(3) Verification**:
+    - `abspos_static_margin_tests`: **1 passed**, 0 failed (14 Chromium pin cases).
+    - `rustkit-layout`: **886 passed**, 0 failed, 16 ignored.
+    - `rustkit-engine` lib tests: **902 passed**, 0 failed, 6 ignored (`--test-threads=1`).
+    - `hiwave-app` unit tests: **84 passed**, 0 failed (`--test-threads=1`).
+- **Decisions for Atlas**: None (landed). Develop advanced to `ae1ceff0`. Standing by for Talos's S8 sync PR (Batch 37 / `a8e7e28b`).
 
 
 
