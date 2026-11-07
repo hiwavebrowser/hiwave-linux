@@ -3649,15 +3649,17 @@ mod tests {
 
     /// Run `body` until a whole attempt saw one web-font generation. The generation is process-wide while the
     /// memo is per thread, and other tests in this binary install fonts in parallel: a bump in the middle of an
-    /// attempt is not a failure of the memo, so that attempt is thrown away and repeated.
+    /// attempt is not a failure of the memo, so that attempt is thrown away and repeated. The memo survives a
+    /// discarded attempt, so `body` is given the attempt number and must make every key it uses unique to it
+    /// (an attempt must not find what the previous one left behind).
     #[cfg(target_os = "linux")]
-    fn within_one_generation(mut body: impl FnMut() -> Result<(), String>) {
-        for _ in 0..200 {
+    fn within_one_generation(mut body: impl FnMut(usize) -> Result<(), String>) -> usize {
+        for attempt in 0..200 {
             let generation = rustkit_text::webfonts::generation();
-            let outcome = body();
+            let outcome = body(attempt);
             if rustkit_text::webfonts::generation() == generation {
                 outcome.expect("memo behaviour within one font generation");
-                return;
+                return attempt;
             }
         }
         panic!("the web-font generation moved during every one of 200 attempts");
@@ -3676,8 +3678,11 @@ mod tests {
                 .expect("shape")
         };
         let misses = || MISSES.with(|c| c.get());
-        let text = "Handgloves quick wizard memo";
-        within_one_generation(|| {
+        within_one_generation(|attempt| {
+            let owned = format!("Handgloves quick wizard memo {attempt}");
+            let text = owned.as_str();
+            let short_owned = format!("Handgloves {attempt}");
+            let short = short_owned.as_str();
             let first = shape(text, 400, 16.0);
             let after_first = misses();
             let again = shape(text, 400, 16.0);
@@ -3694,7 +3699,7 @@ mod tests {
                 return Err("the memo returned something other than the measure".into());
             }
             // Each input that changes the answer is its own entry: the first call with a new value is a miss.
-            for (what, size, weight, t) in [("size", 32.0, 400, text), ("weight", 16.0, 700, text), ("text", 16.0, 400, "Handgloves")] {
+            for (what, size, weight, t) in [("size", 32.0, 400, text), ("weight", 16.0, 700, text), ("text", 16.0, 400, short)] {
                 let before = misses();
                 let _ = shape(t, weight, size);
                 if misses() != before + 1 {
@@ -3709,7 +3714,7 @@ mod tests {
             if shape(text, 400, 32.0).width() <= first.width() * 1.5 {
                 return Err("size did not scale the width".into());
             }
-            if shape("Handgloves", 400, 16.0).width() >= first.width() {
+            if shape(short, 400, 16.0).width() >= first.width() {
                 return Err("a shorter text was not narrower".into());
             }
             Ok(())
@@ -3726,8 +3731,9 @@ mod tests {
         let run = |t: &str| {
             shaper.shape(t, &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 15.0).expect("shape")
         };
-        let text = "generation probe text";
-        within_one_generation(|| {
+        let attempt = within_one_generation(|attempt| {
+            let owned = format!("generation probe text {attempt}");
+            let text = owned.as_str();
             let _ = run(text);
             let warm = MISSES.with(|c| c.get());
             let _ = run(text);
@@ -3740,7 +3746,8 @@ mod tests {
         // else bumps it meanwhile, the next shape of the same text must miss.
         rustkit_text::webfonts::install("l5-generation-probe", &[]);
         let before = MISSES.with(|c| c.get());
-        let _ = run(text);
+        // The text the successful attempt warmed: after the install it must be shaped again.
+        let _ = run(&format!("generation probe text {attempt}"));
         assert!(MISSES.with(|c| c.get()) > before, "after a registration the same text is shaped again");
     }
 
