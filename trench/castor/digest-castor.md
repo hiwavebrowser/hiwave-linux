@@ -352,3 +352,30 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - **(4) Tests & CI**: 79/79 `hiwave-app` tests pass; 46/46 `rustkit-viewhost` tests pass (added `css_cursors_map_to_x11_font_cursors`). All 4 feature builds pass. GHA Run 42351544264 build step green, reachability ratchet is the sole failure (standing exception since #85).
 - **Decisions for Atlas**: PR #99 is CLEAR to merge to `develop`. Ready for live Atlas / Pete merge.
 
+
+## 2026-11-07 04:55 Castor R1 on PR #100 (Stage L5: LATLX Text Shape Cache)
+
+- **PR**: `hiwavebrowser/hiwave-linux#100` (`talos/l5-shape-cache`, author: Talos).
+- **Head SHA**: `b2e922cbabd9a212ba38badb14f19ce131c5e831` (off develop). Base: `develop`.
+- **Verdict**: **R1 HOLD** posted on GitHub and broadcast #38 to exchange.
+- **Audit Findings**:
+  - **(1) Parity Framing**: Confirmed macOS `crates/rustkit-layout/src/text.rs:1500-1546` implements the identical per-thread shape memo (`MAX_ENTRIES = 16384`, drop-whole, clone on hit, no borrow across uncached call). #100 is reference parity rather than a Linux-only divergence. PR description owed an update to cite reference parity.
+  - **(2) Substance s1 (HOLD)**:
+    - macOS memo architecture stores `generation: u64` inside `struct Memo { generation: u64, runs: HashMap<Key, ShapedRun> }` and clears runs on entry if `m.generation != generation`.
+    - `Key` in #100 includes `generation` as a tuple field and never clears when `generation` increments, retaining dead entries until the 16384 cap.
+    - HOLD for Talos to align with the macOS structure: `generation` out of `Key`, and compare-and-clear in `MEMO.with`.
+  - **(3) Substance s2 (HOLD)**:
+    - FreeType investigation: `LinuxTextBackend::get_face` calls `face.set_char_size((size * 64.0) as isize, ...)` which fails in FreeType with `Invalid_Pixel_Size` for `size <= 0.0`.
+    - This causes `shape_uncached` to fall back to `shape_stub`, allocating non-empty glyph vectors and caching them in the memo.
+    - HOLD for Talos to add the macOS early guard `if size <= 0.0 { ... }` before the memo lookup, returning an empty run with 0.0 metrics.
+  - **(4) Code Audits**:
+    - `(k1)`: `LinuxTextBackend::resolve_family` is not site-scoped. Webfonts are partitioned per `TopLevelSite` during download/parsing in `FontFaceLoader`, but registered in `rustkit_text::webfonts` with process-level `generation` bump. Shape memo key on macOS and Linux both omit site (exact parity).
+    - `(k2)`: Confirmed no transient Err arms in `advance_widths`. All error paths are deterministic (missing font in fontconfig, FreeType face construction failure, FreeType char load failure). Caching `shape_stub` on failure is deterministic and consistent.
+    - Key coverage: `(text, families, weight, style, stretch, size)` covers all inputs of `shape_uncached`.
+  - **(5) Tests & CI**:
+    - LAT2 spinner test `a_spinner_on_a_500_box_page_never_relays_out_and_is_cheap` unignored and passes in 3.60s (closes row L4/LATLX).
+    - `the_linux_shape_cache_agrees_with_the_uncached_measure_and_separates_its_inputs` passes.
+    - `rustkit-layout` unit tests: 875 passed, 0 failed, 16 ignored.
+    - Allowlisted engine failures: Menlo caret (`text_control_select_tests::a_click_places_the_caret_at_the_click_point`) and plain-inline transform (`transform_rect_tests::a_transform_does_not_apply_to_a_plain_inline`) match `linux_known_fail.txt`.
+    - CI: Linux Metrics (Run 42359859584) BUILD step is green; reachability ratchet is the standing documented exception.
+- **Decisions for Atlas**: PR #100 on HOLD pending Talos delta addressing (s1) and (s2) plus PR description update.
