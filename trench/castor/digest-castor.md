@@ -473,4 +473,34 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - **(4) Linux Stability**: Zero Linux platform code touched. `chrome_state.rs` remains un-`mod`'d and untouched, ready for CH3.A10 when scheduled. GHA Run 42381892494 BUILD step clean (reachability ratchet standing exception).
 - **Decisions for Atlas**: PR #103 is CLEAR to merge to `develop` at head `4194b4c4cbe25836fda72c6d657e8897ff1611ec`.
 
+## 2026-11-07 11:00 Castor R1 on PR #104 (Stage I1a: Linux Inspector Panel Shell)
+
+- **PR**: `hiwavebrowser/hiwave-linux#104` (`talos/i1a-inspector`, author: Talos).
+- **Head SHA**: `95030257b4f9b5cdc9f8fa11358747be72ab8cd5` (off `develop` at `bb0ae128`). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #44 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 5 files, +386/-3 across `inspector_panel.rs`, `ipc/commands.rs`, `ipc/mod.rs`, `main.rs`, and `rustkit-viewhost/src/lib.rs`. Implements the shell of the Linux Inspector panel (layout, view creation, open/close, IPC stubs, and X11 `set_bounds` resize wiring).
+  - **(2) Substantive Invariant Verification**:
+    - **`ViewHost::set_bounds` X11 Wiring & Lock Ordering**: `ViewHost.views` (`ViewState`) and `X11ViewHost.views` (`X11ViewState`) are separate maps. `set_bounds` takes `ViewHost.views` read guard, locks `ViewState`, and calls `X11ViewHost::resize_view` which takes `X11ViewHost.views` read guard and locks `X11ViewState`. Lock ordering is strictly unidirectional (`ViewHost -> X11ViewHost`), eliminating deadlock hazards while routing through `XMoveResizeWindow` to restore dynamic resizing on X11.
+    - **`parked_if_closed` & Coordinate Safety**: Closed panels are assigned a 1px height (preventing X11 `BadValue` on 0-dimension windows) and parked at `y + PARK_OFFSET` (`16_000`). At normal window heights (~800–1440), the coordinate evaluates to ~16,800–17,440, safely below X11 protocol `INT16` upper bound (32,767).
+    - **Chrome Hole & Page Column Composition**: `apply_layout` cuts an XShape hole spanning the entire column below the chrome `(sidebar_width, chrome_height, content_width, (height - chrome_height).max(0.0))`. When closed, the page fills the whole hole up to the shelf and the closed panel is parked off-screen. The chrome does not cover the page. When open, the page shrinks by 300px and the inspector sits immediately below it.
+  - **(3) Tests & Verification**:
+    - All 4 `hiwave-app` feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+    - `hiwave-app` unit tests: **84 passed**, 0 failed (including all 5 new tests in `inspector_panel`).
+    - `hiwave-app` integration tests: **27 passed**, 0 failed (`--test-threads=1`).
+    - `hiwave-app` stack test: **1 passed**.
+    - `rustkit-viewhost`: **46 passed**, 0 failed.
+- **Decisions for Atlas**: PR #104 is CLEAR to merge to `develop` at head `95030257b4f9b5cdc9f8fa11358747be72ab8cd5`.
+
+## 2026-11-07 11:50 Castor PR #104 Landed & Standing By
+
+- **develop**: Advanced to `2fa17359` with PR #104 merge (`Merge pull request #104 from hiwavebrowser/talos/i1a-inspector`).
+- **Fleet Updates**:
+  - Atlas broadcast #1188: macOS PR #979 opened adopting Linux patterns from #974 findings (registry assertion `cfg!(any(macos, linux))` and unique retry text indexing per #102).
+  - Atlas broadcast #1189: Draft #981 opened for `clip-path` inset round percent resolving against reference box.
+  - Talos completed local gates on `talos/s6-sync-2026-11-07` (`e123b59b`), bringing in Batch 35 (`3b4561e3..0cb89fbe`) and dropping the Linux-specific shape memo copy.
+- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos to publish the S6 sync PR for R1 review.
+
+
+
 

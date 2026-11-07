@@ -234,6 +234,30 @@ pub fn handle_message(state: &Arc<Mutex<AppState>>, message: IpcMessage) -> IpcR
         }
 
         // Tab audio state (handled via main.rs)
+        // Inspector (DevTools) - handled via main.rs
+        IpcMessage::OpenInspector => IpcResponse::success(serde_json::json!({ "action": "open_inspector" })),
+        IpcMessage::CloseInspector => IpcResponse::success(serde_json::json!({ "action": "close_inspector" })),
+        IpcMessage::ToggleInspector => IpcResponse::success(serde_json::json!({ "action": "toggle_inspector" })),
+        IpcMessage::InspectorReady => IpcResponse::success(serde_json::json!({ "action": "inspector_ready" })),
+        IpcMessage::InspectorElementPicked { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_element_picked" })),
+        IpcMessage::InspectorPickerStopped => IpcResponse::success(serde_json::json!({ "action": "inspector_picker_stopped" })),
+        IpcMessage::InspectorGetDomTree => IpcResponse::success(serde_json::json!({ "action": "inspector_get_dom_tree" })),
+        IpcMessage::InspectorGetElementStyles { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_get_element_styles" })),
+        IpcMessage::InspectorHighlightElement { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_highlight_element" })),
+        IpcMessage::InspectorClearHighlight => IpcResponse::success(serde_json::json!({ "action": "inspector_clear_highlight" })),
+        IpcMessage::InspectorStartPicker => IpcResponse::success(serde_json::json!({ "action": "inspector_start_picker" })),
+        IpcMessage::InspectorStopPicker => IpcResponse::success(serde_json::json!({ "action": "inspector_stop_picker" })),
+        IpcMessage::InspectorScrollToElement { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_scroll_to_element" })),
+        IpcMessage::InspectElement { .. } => IpcResponse::success(serde_json::json!({ "action": "inspect_element" })),
+        IpcMessage::InspectorDomTreeResult { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_dom_tree_result" })),
+        IpcMessage::InspectorElementStylesResult { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_element_styles_result" })),
+        IpcMessage::InspectorConsoleMessage { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_console_message" })),
+        IpcMessage::InspectorConsoleClear => IpcResponse::success(serde_json::json!({ "action": "inspector_console_clear" })),
+        IpcMessage::InspectorConsoleEval { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_console_eval" })),
+        IpcMessage::InspectorRefresh => IpcResponse::success(serde_json::json!({ "action": "inspector_refresh" })),
+        IpcMessage::InspectorSelectElement { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_select_element" })),
+        IpcMessage::InspectorExpandNode { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_expand_node" })),
+        IpcMessage::InspectorClose => IpcResponse::success(serde_json::json!({ "action": "inspector_close" })),
         IpcMessage::TabAudioStateChanged { .. } => {
             IpcResponse::success(serde_json::json!({ "action": "audio_state_changed" }))
         }

@@ -932,6 +932,14 @@ impl ViewHost {
             }
         }
 
+        // X11: until now this function only RECORDED the bounds (it had a Windows and a macOS arm and no X11 one), so
+        // a RustKit view's window kept its first size and place whatever the app asked: a resized browser window
+        // left the chrome and the page at their old size, and a panel could not move or hide.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(host) = self.x11.as_ref() {
+            let _ = host.resize_view(view_id, bounds);
+        }
+
         trace!(?view_id, ?bounds, "Bounds updated");
         Ok(())
     }
