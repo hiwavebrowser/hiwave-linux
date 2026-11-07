@@ -3113,6 +3113,22 @@ impl Engine {
     }
 
 // ═══ viewhost ═══
+    /// Linux (S2): show view `id` only inside `region` (view-local), or everywhere with `None`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn set_view_region(&self, id: EngineViewId, region: Option<&[rustkit_viewhost::RegionRect]>) {
+        if let Some(view) = self.views.get(&id) {
+            let _ = self.viewhost().set_view_region(view.viewhost_id, region);
+        }
+    }
+
+    /// Linux (S2): raise view `id` above its sibling windows.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn raise_view(&self, id: EngineViewId) {
+        if let Some(view) = self.views.get(&id) {
+            let _ = self.viewhost().raise_view(view.viewhost_id);
+        }
+    }
+
     /// Linux (S1c): read the X11 events waiting on the viewhost's connection and return the input recorded for
     /// view `id`, in arrival order. Window thread. Empty for a view that does not exist.
     #[cfg(all(unix, not(target_os = "macos")))]

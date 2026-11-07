@@ -18,6 +18,8 @@ use muda::Menu;
 #[cfg(not(feature = "native-linux"))]
 use platform::get_platform_manager;
 #[cfg(not(feature = "native-linux"))]
+use std::rc::Rc;
+#[cfg(not(feature = "native-linux"))]
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 #[cfg(not(feature = "native-linux"))]
 use tao::{
@@ -73,6 +75,8 @@ mod webview;
 mod webview_rustkit;
 #[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "native-linux")))]
 mod rustkit_content;
+#[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "native-linux")))]
+mod rustkit_chrome;
 #[cfg(all(target_os = "linux", feature = "rustkit"))]
 use hiwave_shield_intercept as shield_adapter;
 #[cfg(not(feature = "native-linux"))]
@@ -397,7 +401,7 @@ fn layout_origin() -> (f64, f64) {
 #[allow(clippy::too_many_arguments)]
 fn apply_layout(
     window: &tao::window::Window,
-    chrome: &impl IWebView,
+    chrome: &chrome_ui::ChromeView,
     content: &impl IWebView,
     shelf: Option<&impl IWebView>,
     chrome_height: f64,
@@ -434,6 +438,8 @@ fn apply_layout(
     };
 
     chrome.set_bounds(chrome_rect);
+    // The RustKit chrome shows the window less the page column (the hole); the WebKit chrome ignores it.
+    chrome_ui::ChromeUi::compose(chrome, width, chrome_height_rect, (sidebar_width, chrome_height, content_width, content_height));
     content.set_bounds(content_rect);
 
     if let Some(shelf) = shelf {
@@ -1049,17 +1055,10 @@ fn main() {
     let settings_proxy_for_handler = proxy.clone();
     let chrome_ready_flag = Arc::new(AtomicBool::new(false));
 
-    // WRY (WebView2) Chrome WebView creation
-    let chrome_webview = WebViewBuilder::new()
-        .with_html(CHROME_HTML)
-        .with_devtools(cfg!(debug_assertions))
-        .with_clipboard(true)
-        .with_focused(true)
-        .with_initialization_script(JS_BRIDGE)
-        .with_bounds(chrome_bounds)
-        .with_ipc_handler(move |message| {
-            let body = message.body();
-            log_ipc("Chrome IPC", &body);
+    // The chrome's IPC handler: one closure, called by the WebKit chrome's handler or by the RustKit chrome's
+    // pump (S2).
+    let chrome_ipc: Rc<dyn Fn(&str)> = Rc::new(move |body: &str| {
+        log_ipc("Chrome IPC", body);
 
             match serde_json::from_str::<IpcMessage>(body) {
                 Ok(msg) => match &msg {
@@ -1472,9 +1471,33 @@ fn main() {
                     error!("Failed to parse IPC: {}", e);
                 }
             }
+    });
+
+    // HIWAVE_RUSTKIT_CHROME=1 on an X11 window: the chrome is a RustKit view, built after the page below so it
+    // stacks above it. Otherwise (the default) the WebKit chrome below.
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    let rustkit_chrome_on = matches!(rustkit_chrome::choose(&window), rustkit_content::Engagement::On);
+    #[cfg(not(all(target_os = "linux", feature = "rustkit")))]
+    let rustkit_chrome_on = false;
+
+    // WRY (WebView2) Chrome WebView creation
+    let chrome_webview_wry: Option<wry::WebView> = if rustkit_chrome_on {
+        None
+    } else {
+        Some(WebViewBuilder::new()
+        .with_html(CHROME_HTML)
+        .with_devtools(cfg!(debug_assertions))
+        .with_clipboard(true)
+        .with_focused(true)
+        .with_initialization_script(JS_BRIDGE)
+        .with_bounds(chrome_bounds)
+        .with_ipc_handler({
+            let handler = Rc::clone(&chrome_ipc);
+            move |message| handler(message.body())
         })
         .build_gtk(&gtk_fixed)
-        .expect("Failed to create Chrome WebView");
+        .expect("Failed to create Chrome WebView"))
+    };
 
     // Chrome always uses WRY (WebView2)
 
@@ -2092,17 +2115,45 @@ fn main() {
         .unwrap_or(false)
     {
         info!("Debug mode enabled via HIWAVE_DEBUG=1");
-        let _ =
-            chrome_webview.evaluate_script("window.enableDebugMode && window.enableDebugMode();");
+        if let Some(ref chrome) = chrome_webview_wry {
+            let _ = chrome.evaluate_script("window.enableDebugMode && window.enableDebugMode();");
+        }
     }
 
     // Store WebViews in Arcs for event loop access
     // The chrome and the shelf behind the ChromeUi seam (S1b): WebKit is the only backend, so every call goes
     // where it went before.
-    let chrome_webview: chrome_ui::ChromeView = chrome_ui::ChromeView::WebKit(Arc::new(chrome_webview));
+    // The RustKit chrome is built here, after the page and the shelf, so its window stacks above them.
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    let rustkit_chrome_view: Option<Arc<webview_rustkit::RustKitView>> = if rustkit_chrome_on {
+        let at = chrome_bounds.position.to_logical::<f64>(1.0);
+        let size = chrome_bounds.size.to_logical::<f64>(1.0);
+        let bounds = rustkit_viewhost::Bounds::new(at.x as i32, at.y as i32, size.width as u32, size.height as u32);
+        let document = rustkit_chrome::html_with_bridge(CHROME_HTML, JS_BRIDGE, rustkit_chrome::OUTSIDE_CLICK);
+        Some(rustkit_chrome::create(&window, bounds, &document).expect("Failed to create the RustKit chrome (unset HIWAVE_RUSTKIT_CHROME for the WebKit chrome)"))
+    } else {
+        None
+    };
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    let chrome_webview: chrome_ui::ChromeView = match (chrome_webview_wry, rustkit_chrome_view) {
+        (Some(w), _) => chrome_ui::ChromeView::WebKit(Arc::new(w)),
+        (None, Some(v)) => chrome_ui::ChromeView::RustKit(v),
+        _ => unreachable!("the chrome is WebKit unless the RustKit chrome was built"),
+    };
+    #[cfg(not(all(target_os = "linux", feature = "rustkit")))]
+    let chrome_webview: chrome_ui::ChromeView = chrome_ui::ChromeView::WebKit(Arc::new(
+        chrome_webview_wry.expect("the WebKit chrome is built unless the RustKit chrome was requested"),
+    ));
     let shelf_webview: Option<chrome_ui::ChromeView> = shelf_webview.map(|v| chrome_ui::ChromeView::WebKit(Arc::new(v)));
 
     let chrome_for_events: chrome_ui::ChromeView = chrome_webview.clone();
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    if let chrome_ui::ChromeView::RustKit(ref view) = chrome_webview {
+        rustkit_chrome::install_pump(Arc::clone(view), Rc::clone(&chrome_ipc));
+        view.raise();
+        // The first region, before the first layout turn: the window less the page column.
+        chrome_ui::ChromeUi::compose(&chrome_webview, width, height, (sidebar_width, CHROME_HEIGHT_DEFAULT as f64, content_width, content_height));
+    }
     let shelf_for_events: Option<chrome_ui::ChromeView> = shelf_webview.clone();
 
     let content_for_events: UnifiedContentWebView = content_webview.clone();

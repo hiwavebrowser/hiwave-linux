@@ -158,7 +158,8 @@ sudo apt-get install -y \
     libwebkit2gtk-4.1-dev \
     libssl-dev \
     libsoup-3.0-dev \
-    libjavascriptcoregtk-4.1-dev
+    libjavascriptcoregtk-4.1-dev \
+    libxext-dev
 ```
 
 **Fedora:**
@@ -167,13 +168,16 @@ sudo dnf install -y \
     gtk3-devel \
     webkit2gtk4.1-devel \
     openssl-devel \
-    libsoup3-devel
+    libsoup3-devel \
+    libXext-devel
 ```
 
 **Arch Linux:**
 ```bash
-sudo pacman -S gtk3 webkit2gtk-4.1 openssl libsoup3
+sudo pacman -S gtk3 webkit2gtk-4.1 openssl libsoup3 libxext
 ```
+
+`libXext` is linked by the X11 viewhost (the XShape calls the RustKit chrome uses).
 
 ### Build from Source
 

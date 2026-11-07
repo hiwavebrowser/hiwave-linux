@@ -498,6 +498,18 @@ impl ViewHost {
         Ok(())
     }
 
+    /// Show a view only inside `region` (view-local), or everywhere with `None`: XShape on X11.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn set_view_region(&self, view_id: ViewId, region: Option<&[RegionRect]>) -> Result<(), ViewHostError> {
+        self.x11()?.set_region(view_id, region)
+    }
+
+    /// Raise a view above its siblings.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn raise_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
+        self.x11()?.raise_view(view_id)
+    }
+
     /// Raw X11 display pointer.
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn display_ptr(&self) -> *mut std::ffi::c_void {

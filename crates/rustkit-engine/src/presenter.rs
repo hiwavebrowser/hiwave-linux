@@ -984,6 +984,18 @@ impl WindowSurface {
         let _ = self.presenter.viewhost().pump_messages();
     }
 
+    /// Show this surface's window only inside `region` (view-local), or everywhere with `None` (S2).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn set_region(&self, region: Option<&[rustkit_viewhost::RegionRect]>) {
+        let _ = self.presenter.viewhost().set_view_region(self.viewhost_id, region);
+    }
+
+    /// Raise this surface's window above its siblings (S2).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn raise(&self) {
+        let _ = self.presenter.viewhost().raise_view(self.viewhost_id);
+    }
+
     /// Draw this surface transparent (CH3.A3c, the RustKit chrome over the
     /// page): the layer is not opaque, frames clear to (0, 0, 0, 0) and hold
     /// premultiplied colour. The frame on screen is cleared now and the

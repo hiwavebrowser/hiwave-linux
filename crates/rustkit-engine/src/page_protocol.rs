@@ -1605,4 +1605,14 @@ impl PageEndpoint {
     pub fn drain_x11_input(&self) -> Vec<rustkit_viewhost::InputEvent> {
         self.engine.drain_view_input(self.view)
     }
+
+    /// Linux (S2): the XShape region of this endpoint's view.
+    pub fn set_x11_region(&self, region: Option<&[rustkit_viewhost::RegionRect]>) {
+        self.engine.set_view_region(self.view, region);
+    }
+
+    /// Linux (S2): raise this endpoint's view window.
+    pub fn raise_x11_view(&self) {
+        self.engine.raise_view(self.view);
+    }
 }

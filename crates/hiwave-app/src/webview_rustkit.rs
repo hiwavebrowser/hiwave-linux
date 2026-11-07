@@ -1626,8 +1626,34 @@ impl RustKitView {
     fn set_region(&self, region: Vec<rustkit_viewhost::RegionRect>) {
         #[cfg(target_os = "macos")]
         rustkit_viewhost::set_raw_view_region(self.host_view, Some(region));
-        #[cfg(not(target_os = "macos"))]
+        // X11: the same region as an XShape on the view's window (S2).
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.with_x11_view(|surface| surface.set_region(Some(&region)), |endpoint| endpoint.set_x11_region(Some(&region)));
+        #[cfg(not(any(target_os = "macos", all(unix, not(target_os = "macos")))))]
         let _ = region;
+    }
+
+    /// Run `on_surface` when the page is on the content thread (this thread owns the surface) or `on_endpoint`
+    /// when it is on this thread (the endpoint's engine owns the viewhost). A busy endpoint skips the call.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn with_x11_view(
+        &self,
+        on_surface: impl FnOnce(&WindowSurface),
+        on_endpoint: impl FnOnce(&PageEndpoint),
+    ) {
+        if let Some(surface) = &self.surface {
+            on_surface(&surface.borrow());
+        } else if let Some(endpoint) = &self.endpoint {
+            if let Ok(endpoint) = endpoint.try_borrow() {
+                on_endpoint(&endpoint);
+            }
+        }
+    }
+
+    /// Raise this view's window above its siblings (S2: the RustKit chrome stays over the page).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn raise(&self) {
+        self.with_x11_view(|surface| surface.raise(), |endpoint| endpoint.raise_x11_view());
     }
 }
 
@@ -2699,6 +2725,26 @@ pub(crate) enum X11Delivery {
     Ignore,
 }
 
+/// The `key` string of a chord's key: the letter (upper with Shift), the digit, or the OEM punctuation key's
+/// character; empty for keys with none (arrows, function keys: the engine names those from the virtual key).
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn chord_key(vk: u32, shift: bool) -> String {
+    let c = match vk {
+        0x41..=0x5A => {
+            let c = (vk as u8) as char;
+            if shift { c } else { c.to_ascii_lowercase() }
+        }
+        0x30..=0x39 => (vk as u8) as char,
+        0xBB => if shift { '+' } else { '=' },
+        0xBD => if shift { '_' } else { '-' },
+        0xBC => ',',
+        0xBE => '.',
+        0xBF => '/',
+        _ => return String::new(),
+    };
+    c.to_string()
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn x11_delivery(kind: &rustkit_viewhost::InputKind) -> X11Delivery {
     use rustkit_viewhost::{InputKind, PointerInput};
@@ -2720,7 +2766,10 @@ pub(crate) fn x11_delivery(kind: &rustkit_viewhost::InputKind) -> X11Delivery {
             if k.mac_keycode == 0 && k.text.is_empty() {
                 return X11Delivery::Ignore;
             }
-            let (vk, text) = (k.mac_keycode as u32, k.text.clone());
+            let vk = k.mac_keycode as u32;
+            // A chord (Ctrl/Alt held) carries no typed text, but the page's `keydown` still needs `e.key`
+            // ("t" for Ctrl+T): the key's own character, for the keys that have one.
+            let text = if k.text.is_empty() && (k.ctrl || k.alt) { chord_key(vk, k.shift) } else { k.text.clone() };
             if k.up {
                 X11Delivery::KeyUp { vk, text, ctrl: k.ctrl, shift: k.shift, alt: k.alt }
             } else {
@@ -2752,6 +2801,20 @@ mod x11_delivery_tests {
         assert_eq!(x11_delivery(&xi::leave_input()), X11Delivery::MouseLeave);
         let s = xi::button_input(3, true, 1.0, 1.0, 0, 1).unwrap();
         assert_eq!(x11_delivery(&s), X11Delivery::SecondaryDown { x: 1.0, y: 1.0 });
+    }
+
+    #[test]
+    fn a_chord_key_gets_its_character_so_the_page_sees_e_key() {
+        // Ctrl+T: XLookupString text is dropped for chords, the page still hears key "t".
+        let ctrl_t = xi::key_input(0x74, "\u{14}", xi::CONTROL_MASK, false);
+        assert_eq!(
+            x11_delivery(&ctrl_t),
+            X11Delivery::KeyDown { vk: 0x54, text: "t".into(), ctrl: true, shift: false, alt: false }
+        );
+        let ctrl_shift_f = xi::key_input(0x46, "\u{6}", xi::CONTROL_MASK | xi::SHIFT_MASK, false);
+        assert!(matches!(x11_delivery(&ctrl_shift_f), X11Delivery::KeyDown { ref text, .. } if text == "F"));
+        assert_eq!(chord_key(0xBD, false), "-");
+        assert_eq!(chord_key(0x25, false), "", "arrows have no character");
     }
 
     #[test]

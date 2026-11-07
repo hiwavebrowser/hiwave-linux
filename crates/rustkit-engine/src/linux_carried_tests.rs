@@ -3535,3 +3535,22 @@ mod x11_content_path {
         surface.present_commit(&commit, &images).expect("present_commit must succeed");
     }
 }
+
+/// S2: the X11 delivery gives a Ctrl/Alt chord its key character so the page's `keydown` sees `e.key` ("t" for
+/// Ctrl+T). That must never type the character: a chord on a focused text control is the page's or the browser's,
+/// not input. Pins the engine's guard (`handle_key`: `primary || alt` returns Unhandled) for the keys chrome.html uses.
+#[test]
+fn a_chord_with_its_key_character_inserts_nothing_into_a_focused_text_control() {
+    use rustkit_dom::clipboard::MemoryClipboard;
+    use rustkit_dom::forms::keyboard::handle_key;
+    use rustkit_dom::forms::{KeyHandleResult, KeyPlatform, TextEditState};
+
+    let clipboard = MemoryClipboard::default();
+    for (vk, key, primary, alt) in [(0x54u32, "t", true, false), (0x4C, "l", true, false), (0x58, "x", false, true), (0x31, "1", true, false)] {
+        let state = TextEditState::new();
+        state.set_value("ab");
+        let result = handle_key(&state, None, &clipboard, KeyPlatform::Other, vk, key, primary, false, alt);
+        assert_ne!(result, KeyHandleResult::ValueChanged, "{key} with primary={primary} alt={alt}");
+        assert_eq!(state.value(), "ab", "{key} with primary={primary} alt={alt} must not type");
+    }
+}

@@ -8,6 +8,10 @@
 //! `chrome_state`, which is a later stage), and the RustKit variant of `ChromeView`.
 
 use crate::webview::IWebView;
+#[cfg(feature = "rustkit")]
+use crate::webview::IWebContent;
+#[cfg(feature = "rustkit")]
+use crate::webview_rustkit::RustKitView;
 use std::sync::Arc;
 use wry::Rect;
 
@@ -37,10 +41,12 @@ impl ChromeUi for wry::WebView {
     }
 }
 
-/// The chrome's view as built. WebKit today; the RustKit variant arrives with S2.
+/// The chrome's view as built: WebKit by default, or a RustKit view with `HIWAVE_RUSTKIT_CHROME=1` (S2).
 #[derive(Clone)]
 pub enum ChromeView {
     WebKit(Arc<wry::WebView>),
+    #[cfg(feature = "rustkit")]
+    RustKit(Arc<RustKitView>),
 }
 
 /// A panel's view (the shelf, later the Inspector and settings): the same backends as the chrome.
@@ -51,12 +57,41 @@ impl ChromeUi for ChromeView {
     fn eval(&self, js: &str) -> Result<(), String> {
         match self {
             ChromeView::WebKit(view) => ChromeUi::eval(&**view, js),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(view) => view.wry_evaluate_script(js),
         }
     }
 
     fn place(&self, rect: Rect) {
         match self {
             ChromeView::WebKit(view) => ChromeUi::place(&**view, rect),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(view) => {
+                let _ = view.wry_set_bounds(rect);
+            }
+        }
+    }
+
+    fn take_keyboard(&self) {
+        #[cfg(feature = "rustkit")]
+        if let ChromeView::RustKit(view) = self {
+            view.grab_keyboard();
+        }
+    }
+
+    fn compose(&self, width: f64, height: f64, hole: (f64, f64, f64, f64)) {
+        #[cfg(feature = "rustkit")]
+        if let ChromeView::RustKit(view) = self {
+            view.compose_region(width, height, rustkit_viewhost::RegionRect::new(hole.0, hole.1, hole.2, hole.3));
+        }
+        #[cfg(not(feature = "rustkit"))]
+        let _ = (width, height, hole);
+    }
+
+    fn keep_on_top(&self) {
+        #[cfg(feature = "rustkit")]
+        if let ChromeView::RustKit(view) = self {
+            view.raise();
         }
     }
 }
@@ -67,60 +102,88 @@ impl IWebView for ChromeView {
     fn load_url(&self, url: &str) {
         match self {
             ChromeView::WebKit(view) => IWebView::load_url(&**view, url),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(view) => {
+                let _ = view.wry_load_url(url);
+            }
         }
     }
 
     fn load_html(&self, html: &str) {
         match self {
             ChromeView::WebKit(view) => IWebView::load_html(&**view, html),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(view) => {
+                let _ = view.wry_load_html(html);
+            }
         }
     }
 
     fn evaluate_script(&self, script: &str) {
         match self {
             ChromeView::WebKit(view) => IWebView::evaluate_script(&**view, script),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(view) => {
+                let _ = view.wry_evaluate_script(script);
+            }
         }
     }
 
     fn set_bounds(&self, rect: Rect) {
         match self {
             ChromeView::WebKit(view) => IWebView::set_bounds(&**view, rect),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(view) => {
+                let _ = view.wry_set_bounds(rect);
+            }
         }
     }
 
     fn url(&self) -> Option<String> {
         match self {
             ChromeView::WebKit(view) => IWebView::url(&**view),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(view) => IWebContent::get_url(&**view).map(|u| u.to_string()),
         }
     }
 
     fn set_zoom(&self, level: f64) {
         match self {
             ChromeView::WebKit(view) => IWebView::set_zoom(&**view, level),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(_) => {}
         }
     }
 
     fn print(&self) {
         match self {
             ChromeView::WebKit(view) => IWebView::print(&**view),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(_) => {}
         }
     }
 
     fn focus(&self) {
         match self {
             ChromeView::WebKit(view) => IWebView::focus(&**view),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(view) => view.grab_keyboard(),
         }
     }
 
     fn clear_all_browsing_data(&self) {
         match self {
             ChromeView::WebKit(view) => IWebView::clear_all_browsing_data(&**view),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(_) => {}
         }
     }
 
     fn set_visible(&self, visible: bool) {
         match self {
             ChromeView::WebKit(view) => IWebView::set_visible(&**view, visible),
+            #[cfg(feature = "rustkit")]
+            ChromeView::RustKit(_) => {}
         }
     }
 }
