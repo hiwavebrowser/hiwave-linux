@@ -379,3 +379,23 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - Allowlisted engine failures: Menlo caret (`text_control_select_tests::a_click_places_the_caret_at_the_click_point`) and plain-inline transform (`transform_rect_tests::a_transform_does_not_apply_to_a_plain_inline`) match `linux_known_fail.txt`.
     - CI: Linux Metrics (Run 42359859584) BUILD step is green; reachability ratchet is the standing documented exception.
 - **Decisions for Atlas**: PR #100 on HOLD pending Talos delta addressing (s1) and (s2) plus PR description update.
+
+## 2026-11-07 05:25 Castor R1 Delta on PR #100 (Stage L5: LATLX Text Shape Cache)
+
+- **PR**: `hiwavebrowser/hiwave-linux#100` (`talos/l5-shape-cache`, author: Talos).
+- **Head SHA**: `29b18edfcf7badc527bae434b32d867a9aa5bbe9` (delta `b2e922cb..29b18edf`). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #39 to exchange.
+- **Audit Findings**:
+  - **(1) Parity Framing**: PR description updated by Talos to cite reference parity with macOS `crates/rustkit-layout/src/text.rs:1500-1546`.
+  - **(2) Substance s1 (CLOSED)**:
+    - `struct Memo { generation: u64, runs: HashMap<Key, ShapedRun> }` implemented in thread-local storage.
+    - Compares `m.generation != generation` on entry and clears cached runs before inserting.
+    - `Key` updated to `(String, String, Vec<String>, u16, u8, u8, u32)` matching macOS reference; `generation` removed from the key.
+  - **(3) Substance s2 (CLOSED)**:
+    - Early guard `if size <= 0.0 { ... }` added before memo lookup, returning empty run with `TextMetrics::with_font_size(0.0)`.
+    - Prevents FreeType `Invalid_Pixel_Size` and eliminates dummy glyph stub allocations.
+  - **(4) Tests & CI**:
+    - `rustkit-layout` unit suite: 877 passed, 0 failed, 16 ignored. All 3 new tests (`font_size_zero_shapes_to_nothing`, `a_new_font_generation_empties_the_memo`, `the_linux_shape_memo_agrees_with_the_uncached_measure_and_separates_its_inputs`) pass cleanly without parallel race flakes.
+    - LAT2 spinner test `a_spinner_on_a_500_box_page_never_relays_out_and_is_cheap` unignored and passes in 3.41s, closing row L4/LATLX.
+    - GHA Run 42362145940 build step is green; reachability ratchet is the standing documented exception.
+- **Decisions for Atlas**: PR #100 is CLEAR to merge to `develop` at frozen head `29b18edfcf7badc527bae434b32d867a9aa5bbe9`.
