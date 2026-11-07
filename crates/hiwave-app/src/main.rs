@@ -115,6 +115,8 @@ const SETTINGS_HTML: &str = include_str!("ui/settings.html");
 /// The HTML content for the inspector panel (restored canonical template from macOS; wired in shell work)
 #[allow(dead_code)]
 pub const INSPECTOR_HTML: &str = include_str!("ui/inspector.html");
+/// The script injected into a WebKit page for the Inspector (DOM tree, styles, picker, console capture).
+const INSPECTOR_INJECT: &str = include_str!("ui/inspector_inject.js");
 #[cfg(not(feature = "native-linux"))]
 const REPORT_HTML: &str = include_str!("ui/report.html");
 #[cfg(not(feature = "native-linux"))]
@@ -384,6 +386,23 @@ enum UserEvent {
     OpenInspector,
     CloseInspector,
     ToggleInspector,
+    // Inspector data (I1b)
+    InspectorSendDomTree(String),
+    InspectorSendElementStyles(String),
+    InspectorElementPicked { path: String, styles: serde_json::Value },
+    InspectorPickerStopped,
+    InspectorHighlightElement { path: String },
+    InspectorClearHighlight,
+    InspectorStartPicker,
+    InspectorStopPicker,
+    InspectorScrollToElement { path: String },
+    InspectElement { path: String },
+    InspectorRefreshTree,
+    InspectorSelect { path: String },
+    InspectorExpand { path: String },
+    InspectorConsoleMessage(String),
+    InspectorConsoleClear,
+    InspectorConsoleEval { code: String },
 }
 
 /// Where the shared container sits inside the window, in window pixels. On GNOME Wayland GTK draws its own
@@ -404,14 +423,28 @@ fn layout_origin() -> (f64, f64) {
 }
 
 /// The Inspector panel's `window.ipc` messages. A function, not the handler closure, so the RustKit panel's pump
-/// can feed it the same messages. I1a: close. The data requests (tree, styles, console) are I1b.
+/// can feed it the same messages.
 #[cfg(not(feature = "native-linux"))]
 fn handle_inspector_ipc(body: &str, inspector_proxy: &tao::event_loop::EventLoopProxy<UserEvent>) {
+    let send = |event: UserEvent| {
+        let _ = inspector_proxy.send_event(event);
+    };
     match serde_json::from_str::<IpcMessage>(body) {
-        Ok(IpcMessage::CloseInspector) | Ok(IpcMessage::InspectorClose) => {
-            let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
-        }
-        Ok(other) => tracing::debug!(?other, "Inspector IPC not handled yet (I1b)"),
+        Ok(msg) => match msg {
+            IpcMessage::CloseInspector | IpcMessage::InspectorClose => send(UserEvent::CloseInspector),
+            IpcMessage::InspectorGetDomTree | IpcMessage::InspectorRefresh => send(UserEvent::InspectorRefreshTree),
+            IpcMessage::InspectorGetElementStyles { path } | IpcMessage::InspectorSelectElement { path } => {
+                send(UserEvent::InspectorSelect { path })
+            }
+            IpcMessage::InspectorExpandNode { path } => send(UserEvent::InspectorExpand { path }),
+            IpcMessage::InspectorHighlightElement { path } => send(UserEvent::InspectorHighlightElement { path }),
+            IpcMessage::InspectorClearHighlight => send(UserEvent::InspectorClearHighlight),
+            IpcMessage::InspectorStartPicker => send(UserEvent::InspectorStartPicker),
+            IpcMessage::InspectorStopPicker => send(UserEvent::InspectorStopPicker),
+            IpcMessage::InspectorScrollToElement { path } => send(UserEvent::InspectorScrollToElement { path }),
+            IpcMessage::InspectorConsoleEval { code } => send(UserEvent::InspectorConsoleEval { code }),
+            _ => {}
+        },
         Err(e) => error!("Failed to parse Inspector IPC: {}", e),
     }
 }
@@ -1690,6 +1723,31 @@ fn main() {
                     IpcMessage::FindInPageResult { result } => {
                         let _ = content_proxy_ipc.send_event(UserEvent::FindInPageResult(result.clone()));
                     }
+                    // Inspector data from the injected script in the page (I1b)
+                    IpcMessage::InspectorDomTreeResult { tree } => {
+                        let json = serde_json::to_string(tree).unwrap_or_else(|_| "null".to_string());
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendDomTree(json));
+                    }
+                    IpcMessage::InspectorElementStylesResult { styles } => {
+                        let json = serde_json::to_string(styles).unwrap_or_else(|_| "null".to_string());
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendElementStyles(json));
+                    }
+                    IpcMessage::InspectorElementPicked { path, styles } => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorElementPicked { path: path.clone(), styles: styles.clone() });
+                    }
+                    IpcMessage::InspectorPickerStopped => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorPickerStopped);
+                    }
+                    IpcMessage::InspectElement { path } => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectElement { path: path.clone() });
+                    }
+                    IpcMessage::InspectorConsoleMessage { entry } => {
+                        let json = serde_json::to_string(entry).unwrap_or_else(|_| "null".to_string());
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorConsoleMessage(json));
+                    }
+                    IpcMessage::InspectorConsoleClear => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorConsoleClear);
+                    }
                     IpcMessage::TabAudioStateChanged { playing } => {
                         info!("Tab audio state changed from content: playing={}", playing);
                         let _ = content_proxy_ipc.send_event(UserEvent::TabAudioStateChanged { playing: *playing });
@@ -2739,6 +2797,17 @@ fn main() {
                         );
                         // Its console answers without a click first, as the shelf's input does.
                         inspector_for_events.take_keyboard();
+                        // WebKit page: inject the Inspector's script (once) and ask for the DOM tree.
+                        let inject_script = format!("if (!window.__hiwaveInspector) {{ {} }}", INSPECTOR_INJECT);
+                        content_for_events.evaluate_script(&inject_script);
+                        content_for_events.evaluate_script(r#"
+                            setTimeout(() => {
+                                if (window.__hiwaveInspector) {
+                                    const tree = window.__hiwaveInspector.getDomTree(10);
+                                    window.ipc.postMessage(JSON.stringify({ cmd: 'inspector_dom_tree_result', tree: tree }));
+                                }
+                            }, 100);
+                        "#);
                     }
                     UserEvent::CloseInspector => {
                         info!("Closing inspector panel");
@@ -2759,12 +2828,176 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
-                        // The keyboard goes back to the page.
+                        // The keyboard goes back to the page; its highlight goes.
                         content_for_events.focus();
+                        content_for_events.evaluate_script("if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }");
                     }
                     UserEvent::ToggleInspector => {
                         let open = *inspector_height_for_events.lock().unwrap() > 0.0;
                         let _ = proxy.send_event(if open { UserEvent::CloseInspector } else { UserEvent::OpenInspector });
+                    }
+                    UserEvent::InspectorSendDomTree(json) => {
+                        // Send DOM tree to inspector panel
+                        let script = format!(
+                            "if (window.hiwaveInspector) {{ window.hiwaveInspector.setDomTree({}); }}",
+                            json
+                        );
+                        let _ = inspector_for_events.eval(&script);
+                    }
+                    UserEvent::InspectorSendElementStyles(json) => {
+                        // Send element styles to inspector panel
+                        let script = format!(
+                            "if (window.hiwaveInspector) {{ window.hiwaveInspector.setElementStyles({}); }}",
+                            json
+                        );
+                        let _ = inspector_for_events.eval(&script);
+                    }
+                    UserEvent::InspectorElementPicked { path, styles } => {
+                        // Element was picked in content webview, update inspector
+                        let styles_json = serde_json::to_string(&styles).unwrap_or_else(|_| "null".to_string());
+                        let script = format!(
+                            "if (window.hiwaveInspector) {{ window.hiwaveInspector.selectElementByPath('{}'); window.hiwaveInspector.setElementStyles({}); window.hiwaveInspector.setPickerActive(false); }}",
+                            path.replace("'", "\\'"),
+                            styles_json
+                        );
+                        let _ = inspector_for_events.eval(&script);
+                    }
+                    UserEvent::InspectorPickerStopped => {
+                        let _ = inspector_for_events.eval(
+                            "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(false); }"
+                        );
+                    }
+                    UserEvent::InspectorHighlightElement { path } => {
+                        let script = format!(
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement('{}'); }}",
+                            path.replace("'", "\\'")
+                        );
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorClearHighlight => {
+                        let _ = content_for_events.evaluate_script(
+                            "if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }"
+                        );
+                    }
+                    UserEvent::InspectorStartPicker => {
+                        let _ = content_for_events.evaluate_script(
+                            "if (window.__hiwaveInspector) { window.__hiwaveInspector.startPicker(); }"
+                        );
+                        let _ = inspector_for_events.eval(
+                            "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(true); }"
+                        );
+                    }
+                    UserEvent::InspectorStopPicker => {
+                        let _ = content_for_events.evaluate_script(
+                            "if (window.__hiwaveInspector) { window.__hiwaveInspector.stopPicker(); }"
+                        );
+                        let _ = inspector_for_events.eval(
+                            "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(false); }"
+                        );
+                    }
+                    UserEvent::InspectorScrollToElement { path } => {
+                        let script = format!(
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.scrollToElement('{}'); }}",
+                            path.replace("'", "\\'")
+                        );
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorRefreshTree => {
+                        let _ = content_for_events.evaluate_script(r#"
+                            (function() {
+                                if (window.__hiwaveInspector) {
+                                    const tree = window.__hiwaveInspector.getDomTree(10);
+                                    window.ipc.postMessage(JSON.stringify({
+                                        cmd: 'inspector_dom_tree_result',
+                                        tree: tree
+                                    }));
+                                }
+                            })();
+                        "#);
+                    }
+                    UserEvent::InspectorSelect { path } => {
+                        let script = format!(r#"
+                            (function() {{
+                                if (window.__hiwaveInspector) {{
+                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    window.ipc.postMessage(JSON.stringify({{
+                                        cmd: 'inspector_element_styles_result',
+                                        styles: styles
+                                    }}));
+                                }}
+                            }})();
+                        "#, path.replace("\\", "\\\\").replace("'", "\\'"));
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorExpand { path } => {
+                        // The injected-script tree is sent whole; only RustKit's is cut and expanded on demand (I1b-2).
+                        let _ = path;
+                    }
+                    UserEvent::InspectElement { path } => {
+                        // Open inspector and select the element
+                        let _ = proxy.send_event(UserEvent::OpenInspector);
+                        // Delay the selection to allow inspector to initialize
+                        let path_escaped = path.replace("'", "\\'");
+                        let script = format!(r#"
+                            setTimeout(() => {{
+                                if (window.__hiwaveInspector) {{
+                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    window.ipc.postMessage(JSON.stringify({{
+                                        cmd: 'inspector_element_picked',
+                                        path: '{}',
+                                        styles: styles
+                                    }}));
+                                }}
+                            }}, 200);
+                        "#, path_escaped, path_escaped);
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
+                    // Console events
+                    UserEvent::InspectorConsoleMessage(json) => {
+                        // Forward console message to inspector panel
+                        let script = format!(
+                            "if (window.hiwaveInspector) {{ window.hiwaveInspector.addConsoleEntry({}); }}",
+                            json
+                        );
+                        let _ = inspector_for_events.eval(&script);
+                    }
+                    UserEvent::InspectorConsoleClear => {
+                        // Clear console in inspector panel
+                        let _ = inspector_for_events.eval("window.hiwaveInspector && window.hiwaveInspector.clearConsole()");
+                    }
+                    UserEvent::InspectorConsoleEval { code } => {
+                        // Execute JavaScript in content webview
+                        let escaped_code = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
+                        let script = format!(r#"
+                            (function() {{
+                                try {{
+                                    const result = eval('{}');
+                                    const serialized = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
+                                    window.ipc.postMessage(JSON.stringify({{
+                                        cmd: 'inspector_console_message',
+                                        entry: {{
+                                            id: Date.now(),
+                                            level: 'result',
+                                            message: serialized,
+                                            timestamp: Date.now(),
+                                            stack: []
+                                        }}
+                                    }}));
+                                }} catch (e) {{
+                                    window.ipc.postMessage(JSON.stringify({{
+                                        cmd: 'inspector_console_message',
+                                        entry: {{
+                                            id: Date.now(),
+                                            level: 'error',
+                                            message: e.name + ': ' + e.message,
+                                            timestamp: Date.now(),
+                                            stack: []
+                                        }}
+                                    }}));
+                                }}
+                            }})();
+                        "#, escaped_code);
+                        let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::ExpandShelf => {
                         let ch = *chrome_height_for_events.lock().unwrap();
