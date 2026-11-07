@@ -1476,7 +1476,26 @@ fn main() {
     // HIWAVE_RUSTKIT_CHROME=1 on an X11 window: the chrome is a RustKit view, built after the page below so it
     // stacks above it. Otherwise (the default) the WebKit chrome below.
     #[cfg(all(target_os = "linux", feature = "rustkit"))]
-    let rustkit_chrome_on = matches!(rustkit_chrome::choose(&window), rustkit_content::Engagement::On);
+    let rustkit_chrome_view: Option<Arc<webview_rustkit::RustKitView>> =
+        if matches!(rustkit_chrome::choose(&window), rustkit_content::Engagement::On) {
+            let at = chrome_bounds.position.to_logical::<f64>(1.0);
+            let size = chrome_bounds.size.to_logical::<f64>(1.0);
+            let bounds = rustkit_viewhost::Bounds::new(at.x as i32, at.y as i32, size.width as u32, size.height as u32);
+            let document = rustkit_chrome::html_with_bridge(CHROME_HTML, JS_BRIDGE, rustkit_chrome::OUTSIDE_CLICK);
+            // Built here, before the page: if it cannot be built the WebKit chrome below is, as if the flag were
+            // off. Its window is raised above the page once the page exists (below).
+            match rustkit_chrome::create(&window, bounds, &document) {
+                Ok(view) => Some(view),
+                Err(why) => {
+                    error!("RustKit chrome could not be created, using the WebKit chrome: {why}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    let rustkit_chrome_on = rustkit_chrome_view.is_some();
     #[cfg(not(all(target_os = "linux", feature = "rustkit")))]
     let rustkit_chrome_on = false;
 
@@ -2123,17 +2142,6 @@ fn main() {
     // Store WebViews in Arcs for event loop access
     // The chrome and the shelf behind the ChromeUi seam (S1b): WebKit is the only backend, so every call goes
     // where it went before.
-    // The RustKit chrome is built here, after the page and the shelf, so its window stacks above them.
-    #[cfg(all(target_os = "linux", feature = "rustkit"))]
-    let rustkit_chrome_view: Option<Arc<webview_rustkit::RustKitView>> = if rustkit_chrome_on {
-        let at = chrome_bounds.position.to_logical::<f64>(1.0);
-        let size = chrome_bounds.size.to_logical::<f64>(1.0);
-        let bounds = rustkit_viewhost::Bounds::new(at.x as i32, at.y as i32, size.width as u32, size.height as u32);
-        let document = rustkit_chrome::html_with_bridge(CHROME_HTML, JS_BRIDGE, rustkit_chrome::OUTSIDE_CLICK);
-        Some(rustkit_chrome::create(&window, bounds, &document).expect("Failed to create the RustKit chrome (unset HIWAVE_RUSTKIT_CHROME for the WebKit chrome)"))
-    } else {
-        None
-    };
     #[cfg(all(target_os = "linux", feature = "rustkit"))]
     let chrome_webview: chrome_ui::ChromeView = match (chrome_webview_wry, rustkit_chrome_view) {
         (Some(w), _) => chrome_ui::ChromeView::WebKit(Arc::new(w)),
@@ -2151,6 +2159,10 @@ fn main() {
     if let chrome_ui::ChromeView::RustKit(ref view) = chrome_webview {
         rustkit_chrome::install_pump(Arc::clone(view), Rc::clone(&chrome_ipc));
         view.raise();
+        // A WebKit page under the RustKit chrome gives the keyboard back to the window when it is clicked.
+        if let UnifiedContentWebView::Wry(ref page) = content_webview {
+            rustkit_chrome::return_focus_on_page_click(page, &window);
+        }
         // The first region, before the first layout turn: the window less the page column.
         chrome_ui::ChromeUi::compose(&chrome_webview, width, height, (sidebar_width, CHROME_HEIGHT_DEFAULT as f64, content_width, content_height));
     }

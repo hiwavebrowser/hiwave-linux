@@ -88,6 +88,23 @@ pub fn create(window: &tao::window::Window, bounds: Bounds, document: &str) -> R
     Ok(Arc::new(view))
 }
 
+/// With the RustKit chrome, keyboard focus sits on the chrome's X window after the chrome was clicked (that is how
+/// its text fields get keys). A click on a WebKit page does not move it, so the page's keys and the shortcuts it
+/// forwards would still go to the chrome. This hands the X input focus back to the app window when the WebKit page
+/// is pressed; WebKit then takes GTK focus as it always did. (A RustKit page does this itself in its input pump.)
+pub fn return_focus_on_page_click(content: &wry::WebView, window: &tao::window::Window) {
+    use gtk::prelude::*;
+    use tao::platform::unix::WindowExtUnix;
+    use wry::WebViewExtUnix;
+    let toplevel = window.gtk_window().clone();
+    content.webview().connect_button_press_event(move |_, _| {
+        if let Some(gdk_window) = toplevel.window() {
+            gdk_window.focus(gtk::gdk::ffi::GDK_CURRENT_TIME as u32);
+        }
+        gtk::glib::Propagation::Proceed
+    });
+}
+
 /// Drive the chrome on the GTK main loop: step its load, deliver its X11 input, run its timers, hand its
 /// `window.ipc` messages to the shared chrome IPC handler, draw a frame.
 pub fn install_pump(view: Arc<RustKitView>, ipc: Rc<dyn Fn(&str)>) {
