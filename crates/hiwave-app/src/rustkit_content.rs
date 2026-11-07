@@ -98,15 +98,29 @@ pub fn create(
 /// Drive the view on the GTK main loop: its clock and late fetches, its `window.ipc` messages to the shared
 /// content IPC handler, navigations the page started, title / URL / loading changes into the tab state (the
 /// same `UserEvent`s the WebKit view's handlers send), and a frame. Mirrors the macOS per-tick pump.
-pub fn install_pump(view: Arc<RustKitView>, proxy: EventLoopProxy<UserEvent>, ipc: Rc<dyn Fn(&str)>, created: Instant) {
+/// What the app adds to each turn of the page's pump: the Inspector's answers (`on_turn`) and its element picker's
+/// claim on the page's pointer input (`input_filter`, true = taken).
+pub struct PumpHooks {
+    pub on_turn: Box<dyn FnMut(&RustKitView)>,
+    pub input_filter: Box<dyn FnMut(&RustKitView, &crate::webview_rustkit::X11Delivery) -> bool>,
+}
+
+pub fn install_pump(
+    view: Arc<RustKitView>,
+    proxy: EventLoopProxy<UserEvent>,
+    ipc: Rc<dyn Fn(&str)>,
+    created: Instant,
+    mut hooks: PumpHooks,
+) {
     let mut first_load_logged = false;
     gtk::glib::timeout_add_local(Duration::from_millis(16), move || {
         // A load in progress holds the engine and every other call finds it busy, so it is stepped first: until
         // it ends the page takes no input and reports no title, URL or finished load.
         view.step_load();
         // X11 input next: what the user did since the last turn reaches the page before its timers run.
-        view.pump_x11_input();
+        view.pump_x11_input_filtered(&mut |delivery| (hooks.input_filter)(&view, delivery));
         let _ = view.process_events();
+        (hooks.on_turn)(&view);
 
         for body in view.take_ipc_messages() {
             ipc(&body);

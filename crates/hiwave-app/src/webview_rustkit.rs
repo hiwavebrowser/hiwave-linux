@@ -747,6 +747,13 @@ impl RustKitView {
     /// `x11_deliveries`; this only executes it.
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn pump_x11_input(&self) -> usize {
+        self.pump_x11_input_filtered(&mut |_| false)
+    }
+
+    /// [`Self::pump_x11_input`] with a filter that sees each delivery first: when it returns true the input is
+    /// the filter's (the Inspector's element picker takes the page's pointer) and the page does not get it.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(crate) fn pump_x11_input_filtered(&self, filter: &mut dyn FnMut(&X11Delivery) -> bool) -> usize {
         let events = if let Some(surface) = &self.surface {
             // The page is on the content thread: this thread owns the surface and its viewhost.
             surface.borrow().pump_input();
@@ -766,8 +773,12 @@ impl RustKitView {
             debug!(count = events.len(), "X11 input drained");
         }
         for e in &events {
+            let delivery = x11_delivery(&e.kind);
+            if filter(&delivery) {
+                continue;
+            }
             self.note_input(e.at, e.seq);
-            match x11_delivery(&e.kind) {
+            match delivery {
                 X11Delivery::MouseDown { x, y, clicks, shift } => {
                     // A press in the page is where the keyboard goes next.
                     self.grab_keyboard();
