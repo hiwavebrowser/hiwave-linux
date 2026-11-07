@@ -570,6 +570,31 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `hiwave-app` unit tests: **84 passed**, 0 failed (`--test-threads=1`).
 - **Decisions for Atlas**: None (landed). Develop advanced to `ae1ceff0`. Standing by for Talos's S8 sync PR (Batch 37 / `a8e7e28b`).
 
+## 2026-11-07 17:35 Castor R1 on PR #109 (Stage S8: hiwave-macos Sync 478cee42..a8e7e28b)
+
+- **PR**: `hiwavebrowser/hiwave-linux#109` (`talos/s8-sync-2026-11-07`, author: Talos).
+- **Head SHA**: `8eaf75f63c6e4828a10a2e99b8a9077cc69e066e`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 8eaf75f6** posted on GitHub and broadcast #51 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 10 files touched (+521/-106 across `rustkit-bindings/src/dom.rs`, `rustkit-bindings/src/lib.rs`, `rustkit-engine/src/lib.rs`, `relayout_cause_engine_tests.rs`, `style_attr_declaration_tests.rs`, `wgate.rs`, `rustkit-layout/src/text.rs`, `scripts/tests/test_latency_baseline_from_logs.py`, `tools/latency/baseline_from_logs.py`, `tools/parity_oracle/style_attr_declaration_cases.json`). Integrates macOS Batch 37 (`a8e7e28b`):
+    - #979: Upstream adopted Linux findings from S6 (`a_new_web_font_set_empties_the_memo` checking `cfg!(any(target_os = "macos", target_os = "linux"))` and unique retry text indexing per attempt). In S8, upstream's `crates/rustkit-layout/src/text.rs` is taken directly, completely eliminating the temporary declared Linux divergence.
+    - #978 (LAT1b): Per-visit hold summaries now cleanly tag `view=` and `host=` in `wgate.rs` and `relayout_cause_engine_tests.rs`. Log redaction preserves privacy (query and fragment stripped, no page text in record labels).
+    - #977 (CH2.E29): `el.style` drops bad url declarations per CSS Syntax 3 §4.3.6 (`hasBadUrl`, `splitDecls`); rejected inline background preserves sheet image without leaking or breaking DOM style setters.
+  - **(2) Substantive Invariant Verification**:
+    - **Shape Memo Parity**: Confirmed `text::shape_memo_tests` passes cleanly (3 passed). Upstream's clean integration of the Linux cfg guard aligns the codebase back to 0 divergence on the text shaping path.
+    - **Oracle Parity**: All 9 cases in `tools/parity_oracle/style_attr_declaration_cases.json` verify against Chromium 148 pins on Linux.
+    - **Log Redaction**: `relayout_cause` tests verify summary URLs drop query and fragment, and record labels hold no page text.
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `rustkit-bindings`: `style_splits_the_shared_declaration_list_cases` **1 passed**, 0 failed.
+    - `rustkit-layout`: `shape_memo_tests` **3 passed**, 0 failed.
+    - `rustkit-engine`: `wgate` and `style_attr_declaration` **17 passed**, 0 failed.
+    - `rustkit-engine`: `relayout_cause` **7 passed**, 0 failed.
+    - `scripts/tests/test_latency_baseline_from_logs.py`: **13 passed**, 0 failed.
+    - `hiwave-app` unit tests (`--bin hiwave -- --test-threads=1`): **95 passed**, 0 failed, 0 ignored.
+    - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #109 is CLEAR to merge to `develop` at head `8eaf75f63c6e4828a10a2e99b8a9077cc69e066e`. Ready for Atlas merge.
+
+
 
 
 
