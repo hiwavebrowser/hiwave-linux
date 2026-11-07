@@ -476,11 +476,15 @@ mod computed_read;
 #[cfg(test)]
 mod computed_read_tests;
 #[cfg(test)]
+mod style_attr_declaration_tests;
+#[cfg(test)]
 mod canvas_context_tests;
 #[cfg(test)]
 mod flex_percent_cross_tests;
 #[cfg(test)]
 mod flex_cross_size_tests;
+#[cfg(test)]
+mod empty_declaration_tests;
 #[cfg(test)]
 mod inner_text_style_tests;
 #[cfg(test)]
@@ -14503,7 +14507,12 @@ impl layout_ctx::LayoutCtx {
             Some(p) => p.custom_properties.clone(),
             None => Arc::new(CustomProperties::from_map(css_vars.clone())),
         };
-        let inline_style = attributes.get("style");
+        // A `style` attribute is a declaration list: split it once, by the
+        // CSS tokenizer's rules, not at every `;` (CH2.E27).
+        let inline_decls: Vec<String> = attributes
+            .get("style")
+            .map(|s| rustkit_css::split_declaration_list(s))
+            .unwrap_or_default();
         let mut declared_vars: Vec<(&str, Option<&str>)> = Vec::new();
         for important_pass in [false, true] {
             for (rule, _, _) in rules_for(important_pass) {
@@ -14522,17 +14531,15 @@ impl layout_ctx::LayoutCtx {
                     }
                 }
             }
-            if let Some(style_attr) = inline_style {
-                for declaration in style_attr.split(';') {
-                    if let Some((property, value)) = declaration.split_once(':') {
-                        let property = property.trim();
-                        if !property.starts_with("--") {
-                            continue;
-                        }
-                        let (value, important) = split_important(value.trim());
-                        if important == important_pass {
-                            declared_vars.push((property, Some(value)));
-                        }
+            for declaration in &inline_decls {
+                if let Some((property, value)) = declaration.split_once(':') {
+                    let property = property.trim();
+                    if !property.starts_with("--") {
+                        continue;
+                    }
+                    let (value, important) = split_important(value.trim());
+                    if important == important_pass {
+                        declared_vars.push((property, Some(value)));
                     }
                 }
             }
@@ -14695,11 +14702,7 @@ impl layout_ctx::LayoutCtx {
         order: &mut usize,
         important_pass: bool,
     ) {
-        for declaration in style_attr.split(';') {
-            let declaration = declaration.trim();
-            if declaration.is_empty() {
-                continue;
-            }
+        for declaration in rustkit_css::split_declaration_list(style_attr) {
             if let Some((property, value)) = declaration.split_once(':') {
                 let (value, important) = split_important(value.trim());
                 if important != important_pass {
@@ -14793,11 +14796,7 @@ impl layout_ctx::LayoutCtx {
         ch_pending: &mut ChPending,
         important_pass: bool,
     ) {
-        for declaration in style_attr.split(';') {
-            let declaration = declaration.trim();
-            if declaration.is_empty() {
-                continue;
-            }
+        for declaration in rustkit_css::split_declaration_list(style_attr) {
             if let Some((property, value)) = declaration.split_once(':') {
                 let property = property.trim().to_lowercase();
                 let (value, important) = split_important(value.trim());
@@ -23457,13 +23456,13 @@ fn parse_background_layer(value: &str) -> Option<rustkit_css::BackgroundLayer> {
         return Some(layer);
     }
 
-    // Check for url()
-    if value.starts_with("url(") {
-        if let Some(end) = value.find(')') {
-            let url = value[4..end].trim().trim_matches(|c| c == '"' || c == '\'');
-            layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
-            return Some(layer);
-        }
+    // Check for url(). `parse_css_url` is case-insensitive (`URL(...)`),
+    // keeps a `)` or `;` inside a quoted url, and rejects a bad url
+    // (`url(it's)`, `url(a(b.png)`) the way Chromium does (#972 R1).
+    if value.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("url(")) {
+        let url = rustkit_css::mask::parse_css_url(value)?;
+        layer.image = rustkit_css::BackgroundImage::Url(url);
+        return Some(layer);
     }
 
     // Check if it's a color (these don't create image layers)
@@ -23581,10 +23580,7 @@ fn parse_background_shorthand_layer(
             }
             "left" | "right" | "top" | "bottom" | "center" => position.push(token),
             _ if lower.starts_with("url(") && token.ends_with(')') => {
-                let url = token[4..token.len() - 1]
-                    .trim()
-                    .trim_matches(|c| c == '"' || c == '\'');
-                layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
+                layer.image = rustkit_css::BackgroundImage::Url(rustkit_css::mask::parse_css_url(token)?);
             }
             _ if numeric(&lower) || math(&lower) => position.push(token),
             _ => {
@@ -49792,6 +49788,53 @@ mod clip_path_pins {
         }
         // A malformed one is ignored, as Chrome ignores the declaration.
         for style in ["clip-path:rect(10px 20px)", "clip-path:xywh(10px 20px 30px)", "clip-path:xywh(0 0 -1px 10px)"] {
+            let lines = page(style);
+            assert!(!lines.iter().any(|c| c.starts_with("PushClip")), "`{style}`:\n{}", lines.join("\n"));
+        }
+    }
+
+    /// `fill-box`, `stroke-box` and `view-box` on an HTML box (css-masking-1
+    /// §8.1, WPT clip-path-polygon-010/012): the content box and the border
+    /// box. A `<geometry-box>` alone clips to that box. All of them were
+    /// unknown keywords, so the box painted unclipped. Chrome for Testing 148
+    /// on the 140px border box: the painted bounds are the rects pinned here.
+    #[test]
+    fn clip_path_svg_reference_boxes_and_a_lone_box_clip_on_an_html_box() {
+        let e = engine();
+        let page = |style: &str| {
+            dl(&e, &format!(
+                r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:100px;height:100px;border:20px solid red;background:green;{style}"></div></body></html>"#
+            ))
+        };
+        let cases: [(&str, &str, &str, Option<&str>); 7] = [
+            ("clip-path:inset(10px) fill-box", "PushClip(", "x: 30.0, y: 30.0, width: 80.0, height: 80.0", None),
+            ("clip-path:inset(10px) stroke-box", "PushClip(", "x: 10.0, y: 10.0, width: 120.0, height: 120.0", None),
+            ("clip-path:view-box inset(10px)", "PushClip(", "x: 10.0, y: 10.0, width: 120.0, height: 120.0", None),
+            ("clip-path:polygon(0 0, 100% 0, 100% 100%, 0 100%) view-box", "PushClip(", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", None),
+            ("clip-path:circle(50%) fill-box", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 50.0, v: 50.0 }")),
+            ("clip-path:fill-box", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
+            ("clip-path:stroke-box", "PushClip(", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", None),
+        ];
+        for (style, kind, rect, corner) in cases {
+            let lines = page(style);
+            let all = lines.join("\n");
+            let push = lines
+                .iter()
+                .position(|c| c.starts_with("PushClip"))
+                .unwrap_or_else(|| panic!("`{style}` opened no clip:\n{all}"));
+            assert!(lines[push].starts_with(kind), "`{style}`: {}", lines[push]);
+            assert!(lines[push].contains(rect), "`{style}`: {}", lines[push]);
+            if let Some(corner) = corner {
+                assert_eq!(lines[push].matches(corner).count(), 4, "`{style}`: {}", lines[push]);
+            }
+            for (i, c) in lines.iter().enumerate().skip(push + 1) {
+                if !c.starts_with("PushClip") && !c.starts_with("PopClip") {
+                    assert!(depth_at(&lines, i) >= 1, "`{style}` paints `{c}` unclipped:\n{all}");
+                }
+            }
+        }
+        // Two boxes, or a word that is not one, is invalid: no clip.
+        for style in ["clip-path:fill-box stroke-box", "clip-path:inset(10px) bogus-box"] {
             let lines = page(style);
             assert!(!lines.iter().any(|c| c.starts_with("PushClip")), "`{style}`:\n{}", lines.join("\n"));
         }
