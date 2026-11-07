@@ -2161,7 +2161,7 @@ fn main() {
         view.raise();
         // A WebKit page under the RustKit chrome gives the keyboard back to the window when it is clicked.
         if let UnifiedContentWebView::Wry(ref page) = content_webview {
-            rustkit_chrome::return_focus_on_page_click(page, &window);
+            rustkit_chrome::return_focus_on_page_click(page, Arc::clone(view), &window);
         }
         // The first region, before the first layout turn: the window less the page column.
         chrome_ui::ChromeUi::compose(&chrome_webview, width, height, (sidebar_width, CHROME_HEIGHT_DEFAULT as f64, content_width, content_height));

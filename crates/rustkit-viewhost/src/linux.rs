@@ -50,11 +50,28 @@ extern "C" {
         ordering: i32,
     );
     fn XShapeCombineMask(display: *mut Display, dest: Window, dest_kind: i32, x_off: i32, y_off: i32, src: x11::xlib::Pixmap, op: i32);
+    fn XShapeQueryExtension(display: *mut Display, event_base: *mut i32, error_base: *mut i32) -> i32;
 }
 const SHAPE_BOUNDING: i32 = 0;
 const SHAPE_INPUT: i32 = 2;
 const SHAPE_SET: i32 = 0;
 const SHAPE_UNSORTED: i32 = 0;
+
+/// Whether the X server has the SHAPE extension the region route needs (a server started with
+/// `-extension SHAPE` does not). Opens and closes its own connection; call it before building a view that
+/// depends on a region.
+pub fn shape_supported() -> bool {
+    unsafe {
+        let display = XOpenDisplay(ptr::null());
+        if display.is_null() {
+            return false;
+        }
+        let (mut event_base, mut error_base) = (0, 0);
+        let ok = XShapeQueryExtension(display, &mut event_base, &mut error_base) != 0;
+        XCloseDisplay(display);
+        ok
+    }
+}
 
 /// View-local region rectangles (floating point, top-left) as X rectangles: rounded outward to whole pixels,
 /// clamped to what the protocol can carry, empty ones dropped. Pure.
@@ -296,6 +313,16 @@ impl X11ViewHost {
             XFlush(self.display);
         }
         Ok(())
+    }
+
+    /// Give the X input focus to any X window of this server (the app's toplevel, when the keyboard goes back
+    /// from a view to the page): the exact inverse of [`Self::focus_view`], a raw `XSetInputFocus`, not a request
+    /// to the window manager.
+    pub fn focus_window(&self, window: Window) {
+        unsafe {
+            XSetInputFocus(self.display, window, RevertToParent, CurrentTime);
+            XFlush(self.display);
+        }
     }
 
     /// Raise a view's window above its siblings.
