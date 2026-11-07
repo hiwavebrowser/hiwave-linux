@@ -3647,6 +3647,22 @@ mod tests {
         );
     }
 
+    /// Run `body` until a whole attempt saw one web-font generation. The generation is process-wide while the
+    /// memo is per thread, and other tests in this binary install fonts in parallel: a bump in the middle of an
+    /// attempt is not a failure of the memo, so that attempt is thrown away and repeated.
+    #[cfg(target_os = "linux")]
+    fn within_one_generation(mut body: impl FnMut() -> Result<(), String>) {
+        for _ in 0..200 {
+            let generation = rustkit_text::webfonts::generation();
+            let outcome = body();
+            if rustkit_text::webfonts::generation() == generation {
+                outcome.expect("memo behaviour within one font generation");
+                return;
+            }
+        }
+        panic!("the web-font generation moved during every one of 200 attempts");
+    }
+
     /// L5 (LATLX): the Linux shape memo returns what the uncached measure returns, keyed on every input that
     /// changes the answer (text, families, weight, size), and a repeat is not shaped again.
     #[test]
@@ -3661,34 +3677,43 @@ mod tests {
         };
         let misses = || MISSES.with(|c| c.get());
         let text = "Handgloves quick wizard memo";
-        let first = shape(text, 400, 16.0);
-        let after_first = misses();
-        let again = shape(text, 400, 16.0);
-        assert_eq!(misses(), after_first, "a repeat is served from the memo, not shaped again");
-        assert_eq!((first.width(), first.glyphs.len()), (again.width(), again.glyphs.len()));
-        let uncached = shaper
-            .shape_uncached(text, &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
-            .expect("shape");
-        assert_eq!(first.width(), uncached.width(), "the memo returns what the measure returns");
-        // Each input that changes the answer is its own entry: a different value is a miss, then a hit.
-        for (what, run) in [("size", shape(text, 400, 32.0)), ("text", shape("Handgloves", 400, 16.0)), ("weight", shape(text, 700, 16.0))] {
-            let before = misses();
-            let _ = shape_again(&shaper, &chain, &run, what);
-            assert_eq!(misses(), before, "{what}: a second identical call is a hit");
-        }
-        assert!(shape(text, 400, 32.0).width() > first.width() * 1.5, "size");
-        assert!(shape("Handgloves", 400, 16.0).width() < first.width(), "text");
-        let m = misses();
-        let _ = shape(text, 700, 16.0);
-        assert!(misses() >= m, "weight keys a separate entry (never answered from the 400 entry)");
-    }
-
-    /// Placeholder keeping the loop above readable: identical call to the one that produced `run`.
-    #[cfg(target_os = "linux")]
-    fn shape_again(shaper: &TextShaper, chain: &FontFamilyChain, run: &ShapedRun, _what: &str) -> ShapedRun {
-        shaper
-            .shape(&run.text, chain, run.font_weight, run.font_style, run.font_stretch, run.font_size)
-            .expect("shape")
+        within_one_generation(|| {
+            let first = shape(text, 400, 16.0);
+            let after_first = misses();
+            let again = shape(text, 400, 16.0);
+            if misses() != after_first {
+                return Err("a repeat was shaped again".into());
+            }
+            if (first.width(), first.glyphs.len()) != (again.width(), again.glyphs.len()) {
+                return Err("a repeat returned a different run".into());
+            }
+            let uncached = shaper
+                .shape_uncached(text, &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
+                .expect("shape");
+            if first.width() != uncached.width() {
+                return Err("the memo returned something other than the measure".into());
+            }
+            // Each input that changes the answer is its own entry: the first call with a new value is a miss.
+            for (what, size, weight, t) in [("size", 32.0, 400, text), ("weight", 16.0, 700, text), ("text", 16.0, 400, "Handgloves")] {
+                let before = misses();
+                let _ = shape(t, weight, size);
+                if misses() != before + 1 {
+                    return Err(format!("{what}: a different value was answered from another entry"));
+                }
+                let before = misses();
+                let _ = shape(t, weight, size);
+                if misses() != before {
+                    return Err(format!("{what}: a second identical call was shaped again"));
+                }
+            }
+            if shape(text, 400, 32.0).width() <= first.width() * 1.5 {
+                return Err("size did not scale the width".into());
+            }
+            if shape("Handgloves", 400, 16.0).width() >= first.width() {
+                return Err("a shorter text was not narrower".into());
+            }
+            Ok(())
+        });
     }
 
     /// A registered web font changes `webfonts::generation()`: the memo starts over instead of keeping the old
@@ -3702,14 +3727,21 @@ mod tests {
             shaper.shape(t, &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 15.0).expect("shape")
         };
         let text = "generation probe text";
-        let _ = run(text);
-        let warm = MISSES.with(|c| c.get());
-        let _ = run(text);
-        assert_eq!(MISSES.with(|c| c.get()), warm, "warm: a hit");
-        // Installing a (here empty) face set bumps the generation, as a page registering @font-face does.
+        within_one_generation(|| {
+            let _ = run(text);
+            let warm = MISSES.with(|c| c.get());
+            let _ = run(text);
+            if MISSES.with(|c| c.get()) != warm {
+                return Err("warm: a repeat was shaped again".into());
+            }
+            Ok(())
+        });
+        // Installing a (here empty) face set bumps the generation, as a page registering @font-face does. Whatever
+        // else bumps it meanwhile, the next shape of the same text must miss.
         rustkit_text::webfonts::install("l5-generation-probe", &[]);
+        let before = MISSES.with(|c| c.get());
         let _ = run(text);
-        assert_eq!(MISSES.with(|c| c.get()), warm + 1, "after a registration the same text is shaped again");
+        assert!(MISSES.with(|c| c.get()) > before, "after a registration the same text is shaped again");
     }
 
     /// `font-size: 0` has no glyph, no advance and no extent (macOS parity; FreeType rejects a size of 0).
