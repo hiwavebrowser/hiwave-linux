@@ -501,6 +501,38 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Talos completed local gates on `talos/s6-sync-2026-11-07` (`e123b59b`), bringing in Batch 35 (`3b4561e3..0cb89fbe`) and dropping the Linux-specific shape memo copy.
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos to publish the S6 sync PR for R1 review.
 
+## 2026-11-07 12:30 Castor R1 on PR #105 (Stage S6: hiwave-macos Sync 3b4561e3..0cb89fbe)
+
+- **PR**: `hiwavebrowser/hiwave-linux#105` (`talos/s6-sync-2026-11-07`, author: Talos).
+- **Head SHA**: `241af075967aaf7427b1f554606078ffdb9a69ce` (develop merged in). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #46 to exchange.
+- **Land**: Merged by Atlas into `develop` as `c63b5d6b`.
+- **Audit Findings**:
+  - **(1) Scope**: 2 files touched (`crates/rustkit-layout/src/text.rs` and `crates/rustkit-renderer/src/scroll_cost_tests.rs`). Brings in Batch 35 from macOS develop `0cb89fbe`:
+    - #974 (LAT12): Adopts upstream cfg-free `pub fn shape` text memo (`MEMO.with`, `size <= 0.0` guard, `webfonts::generation()` invalidation, `MISSES` counter) and removes Linux-specific duplicate copy from #100/#102. Linux FreeType implementation cleanly retained as `fn shape_uncached` under `#[cfg(target_os = "linux")]`. Declared test divergence in `a_new_web_font_set_empties_the_memo` (`cfg!(any(target_os = "macos", target_os = "linux"))`) matches upstream PR #979.
+    - #975 (T30): `scroll_cost_tests.rs` introduces `BufferLimitCase` dynamically adjusting limits on software/CPU adapters (`DeviceType::Cpu`), avoiding D3D12 WARP and llvmpipe queue timeouts while preserving 4:1 buffer-to-batch ratio.
+  - **(2) Verification**:
+    - `rustkit-layout`: `shape_memo_tests` 3 passed, 0 failed.
+    - `rustkit-renderer`: `scroll_cost_tests` 10 passed, 0 failed, 2 ignored.
+- **Decisions for Atlas**: None (landed).
+
+## 2026-11-07 12:35 Castor R1 on PR #106 (Stage I1b: Inspector Data for WebKit Content)
+
+- **PR**: `hiwavebrowser/hiwave-linux#106` (`talos/i1b-inspector-data`, author: Talos).
+- **Head SHA**: `1aaca08f2901d773c4917ecbaf30cf8f196c9917` (develop merged in). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #46 to exchange.
+- **Land**: Merged by Atlas into `develop` as `a62900b0`.
+- **Audit Findings**:
+  - **(1) Scope**: 2 files (`crates/hiwave-app/src/main.rs` +245/-6, `crates/hiwave-app/src/ui/inspector_inject.js` +434). Wires DOM tree, styles, picker, and console for WebKit content.
+  - **(2) Substantive Invariant Verification**:
+    - **macOS `main.rs:6155-6340` Port Parity & Escaping**: All 16 `UserEvent` arms ported accurately. Path escaping (`path.replace("\\", "\\\\").replace("'", "\\'")`) and eval code escaping (`code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")`) verified safe against injection.
+    - **Content Architecture**: Operates via `inspector_inject.js` and IPC forwarding. Properly omits `with_rustkit_content!` which is deferred to I1b-2.
+  - **(3) Verification**:
+    - All 4 `hiwave-app` feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+    - `hiwave-app` unit tests: **84 passed**, 0 failed (single-threaded).
+- **Decisions for Atlas**: None (landed). Develop advanced to `a62900b0`. Standing by for Talos's next packages (I1b-2 native RustKit content devtools path, or S7 sync to macOS develop `478cee42`).
+
+
 
 
 
