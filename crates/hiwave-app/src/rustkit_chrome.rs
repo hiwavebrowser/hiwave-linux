@@ -80,12 +80,42 @@ pub fn html_with_bridge(html: &str, bridge: &str, tail: &str) -> String {
 /// Build the chrome view over `bounds` and load `document` into it as an app-owned view (only the app's own
 /// documents get `window.ipc` and `window.hiwaveChrome`; the page view is never passed here).
 pub fn create(window: &tao::window::Window, bounds: Bounds, document: &str) -> Result<Arc<RustKitView>, String> {
+    // The region route needs XShape: without it the full-window chrome would cover the page for good.
+    if !rustkit_viewhost::x11_shape_supported() {
+        return Err("the X server has no SHAPE extension".to_string());
+    }
     let started = std::time::Instant::now();
     let view = RustKitView::new(window, bounds).map_err(|e| e.to_string())?;
     view.set_app_owned();
     view.load_html_internal(document).map_err(|e| e.to_string())?;
     info!(elapsed_ms = started.elapsed().as_millis() as u64, "RustKit chrome: created and loaded");
     Ok(Arc::new(view))
+}
+
+/// The app window's X id, when it is an X11 window.
+pub fn toplevel_xid(window: &tao::window::Window) -> Option<u64> {
+    use tao::rwh_06::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Xlib(h)) => Some(h.window as u64),
+        Ok(RawWindowHandle::Xcb(h)) => Some(h.window.get() as u64),
+        _ => None,
+    }
+}
+
+/// With the RustKit chrome, keyboard focus sits on the chrome's X window after the chrome was clicked (that is how
+/// its text fields get keys). A click on a WebKit page does not move it, so the page's keys and the shortcuts it
+/// forwards would still go to the chrome. When the WebKit page is pressed this gives the X input focus back to the
+/// app window with a raw `XSetInputFocus`: the exact inverse of the call that took it (not `gdk_window_focus`, which
+/// under a window manager only sends it an activation request that it may ignore for a window already active).
+/// WebKit then takes GTK focus as it always did. A RustKit page does this itself in its input pump.
+pub fn return_focus_on_page_click(content: &wry::WebView, chrome: Arc<RustKitView>, window: &tao::window::Window) {
+    use gtk::prelude::*;
+    use wry::WebViewExtUnix;
+    let Some(toplevel) = toplevel_xid(window) else { return };
+    content.webview().connect_button_press_event(move |_, _| {
+        chrome.focus_x11_window(toplevel);
+        gtk::glib::Propagation::Proceed
+    });
 }
 
 /// Drive the chrome on the GTK main loop: step its load, deliver its X11 input, run its timers, hand its

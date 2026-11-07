@@ -1650,6 +1650,12 @@ impl RustKitView {
         }
     }
 
+    /// Give the X input focus to `window` (S3: the keyboard goes back to the app window after a page click).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn focus_x11_window(&self, window: u64) {
+        self.with_x11_view(|surface| surface.focus_x11_window(window), |endpoint| endpoint.focus_x11_window(window));
+    }
+
     /// Raise this view's window above its siblings (S2: the RustKit chrome stays over the page).
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn raise(&self) {

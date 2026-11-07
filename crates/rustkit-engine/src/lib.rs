@@ -3121,6 +3121,12 @@ impl Engine {
         }
     }
 
+    /// Linux (S3): give the X input focus to window `window` (the app's toplevel).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn focus_x11_window(&self, window: u64) {
+        self.viewhost().focus_x11_window(window);
+    }
+
     /// Linux (S2): raise view `id` above its sibling windows.
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn raise_view(&self, id: EngineViewId) {

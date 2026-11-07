@@ -990,6 +990,12 @@ impl WindowSurface {
         let _ = self.presenter.viewhost().set_view_region(self.viewhost_id, region);
     }
 
+    /// Give the X input focus to window `window` (S3).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn focus_x11_window(&self, window: u64) {
+        self.presenter.viewhost().focus_x11_window(window);
+    }
+
     /// Raise this surface's window above its siblings (S2).
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn raise(&self) {

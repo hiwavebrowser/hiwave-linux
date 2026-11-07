@@ -23,6 +23,8 @@ pub mod linux;
 
 pub mod input_queue;
 pub mod x11_input;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use linux::shape_supported as x11_shape_supported;
 pub mod region;
 pub mod cursor;
 
@@ -502,6 +504,14 @@ impl ViewHost {
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn set_view_region(&self, view_id: ViewId, region: Option<&[RegionRect]>) -> Result<(), ViewHostError> {
         self.x11()?.set_region(view_id, region)
+    }
+
+    /// Give the X input focus to window `window` (a raw `XSetInputFocus`).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn focus_x11_window(&self, window: u64) {
+        if let Ok(host) = self.x11() {
+            host.focus_window(window);
+        }
     }
 
     /// Raise a view above its siblings.

@@ -1611,6 +1611,11 @@ impl PageEndpoint {
         self.engine.set_view_region(self.view, region);
     }
 
+    /// Linux (S3): give the X input focus to window `window`.
+    pub fn focus_x11_window(&self, window: u64) {
+        self.engine.focus_x11_window(window);
+    }
+
     /// Linux (S2): raise this endpoint's view window.
     pub fn raise_x11_view(&self) {
         self.engine.raise_view(self.view);
