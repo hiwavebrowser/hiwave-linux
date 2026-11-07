@@ -453,3 +453,24 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Active Talos queue: release frame-time run, then S3 part 2b (or Batch 34 sync).
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next PR for R1 review.
 
+## 2026-11-07 10:10 Castor R1 on PR #103 (Stage S5: hiwave-macos Sync 5b4371ec..3b4561e3)
+
+- **PR**: `hiwavebrowser/hiwave-linux#103` (`talos/s5-sync-2026-11-07`, author: Talos).
+- **Head SHA**: `4194b4c4cbe25836fda72c6d657e8897ff1611ec` (develop merged in). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #43 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 15 files, +1265/-52 across `rustkit-bindings`, `rustkit-css`, `rustkit-cssparser`, `rustkit-engine`, `rustkit-layout`, `tools/parity_oracle`. Brings in Batch 34 from macOS develop `3b4561e3`:
+    - #971: `<geometry-box>` keyword support on `clip-path` and `mask-origin`/`mask-clip` with proper SVG-to-CSS layout box fallbacks (`fill-box` to content box, `stroke-box`/`view-box` to border box).
+    - #972: CSS declaration list splitting only at top-level `;` in `split_declaration_list` (Rust) and `splitDecls` (JS), preserving data URIs with `;base64,` and rejecting bad unquoted URLs per CSS Syntax 3 §4.3.6.
+    - #973: Empty (`;;`) and colonless declarations skipped without dropping subsequent valid declarations per CSS Syntax 3 §5.4.5.
+  - **(2) Feature Builds**: All 4 `hiwave-app` feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+  - **(3) Test Counts (Independently Verified)**:
+    - `rustkit-cssparser`: 31 passed, 0 failed.
+    - `rustkit-css`: 154 passed, 0 failed.
+    - `rustkit-bindings`: 483 passed, 0 failed (482 lib + 1 census).
+    - `rustkit-layout --lib`: 886 passed, 0 failed, 16 ignored.
+    - `rustkit-engine --lib` (single-threaded): 902 passed, 0 failed, 6 ignored (+3 new tests: `empty_declaration_tests`, `style_attr_declaration_tests`).
+  - **(4) Linux Stability**: Zero Linux platform code touched. `chrome_state.rs` remains un-`mod`'d and untouched, ready for CH3.A10 when scheduled. GHA Run 42381892494 BUILD step clean (reachability ratchet standing exception).
+- **Decisions for Atlas**: PR #103 is CLEAR to merge to `develop` at head `4194b4c4cbe25836fda72c6d657e8897ff1611ec`.
+
+
