@@ -80,6 +80,8 @@ mod content_webview_trait;
 #[cfg(not(feature = "native-linux"))]
 mod content_webview_enum;
 #[cfg(not(feature = "native-linux"))]
+mod chrome_ui;
+#[cfg(not(feature = "native-linux"))]
 #[allow(unused_imports)]
 use content_webview_enum::ContentWebView as UnifiedContentWebView;
 // mod shield_adapter;
@@ -2095,11 +2097,13 @@ fn main() {
     }
 
     // Store WebViews in Arcs for event loop access
-    let chrome_webview: Arc<wry::WebView> = Arc::new(chrome_webview);
-    let shelf_webview: Option<Arc<wry::WebView>> = shelf_webview.map(Arc::new);
+    // The chrome and the shelf behind the ChromeUi seam (S1b): WebKit is the only backend, so every call goes
+    // where it went before.
+    let chrome_webview: chrome_ui::ChromeView = chrome_ui::ChromeView::WebKit(Arc::new(chrome_webview));
+    let shelf_webview: Option<chrome_ui::ChromeView> = shelf_webview.map(|v| chrome_ui::ChromeView::WebKit(Arc::new(v)));
 
-    let chrome_for_events: Arc<wry::WebView> = Arc::clone(&chrome_webview);
-    let shelf_for_events: Option<Arc<wry::WebView>> = shelf_webview.clone();
+    let chrome_for_events: chrome_ui::ChromeView = chrome_webview.clone();
+    let shelf_for_events: Option<chrome_ui::ChromeView> = shelf_webview.clone();
 
     let content_for_events: UnifiedContentWebView = content_webview.clone();
     // The RustKit page view is driven from the GTK main loop (its clock, ipc, navigation, title/url, a frame).
@@ -2213,7 +2217,7 @@ fn main() {
                     &window,
                     &chrome_for_events,
                     &content_for_events,
-                    shelf_for_events.as_deref(),
+                    shelf_for_events.as_ref(),
                     ch,
                     sh,
                     sw,
@@ -2231,7 +2235,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             ch,
                             sh,
                             sw,
@@ -2497,7 +2501,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             ch,
                             sh,
                             sidebar_open,
@@ -2515,7 +2519,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             ch,
                             sh,
                             sidebar_open,
@@ -2533,7 +2537,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             ch,
                             sh,
                             sidebar_open,
@@ -2552,7 +2556,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             ch,
                             sh,
                             sidebar_open,
@@ -2588,7 +2592,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             ch,
                             sh,
                             sidebar_open,
@@ -2606,7 +2610,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             ch,
                             sh,
                             new_width,
@@ -2623,7 +2627,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             ch,
                             sh,
                             width,
@@ -2640,7 +2644,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             ch,
                             sh,
                             sw,
@@ -2658,7 +2662,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             10.0, // Minimal chrome height for reveal zone hover detection
                             0.0,  // No shelf height
                             0.0,  // Sidebar hidden (width = 0)
@@ -2691,7 +2695,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             ch,
                             sh,
                             sidebar_open,
@@ -2745,7 +2749,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             peek_height,
                             0.0,  // No shelf in peek mode
                             0.0,  // No sidebar in peek mode (width = 0)
@@ -2759,7 +2763,7 @@ fn main() {
                             &window,
                             &chrome_for_events,
                             &content_for_events,
-                            shelf_for_events.as_deref(),
+                            shelf_for_events.as_ref(),
                             0.0,  // No chrome
                             0.0,  // No shelf
                             0.0,  // No sidebar (width = 0)
