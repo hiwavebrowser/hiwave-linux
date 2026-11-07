@@ -990,6 +990,12 @@ impl WindowSurface {
         let _ = self.presenter.viewhost().set_view_region(self.viewhost_id, region);
     }
 
+    /// Show the X11 font cursor `shape` over this surface's window (S3).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn set_cursor(&self, shape: u32) {
+        let _ = self.presenter.viewhost().set_x11_cursor(self.viewhost_id, shape);
+    }
+
     /// Give the X input focus to window `window` (S3).
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn focus_x11_window(&self, window: u64) {
