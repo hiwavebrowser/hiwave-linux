@@ -399,3 +399,31 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - LAT2 spinner test `a_spinner_on_a_500_box_page_never_relays_out_and_is_cheap` unignored and passes in 3.41s, closing row L4/LATLX.
     - GHA Run 42362145940 build step is green; reachability ratchet is the standing documented exception.
 - **Decisions for Atlas**: PR #100 is CLEAR to merge to `develop` at frozen head `29b18edfcf7badc527bae434b32d867a9aa5bbe9`.
+
+## 2026-11-07 06:40 Castor R1 on PR #101 (Stage S4: hiwave-macos Sync 95691f85..5b4371ec)
+
+- **PR**: `hiwavebrowser/hiwave-linux#101` (`talos/s4-sync-2026-11-07`, author: Talos).
+- **Head SHA**: `241e3d6d0008dc7793ff6b60c0812f8a62ede09c` (develop merged in). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #40 to exchange.
+- **Audit Findings**:
+  - **(1) Feature Builds**: All 4 `hiwave-app` feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+  - **(2) Test Counts (Independently Verified)**:
+    - `rustkit-layout`: 886 passed, 0 failed, 16 ignored.
+    - `rustkit-bindings`: 481 passed.
+    - `rustkit-css`: 153 passed.
+    - `rustkit-text`: 85 passed (79 lib + 6 integration).
+    - `rustkit-dom`: 109 passed.
+    - `rustkit-renderer`: 144 passed.
+    - `rustkit-viewhost`: 46 passed.
+    - `hiwave-app`: 107 passed (79 unit + 27 integration single-threaded + 1 stack).
+    - `rustkit-engine --lib` (single-threaded): 899 passed, 0 failed, 6 ignored.
+    - `rustkit-engine --features headless --lib`: 2010 passed, 2 allowlisted failures (`text_control_select_tests::a_click_places_the_caret_at_the_click_point` and `transform_rect_tests::a_transform_does_not_apply_to_a_plain_inline` matching `linux_known_fail.txt`), 33 ignored.
+    - LAT2 spinner test `a_spinner_on_a_500_box_page_never_relays_out_and_is_cheap` passes in 3.32s; L5 memo active.
+  - **(3) Conflict Resolutions & Code**:
+    - `hiwave-app/src/main.rs`: Retained Linux structure cleanly.
+    - `chrome_state.rs` & `inspector_page_tests.rs`: Un-`mod`'d files cause zero compile exposure; tracked for follow-up PRs.
+    - `chrome.html` & `inspector.html`: Contract checked against Linux `main.rs`. Methods called directly via `evaluate_script` remain fully functional and gain quote escaping and focus guard improvements.
+    - `scripts/realsite_board.py` & `tools/parity_oracle/realsite.mjs`: Honest user-agent tooling preserved without fake UA strings.
+    - `crates/rustkit-engine/src/lib.rs`: X11 `create_view` arm initializes `focus_by_pointer: false, space_armed: None`, matching macOS.
+  - **(4) Tests & CI**: GHA Run 42366698620 BUILD step is green; reachability ratchet is the standing documented exception.
+- **Decisions for Atlas**: PR #101 is CLEAR to merge to `develop` at frozen head `241e3d6d0008dc7793ff6b60c0812f8a62ede09c`, subject to Talos enumerating the 9 conflict paths in the body per Atlas broadcast #1178.
