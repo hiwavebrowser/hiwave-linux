@@ -87,6 +87,8 @@ mod content_webview_enum;
 mod chrome_ui;
 #[cfg(not(feature = "native-linux"))]
 mod inspector_panel;
+#[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "native-linux")))]
+mod devtools_panel;
 #[cfg(not(feature = "native-linux"))]
 #[allow(unused_imports)]
 use content_webview_enum::ContentWebView as UnifiedContentWebView;
@@ -420,6 +422,33 @@ static LAYOUT_ORIGIN_Y: std::sync::atomic::AtomicI32 = std::sync::atomic::Atomic
 fn layout_origin() -> (f64, f64) {
     use std::sync::atomic::Ordering::Relaxed;
     (LAYOUT_ORIGIN_X.load(Relaxed) as f64, LAYOUT_ORIGIN_Y.load(Relaxed) as f64)
+}
+
+/// The Inspector's native developer-tools state for a RustKit page (`devtools_panel`); nothing for a WebKit page.
+#[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "native-linux")))]
+type DevtoolsHandle = Rc<std::cell::RefCell<devtools_panel::Devtools>>;
+#[cfg(not(all(target_os = "linux", feature = "rustkit")))]
+type DevtoolsHandle = ();
+
+/// Run `$body` with the page's `Devtools` (`$d`) and RustKit view (`$v`) when the page is a RustKit view; true when
+/// it was (the caller then skips the WebKit script path), false for a WebKit page or a build without RustKit.
+macro_rules! with_devtools {
+    ($content:expr, $dev:expr, $insp:expr, |$d:ident, $v:ident| $body:expr) => {{
+        #[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "native-linux")))]
+        let handled = if let UnifiedContentWebView::RustKit(ref $v) = $content {
+            let mut $d = $dev.borrow_mut();
+            let _ = $body;
+            true
+        } else {
+            false
+        };
+        #[cfg(not(all(target_os = "linux", feature = "rustkit", not(feature = "native-linux"))))]
+        let handled = {
+            let _ = (&$content, &$dev, &$insp);
+            false
+        };
+        handled
+    }};
 }
 
 /// The Inspector panel's `window.ipc` messages. A function, not the handler closure, so the RustKit panel's pump
@@ -2325,16 +2354,45 @@ fn main() {
         let ipc = Rc::clone(&inspector_ipc);
         move |window, rect| build_inspector_view(window, &gtk_fixed, &ipc, rustkit_chrome_on, rect)
     }));
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    let devtools: DevtoolsHandle = Rc::new(std::cell::RefCell::new(devtools_panel::Devtools::default()));
+    #[cfg(not(all(target_os = "linux", feature = "rustkit")))]
+    let devtools: DevtoolsHandle = ();
 
     let content_for_events: UnifiedContentWebView = content_webview.clone();
     // The RustKit page view is driven from the GTK main loop (its clock, ipc, navigation, title/url, a frame).
     #[cfg(all(target_os = "linux", feature = "rustkit"))]
     if let UnifiedContentWebView::RustKit(ref view) = content_webview {
+        // The Inspector's native path rides the page's pump: its answers each turn, and its element picker takes
+        // the page's pointer input while it is on.
+        let devtools_turn = Rc::clone(&devtools);
+        let inspector_turn = Rc::clone(&inspector_for_events);
+        let devtools_pick = Rc::clone(&devtools);
+        let inspector_pick = Rc::clone(&inspector_for_events);
         rustkit_content::install_pump(
             Arc::clone(view),
             proxy.clone(),
             std::rc::Rc::clone(&content_ipc),
             content_created_at.unwrap_or_else(std::time::Instant::now),
+            rustkit_content::PumpHooks {
+                on_turn: Box::new(move |view| devtools_turn.borrow_mut().pump(view, &*inspector_turn)),
+                input_filter: Box::new(move |view, delivery| {
+                    use webview_rustkit::X11Delivery;
+                    let mut dev = devtools_pick.borrow_mut();
+                    if !dev.picking() {
+                        return false;
+                    }
+                    match delivery {
+                        X11Delivery::MouseMove { x, y } => dev.pick_hover(view, &*inspector_pick, Some((*x, *y))),
+                        X11Delivery::MouseLeave => dev.pick_hover(view, &*inspector_pick, None),
+                        X11Delivery::MouseUp { x, y } => dev.pick_at(view, &*inspector_pick, *x, *y),
+                        X11Delivery::KeyDown { vk: 0x1B, .. } => dev.stop_picker(view, &*inspector_pick),
+                        X11Delivery::MouseDown { .. } => {}
+                        _ => return false,
+                    }
+                    true
+                }),
+            },
         );
     }
     let state_for_events = Arc::clone(&state);
@@ -2797,6 +2855,9 @@ fn main() {
                         );
                         // Its console answers without a click first, as the shelf's input does.
                         inspector_for_events.take_keyboard();
+                        if with_devtools!(content_for_events, devtools, inspector_for_events, |d, v| d.open(v, &*inspector_for_events)) {
+                            return;
+                        }
                         // WebKit page: inject the Inspector's script (once) and ask for the DOM tree.
                         let inject_script = format!("if (!window.__hiwaveInspector) {{ {} }}", INSPECTOR_INJECT);
                         content_for_events.evaluate_script(&inject_script);
@@ -2830,6 +2891,9 @@ fn main() {
                         );
                         // The keyboard goes back to the page; its highlight goes.
                         content_for_events.focus();
+                        if with_devtools!(content_for_events, devtools, inspector_for_events, |d, v| d.close(v, &*inspector_for_events)) {
+                            return;
+                        }
                         content_for_events.evaluate_script("if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }");
                     }
                     UserEvent::ToggleInspector => {
@@ -2868,6 +2932,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorHighlightElement { path } => {
+                        if with_devtools!(content_for_events, devtools, inspector_for_events, |d, v| d.highlight(v, Some(&path))) {
+                            return;
+                        }
                         let script = format!(
                             "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement('{}'); }}",
                             path.replace("'", "\\'")
@@ -2875,11 +2942,17 @@ fn main() {
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::InspectorClearHighlight => {
+                        if with_devtools!(content_for_events, devtools, inspector_for_events, |d, v| d.highlight(v, None)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }"
                         );
                     }
                     UserEvent::InspectorStartPicker => {
+                        if with_devtools!(content_for_events, devtools, inspector_for_events, |d, _v| d.start_picker(&*inspector_for_events)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.startPicker(); }"
                         );
@@ -2888,6 +2961,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorStopPicker => {
+                        if with_devtools!(content_for_events, devtools, inspector_for_events, |d, v| d.stop_picker(v, &*inspector_for_events)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.stopPicker(); }"
                         );
@@ -2903,6 +2979,9 @@ fn main() {
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::InspectorRefreshTree => {
+                        if with_devtools!(content_for_events, devtools, inspector_for_events, |d, v| d.send_tree(v)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(r#"
                             (function() {
                                 if (window.__hiwaveInspector) {
@@ -2916,6 +2995,9 @@ fn main() {
                         "#);
                     }
                     UserEvent::InspectorSelect { path } => {
+                        if with_devtools!(content_for_events, devtools, inspector_for_events, |d, v| d.select(v, &path)) {
+                            return;
+                        }
                         let script = format!(r#"
                             (function() {{
                                 if (window.__hiwaveInspector) {{
@@ -2930,8 +3012,8 @@ fn main() {
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::InspectorExpand { path } => {
-                        // The injected-script tree is sent whole; only RustKit's is cut and expanded on demand (I1b-2).
-                        let _ = path;
+                        // The injected-script tree is sent whole; only RustKit's is cut and expanded on demand.
+                        with_devtools!(content_for_events, devtools, inspector_for_events, |d, v| d.expand(v, &path));
                     }
                     UserEvent::InspectElement { path } => {
                         // Open inspector and select the element
@@ -2963,9 +3045,15 @@ fn main() {
                     }
                     UserEvent::InspectorConsoleClear => {
                         // Clear console in inspector panel
+                        if with_devtools!(content_for_events, devtools, inspector_for_events, |d, _v| d.clear_console(&*inspector_for_events)) {
+                            return;
+                        }
                         let _ = inspector_for_events.eval("window.hiwaveInspector && window.hiwaveInspector.clearConsole()");
                     }
                     UserEvent::InspectorConsoleEval { code } => {
+                        if with_devtools!(content_for_events, devtools, inspector_for_events, |d, v| d.eval(v, &code)) {
+                            return;
+                        }
                         // Execute JavaScript in content webview
                         let escaped_code = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
                         let script = format!(r#"
