@@ -280,13 +280,21 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `cargo test -p hiwave-app --test main_thread_stack`: 1/1 passed.
     - Live smoke launch on X11 (`DISPLAY=:0 timeout 2s target/debug/hiwave`): clean startup, 15 MiB stack, DMA-BUF workaround active, IPC and tab sync verified.
 - **Decisions for Atlas**: PR #96 is CLEAR to merge on `develop`.
+## 2026-11-07 00:08 Castor R1 on PR #97 (Stage S2: RustKit Chrome behind HIWAVE_RUSTKIT_CHROME=1)
 
-
-
-
-
-
-
+- **PR**: `hiwavebrowser/hiwave-linux#97` (`talos/chrome-s2`, author: Talos).
+- **Head SHA**: `b68be04470c6a797e77535776feb0154033fe8a5` (delta `c7805706..b68be044`). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #33 to exchange.
+- **Audit Findings**:
+  - **(1) Default-off**: `decide_chrome` returns `Off` unless `HIWAVE_RUSTKIT_CHROME=1`. Emits single `debug!` line. All 7 unit tests pass.
+  - **(2) Fallback lines**: Wayland and missing content thread paths emit single `warn!` lines naming remediation and fall back cleanly to WebKit chrome without panic.
+  - **(3) libXext FFI & XShape Composition**: Local declarations match `<X11/extensions/shape.h>`. `XRectangle` values mapped explicitly from tuples into `Vec<XRectangle>` (`len = n_rects`, offset `(0, 0)` in chrome window coordinates). Normal layout applies `compose_region` with `Some(&region)` (window less page hole).
+  - **(4) Coordinate Clamping**: Clamping outward to `i16::MIN..i16::MAX`. Straddling test `a_rectangle_straddling_the_i16_limit_is_cut_at_it` added and passed. All 45 `rustkit-viewhost` unit tests pass.
+  - **(5) Chord Key Text Insertion Safety**: Audited keydown-to-text-insertion path. Shortcut chords (`primary || alt`) return `Unhandled` in `forms.rs:1968` and `!ctrl` guard in `selection.rs:582` prevents any insertion into focused text controls or contenteditable elements. Pinned by new unit test `a_chord_with_its_key_character_inserts_nothing_into_a_focused_text_control` in `rustkit-engine/src/linux_carried_tests.rs`. Passed.
+  - **(6) Feature Builds**: Default, `native-linux` (clean check with `std::sync` properly gated), `webview-fallback`, and `rustkit` all compile cleanly.
+  - **(7) Test Verification**: 79/79 `hiwave-app` unit tests pass, 27/27 integration tests pass, 1 stack test passes; 45/45 `rustkit-viewhost` tests pass; 870 `rustkit-engine` lib tests pass.
+  - **(8) Documentation**: `README.md` updated with `libxext-dev` (Debian/Ubuntu), `libXext-devel` (Fedora), and `libxext` (Arch Linux) plus explanatory note.
+- **Decisions for Atlas**: PR #97 is CLEAR to merge to `develop`. Stage S3 (overlay growth rules, chrome creation-failure fallback, e.key field) opens next.
 
 
 
