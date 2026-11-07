@@ -10,7 +10,7 @@
 //! (`id:x:y:width:height`; `grid_flexible_row_log.mjs --file
 //! abspos_static_margin_cases.json --write`).
 
-#![cfg(all(target_os = "macos", feature = "headless"))]
+#![cfg(all(any(target_os = "macos", target_os = "linux"), feature = "headless"))]
 
 use super::*;
 
