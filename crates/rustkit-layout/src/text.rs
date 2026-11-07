@@ -2061,6 +2061,50 @@ impl TextShaper {
         stretch: FontStretch,
         size: f32,
     ) -> Result<ShapedRun, TextError> {
+        // Declared Linux divergence (L5, LATLX): the same text in the same font is measured again and again (every
+        // box of a page, every frame). The result is a pure function of the inputs and of the registered web
+        // fonts, so it is memoised per thread. A web-font registration changes `webfonts::generation()` and starts
+        // a fresh cache; a full cache is dropped whole rather than evicted entry by entry.
+        use std::collections::HashMap;
+        type Key = (String, Vec<String>, u16, std::mem::Discriminant<FontStyle>, std::mem::Discriminant<FontStretch>, u32, u64);
+        const MAX_ENTRIES: usize = 16384;
+        thread_local! {
+            static CACHE: std::cell::RefCell<HashMap<Key, ShapedRun>> = std::cell::RefCell::new(HashMap::new());
+        }
+        let key: Key = (
+            text.to_string(),
+            font_chain.all_families().map(str::to_string).collect(),
+            weight.0,
+            std::mem::discriminant(&style),
+            std::mem::discriminant(&stretch),
+            size.to_bits(),
+            rustkit_text::webfonts::generation(),
+        );
+        if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+            return Ok(hit);
+        }
+        let run = self.shape_uncached(text, font_chain, weight, style, stretch, size)?;
+        CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.len() >= MAX_ENTRIES {
+                c.clear();
+            }
+            c.insert(key, run.clone());
+        });
+        Ok(run)
+    }
+
+    /// The measuring itself, uncached.
+    #[cfg(target_os = "linux")]
+    fn shape_uncached(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+    ) -> Result<ShapedRun, TextError> {
         use rustkit_text::{linux::LinuxTextBackend, FontDescriptor};
         thread_local! {
             static BACKEND: std::cell::RefCell<Option<LinuxTextBackend>> =
@@ -3560,6 +3604,32 @@ mod tests {
             texts.get(1).is_some_and(|t| t.starts_with('\u{a0}')),
             "the nbsp must start line 2, not vanish at the break: {texts:?}"
         );
+    }
+
+    /// L5 (LATLX): the Linux shape cache returns what the uncached measure returns, keyed on every input that
+    /// changes the answer (text, families, weight, size), and a repeat is the same run.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_linux_shape_cache_agrees_with_the_uncached_measure_and_separates_its_inputs() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("sans-serif");
+        let shape = |text: &str, weight: u16, size: f32| {
+            shaper
+                .shape(text, &chain, FontWeight(weight), FontStyle::Normal, FontStretch::Normal, size)
+                .expect("shape")
+        };
+        let first = shape("Handgloves quick wizard", 400, 16.0);
+        let again = shape("Handgloves quick wizard", 400, 16.0);
+        assert_eq!(first.width(), again.width(), "a repeat is the cached run");
+        assert_eq!(first.glyphs.len(), again.glyphs.len());
+        let uncached = shaper
+            .shape_uncached("Handgloves quick wizard", &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
+            .expect("shape");
+        assert_eq!(first.width(), uncached.width(), "the cache returns what the measure returns");
+        // Inputs that change the answer are separate entries.
+        assert!(shape("Handgloves quick wizard", 400, 32.0).width() > first.width() * 1.5, "size");
+        assert!(shape("Handgloves", 400, 16.0).width() < first.width(), "text");
+        assert!(shape("Handgloves quick wizard", 700, 16.0).width() >= first.width(), "weight");
     }
 
     fn face(family: &str, src: &str) -> FontFaceRule {
