@@ -114,3 +114,17 @@ mod tests {
         assert_eq!(column(300.0, 104.0, 280.0, 300.0).content_height, 0.0);
     }
 }
+
+/// The Inspector's native path (`devtools_panel`) talks to the panel through `ChromeUi`: script in, nothing else.
+/// Placement goes through [`InspectorPanel::lay_out`] (it needs the window), so `place` here is not used.
+impl ChromeUi for InspectorPanel {
+    fn eval(&self, js: &str) -> Result<(), String> {
+        self.lazy.eval(js)
+    }
+
+    fn place(&self, _rect: Rect) {}
+
+    fn take_keyboard(&self) {
+        self.lazy.take_keyboard();
+    }
+}

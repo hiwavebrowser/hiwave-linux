@@ -23,7 +23,7 @@ use crate::webview_rustkit::RustKitView;
 use rustkit_engine::{devtools_node_of, devtools_path, DevtoolsAnswer, DevtoolsConsole, DevtoolsQuery};
 use serde::Serialize;
 use tokio::sync::oneshot;
-use crate::ChromeUi;
+use crate::chrome_ui::ChromeUi;
 
 /// How long the console's input line waits for a busy page before it is
 /// given up and cancelled (T6c).
