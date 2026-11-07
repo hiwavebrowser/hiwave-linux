@@ -258,17 +258,29 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - Folded LAT2 spinner test: 1 ignored / 0 failed (`LATLX`).
 - **Decisions for Atlas**: PR #95 is CLEAR to merge on `develop` (LANDED at `ec01c8ce` by Pete).
 
-## 2026-11-06 18:50 Castor standing by for Stage S1b
+## 2026-11-06 23:00 Castor R1 on PR #96 (Stage S1b: ChromeUi / ChromeView / LazyPanel)
 
-- **Before**: `hiwave-linux` `develop` at `ec01c8ce` (PR #95 merged containing S1a + S1c and folded LAT2 ignore).
-- **After**:
-  - `develop` fast-forwarded to `ec01c8ce`.
-  - Packages S1, A1, S2, L1, L2, L3, L4 (in #95) all complete and landed on `develop`.
-  - Seat operates in strict reviews-only mode.
-  - Standing by for Talos's incoming Stage S1b PR (`ChromeUi` port on WebKit).
-- **PRs**: None open.
-- **Blockers**: None.
-- **Decisions for Atlas**: None. Standing by for S1b review.
+- **PR**: `hiwavebrowser/hiwave-linux#96` (`talos/chrome-s1b`, author: Talos).
+- **Head SHA**: `b27a356f55bdbcb9fdfe93d2a4aeea456149feb1` (short `b27a356f`). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #31 to exchange.
+- **Audit Findings**:
+  - `crates/hiwave-app/src/chrome_ui.rs`:
+    - Ported `ChromeUi` trait, matching macOS `main.rs:327` trait definition byte-for-byte in semantics and default implementations (`eval`, `place`, `take_keyboard`, `compose`, `keep_on_top`).
+    - `impl ChromeUi for wry::WebView` delegates `eval` to `evaluate_script` and `place` to `set_bounds`.
+    - `ChromeView::WebKit` wraps `Arc<wry::WebView>` and implements `IWebView`, delegating all 10 methods without altering behavior.
+    - `LazyPanel`: Implements bounded script retention (`LAZY_PANEL_HELD_MAX = 256`) and deferred creation on open.
+  - `crates/hiwave-app/src/main.rs`:
+    - Holds `chrome_webview` and `shelf_webview` as `ChromeView`.
+    - All call sites retain identical semantics (`shelf_for_events.as_ref()` replacing `as_deref()`).
+  - Evidence: Verified in clean review worktree at exact head `b27a356f`:
+    - All 4 feature builds compile cleanly: default (`webview-fallback` + `rustkit`), `native-linux`, `webview-fallback` only, and `rustkit` only.
+    - `cargo test -p hiwave-app --bin hiwave chrome_ui`: 5/5 passed.
+    - `cargo test -p hiwave-app --bin hiwave`: 71/71 passed.
+    - `cargo test -p hiwave-app --test integration_tests -- --test-threads=1`: 27/27 passed.
+    - `cargo test -p hiwave-app --test main_thread_stack`: 1/1 passed.
+    - Live smoke launch on X11 (`DISPLAY=:0 timeout 2s target/debug/hiwave`): clean startup, 15 MiB stack, DMA-BUF workaround active, IPC and tab sync verified.
+- **Decisions for Atlas**: PR #96 is CLEAR to merge on `develop`.
+
 
 
 
