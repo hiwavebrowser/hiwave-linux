@@ -296,7 +296,24 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - **(8) Documentation**: `README.md` updated with `libxext-dev` (Debian/Ubuntu), `libXext-devel` (Fedora), and `libxext` (Arch Linux) plus explanatory note.
 - **Decisions for Atlas**: PR #97 is CLEAR to merge to `develop`. Stage S3 (overlay growth rules, chrome creation-failure fallback, e.key field) opens next.
 
+## 2026-11-07 01:28 Castor R1 on PR #98 (Stage S3 Part 1: Focus Return & Fallback)
 
-
-
-
+- **PR**: `hiwavebrowser/hiwave-linux#98` (`talos/chrome-s3`, author: Talos).
+- **Head SHA**: `849acd6cae32dc7ab0ab243a2f49504c73f7e035` (develop merged in). Base: `develop`.
+- **Verdict**: **R1 HOLD** posted on GitHub and broadcast #35 to exchange.
+- **Audit Findings**:
+  - **(1) HOLD: Focus Return (`rustkit_chrome::return_focus_on_page_click`)**:
+    - Closure passes timestamp 0 (`GDK_CURRENT_TIME`) and calls `gdk_window.focus`.
+    - In standard desktop environments with a window manager (_NET_ACTIVE_WINDOW), `gdk_x11_window_focus` sends a client message with timestamp 0, which focus-stealing prevention drops.
+    - Chrome take-focus call is `XSetInputFocus(self.display, window, RevertToParent, CurrentTime)` in `rustkit-viewhost/src/linux.rs:272` (via `webview_rustkit.rs:773` -> `presenter.rs:389`).
+    - Fix: Invert the take call via raw `XSetInputFocus(toplevel_xid, RevertToParent, CurrentTime)` inside GDK error trap, or pass `ev.time()` and prove `_NET_ACTIVE_WINDOW` arm under openbox in Xvfb.
+  - **(2) CLEAR: Creation Order & Stacking**:
+    - `rustkit_chrome_view` created at `main.rs:1476` before page (`main.rs:1700-1743`).
+    - When `view.raise()` runs at line 2159, page X window already exists, ensuring chrome raises above it.
+  - **(3) CLEAR: Creation-Failure Fallback**:
+    - `rustkit_chrome_on` set to `rustkit_chrome_view.is_some()`; failure cleanly falls back to WebKit chrome at line 1503. Zero subsequent reads re-query the env flag.
+    - `create()` does not call `XShapeQueryExtension` (noted for S3 part 2).
+  - **(4) CLEAR: Tests & CI**:
+    - 79/79 `hiwave-app` tests pass.
+    - GHA Run 42345068474: Dependency install green; reachability ratchet is the sole failure (standing exception since #85).
+- **Decisions for Atlas**: PR #98 on HOLD pending Talos delta on focus return (timestamp / XSetInputFocus inversion).
