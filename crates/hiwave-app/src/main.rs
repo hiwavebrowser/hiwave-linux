@@ -86,6 +86,8 @@ mod content_webview_enum;
 #[cfg(not(feature = "native-linux"))]
 mod chrome_ui;
 #[cfg(not(feature = "native-linux"))]
+mod inspector_panel;
+#[cfg(not(feature = "native-linux"))]
 #[allow(unused_imports)]
 use content_webview_enum::ContentWebView as UnifiedContentWebView;
 // mod shield_adapter;
@@ -378,6 +380,10 @@ enum UserEvent {
     ActivateTabByIndex {
         index: usize,
     },
+    // Inspector panel (I1a)
+    OpenInspector,
+    CloseInspector,
+    ToggleInspector,
 }
 
 /// Where the shared container sits inside the window, in window pixels. On GNOME Wayland GTK draws its own
@@ -397,6 +403,62 @@ fn layout_origin() -> (f64, f64) {
     (LAYOUT_ORIGIN_X.load(Relaxed) as f64, LAYOUT_ORIGIN_Y.load(Relaxed) as f64)
 }
 
+/// The Inspector panel's `window.ipc` messages. A function, not the handler closure, so the RustKit panel's pump
+/// can feed it the same messages. I1a: close. The data requests (tree, styles, console) are I1b.
+#[cfg(not(feature = "native-linux"))]
+fn handle_inspector_ipc(body: &str, inspector_proxy: &tao::event_loop::EventLoopProxy<UserEvent>) {
+    match serde_json::from_str::<IpcMessage>(body) {
+        Ok(IpcMessage::CloseInspector) | Ok(IpcMessage::InspectorClose) => {
+            let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
+        }
+        Ok(other) => tracing::debug!(?other, "Inspector IPC not handled yet (I1b)"),
+        Err(e) => error!("Failed to parse Inspector IPC: {}", e),
+    }
+}
+
+/// Build the Inspector panel's view at `rect` (called once, on the panel's first open): a RustKit view when the
+/// chrome is RustKit, else a WebKit view in the app's container.
+#[cfg(not(feature = "native-linux"))]
+fn build_inspector_view(
+    window: &tao::window::Window,
+    gtk_fixed: &gtk::Fixed,
+    ipc: &Rc<dyn Fn(&str)>,
+    rustkit_chrome_on: bool,
+    rect: Rect,
+) -> Option<chrome_ui::ChromeView> {
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    if rustkit_chrome_on {
+        let at = rect.position.to_logical::<f64>(1.0);
+        let size = rect.size.to_logical::<f64>(1.0);
+        let bounds = rustkit_viewhost::Bounds::new(at.x as i32, at.y as i32, size.width as u32, size.height as u32);
+        let document = rustkit_chrome::html_with_bridge(INSPECTOR_HTML, JS_BRIDGE, "");
+        match rustkit_chrome::create(window, bounds, &document) {
+            Ok(view) => {
+                rustkit_chrome::install_pump(Arc::clone(&view), Rc::clone(ipc));
+                return Some(chrome_ui::ChromeView::RustKit(view));
+            }
+            Err(why) => error!("RustKit Inspector could not be created, using the WebKit panel: {why}"),
+        }
+    }
+    let _ = (window, rustkit_chrome_on);
+    let handler = Rc::clone(ipc);
+    match WebViewBuilder::new()
+        .with_html(INSPECTOR_HTML)
+        .with_devtools(cfg!(debug_assertions))
+        .with_clipboard(true)
+        .with_initialization_script(JS_BRIDGE)
+        .with_bounds(rect)
+        .with_ipc_handler(move |message| handler(message.body()))
+        .build_gtk(gtk_fixed)
+    {
+        Ok(view) => Some(chrome_ui::ChromeView::WebKit(Arc::new(view))),
+        Err(e) => {
+            error!("Inspector WebView could not be created: {e}");
+            None
+        }
+    }
+}
+
 #[cfg(not(feature = "native-linux"))]
 #[allow(clippy::too_many_arguments)]
 fn apply_layout(
@@ -404,8 +466,10 @@ fn apply_layout(
     chrome: &chrome_ui::ChromeView,
     content: &impl IWebView,
     shelf: Option<&impl IWebView>,
+    inspector: &inspector_panel::InspectorPanel,
     chrome_height: f64,
     shelf_height: f64,
+    inspector_height: f64,
     sidebar_width: f64,
     right_sidebar_open: bool,
 ) {
@@ -424,7 +488,8 @@ fn apply_layout(
         0.0
     };
     let content_width = (width - sidebar_width - right_sidebar_width).max(0.0);
-    let content_height = (height - chrome_height - shelf_height).max(0.0);
+    let column = inspector_panel::column(height, chrome_height, shelf_height, inspector_height);
+    let content_height = column.content_height;
 
     let chrome_height_rect = height;
     let chrome_rect = Rect {
@@ -439,8 +504,15 @@ fn apply_layout(
 
     chrome.set_bounds(chrome_rect);
     // The RustKit chrome shows the window less the page column (the hole); the WebKit chrome ignores it.
-    chrome_ui::ChromeUi::compose(chrome, width, chrome_height_rect, (sidebar_width, chrome_height, content_width, content_height));
+    // The page column (page, Inspector, shelf) is the hole: those views sit below the chrome.
+    chrome_ui::ChromeUi::compose(chrome, width, chrome_height_rect, (sidebar_width, chrome_height, content_width, (height - chrome_height).max(0.0)));
     content.set_bounds(content_rect);
+    // The Inspector sits between the page and the shelf; built on its first open.
+    let inspector_rect = Rect {
+        position: LogicalPosition::new((sidebar_width + origin_x) as i32, (column.inspector_y + origin_y) as i32).into(),
+        size: LogicalSize::new(content_width, inspector_height).into(),
+    };
+    inspector.lay_out(window, inspector_rect);
 
     if let Some(shelf) = shelf {
         let shelf_rect = Rect {
@@ -449,6 +521,8 @@ fn apply_layout(
         };
         shelf.set_bounds(shelf_rect);
     }
+    // The chrome stays frontmost, over panels built after it.
+    chrome_ui::ChromeUi::keep_on_top(chrome);
 }
 
 #[cfg(not(feature = "native-linux"))]
@@ -1021,6 +1095,7 @@ fn main() {
     // Track current heights (will be modified dynamically)
     let chrome_height = Arc::new(Mutex::new(CHROME_HEIGHT_DEFAULT as f64));
     let shelf_height = Arc::new(Mutex::new(SHELF_HEIGHT_DEFAULT as f64));
+    let inspector_height = Arc::new(Mutex::new(inspector_panel::INSPECTOR_HEIGHT_DEFAULT as f64));
     // Sidebar width: 0.0 = closed, >0 = open with that width
     let sidebar_width_state = Arc::new(Mutex::new(0.0_f64));
     let right_sidebar_open = Arc::new(Mutex::new(false));
@@ -1321,6 +1396,15 @@ fn main() {
                     IpcMessage::CollapseShelf => {
                         info!("Collapsing shelf");
                         let _ = chrome_proxy.send_event(UserEvent::CollapseShelf);
+                    }
+                    IpcMessage::OpenInspector => {
+                        let _ = chrome_proxy.send_event(UserEvent::OpenInspector);
+                    }
+                    IpcMessage::CloseInspector => {
+                        let _ = chrome_proxy.send_event(UserEvent::CloseInspector);
+                    }
+                    IpcMessage::ToggleInspector => {
+                        let _ = chrome_proxy.send_event(UserEvent::ToggleInspector);
                     }
                     // Focus mode IPC handlers
                     IpcMessage::EnterFocusMode => {
@@ -2164,9 +2248,25 @@ fn main() {
             rustkit_chrome::return_focus_on_page_click(page, Arc::clone(view), &window);
         }
         // The first region, before the first layout turn: the window less the page column.
-        chrome_ui::ChromeUi::compose(&chrome_webview, width, height, (sidebar_width, CHROME_HEIGHT_DEFAULT as f64, content_width, content_height));
+        chrome_ui::ChromeUi::compose(&chrome_webview, width, height, (sidebar_width, CHROME_HEIGHT_DEFAULT as f64, content_width, (height - CHROME_HEIGHT_DEFAULT as f64).max(0.0)));
     }
     let shelf_for_events: Option<chrome_ui::ChromeView> = shelf_webview.clone();
+
+    // The Inspector panel (I1a): a view below the page, built on its first open. RustKit when the chrome is, so
+    // the panel and the chrome stay one engine; WebKit otherwise.
+    let inspector_height_for_events = Arc::clone(&inspector_height);
+    let inspector_ipc: Rc<dyn Fn(&str)> = {
+        let inspector_proxy = proxy.clone();
+        Rc::new(move |body: &str| {
+            log_ipc("Inspector IPC", body);
+            handle_inspector_ipc(body, &inspector_proxy);
+        })
+    };
+    let inspector_for_events = Rc::new(inspector_panel::InspectorPanel::new(INSPECTOR_HTML, {
+        let gtk_fixed = gtk_fixed.clone();
+        let ipc = Rc::clone(&inspector_ipc);
+        move |window, rect| build_inspector_view(window, &gtk_fixed, &ipc, rustkit_chrome_on, rect)
+    }));
 
     let content_for_events: UnifiedContentWebView = content_webview.clone();
     // The RustKit page view is driven from the GTK main loop (its clock, ipc, navigation, title/url, a frame).
@@ -2281,8 +2381,10 @@ fn main() {
                     &chrome_for_events,
                     &content_for_events,
                     shelf_for_events.as_ref(),
+                    &inspector_for_events,
                     ch,
                     sh,
+                    *inspector_height_for_events.lock().unwrap(),
                     sw,
                     right_sidebar_open,
                 );
@@ -2299,8 +2401,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             ch,
                             sh,
+                            *inspector_height_for_events.lock().unwrap(),
                             sw,
                             right_sidebar_open,
                         );
@@ -2565,8 +2669,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             ch,
                             sh,
+                            *inspector_height_for_events.lock().unwrap(),
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2583,8 +2689,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             ch,
                             sh,
+                            *inspector_height_for_events.lock().unwrap(),
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2601,11 +2709,62 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             ch,
                             sh,
+                            *inspector_height_for_events.lock().unwrap(),
                             sidebar_open,
                             right_sidebar_open,
                         );
+                    }
+                    UserEvent::OpenInspector => {
+                        info!("Opening inspector panel");
+                        // The shelf closes, as on macOS.
+                        *shelf_height_for_events.lock().unwrap() = SHELF_HEIGHT_DEFAULT as f64;
+                        *inspector_height_for_events.lock().unwrap() = inspector_panel::INSPECTOR_HEIGHT_EXPANDED as f64;
+                        let ch = *chrome_height_for_events.lock().unwrap();
+                        let sw = *sidebar_width_for_events.lock().unwrap();
+                        let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
+                        apply_layout(
+                            &window,
+                            &chrome_for_events,
+                            &content_for_events,
+                            shelf_for_events.as_ref(),
+                            &inspector_for_events,
+                            ch,
+                            SHELF_HEIGHT_DEFAULT as f64,
+                            inspector_panel::INSPECTOR_HEIGHT_EXPANDED as f64,
+                            sw,
+                            right_sidebar_open,
+                        );
+                        // Its console answers without a click first, as the shelf's input does.
+                        inspector_for_events.take_keyboard();
+                    }
+                    UserEvent::CloseInspector => {
+                        info!("Closing inspector panel");
+                        *inspector_height_for_events.lock().unwrap() = inspector_panel::INSPECTOR_HEIGHT_DEFAULT as f64;
+                        let ch = *chrome_height_for_events.lock().unwrap();
+                        let sh = *shelf_height_for_events.lock().unwrap();
+                        let sw = *sidebar_width_for_events.lock().unwrap();
+                        let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
+                        apply_layout(
+                            &window,
+                            &chrome_for_events,
+                            &content_for_events,
+                            shelf_for_events.as_ref(),
+                            &inspector_for_events,
+                            ch,
+                            sh,
+                            inspector_panel::INSPECTOR_HEIGHT_DEFAULT as f64,
+                            sw,
+                            right_sidebar_open,
+                        );
+                        // The keyboard goes back to the page.
+                        content_for_events.focus();
+                    }
+                    UserEvent::ToggleInspector => {
+                        let open = *inspector_height_for_events.lock().unwrap() > 0.0;
+                        let _ = proxy.send_event(if open { UserEvent::CloseInspector } else { UserEvent::OpenInspector });
                     }
                     UserEvent::ExpandShelf => {
                         let ch = *chrome_height_for_events.lock().unwrap();
@@ -2620,8 +2779,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             ch,
                             sh,
+                            *inspector_height_for_events.lock().unwrap(),
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2656,8 +2817,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             ch,
                             sh,
+                            *inspector_height_for_events.lock().unwrap(),
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2674,8 +2837,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             ch,
                             sh,
+                            *inspector_height_for_events.lock().unwrap(),
                             new_width,
                             right_sidebar_open,
                         );
@@ -2691,8 +2856,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             ch,
                             sh,
+                            *inspector_height_for_events.lock().unwrap(),
                             width,
                             right_sidebar_open,
                         );
@@ -2708,8 +2875,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             ch,
                             sh,
+                            *inspector_height_for_events.lock().unwrap(),
                             sw,
                             open,
                         );
@@ -2726,8 +2895,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             10.0, // Minimal chrome height for reveal zone hover detection
                             0.0,  // No shelf height
+                            0.0,  // No Inspector
                             0.0,  // Sidebar hidden (width = 0)
                             false, // Right sidebar hidden
                         );
@@ -2759,8 +2930,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             ch,
                             sh,
+                            *inspector_height_for_events.lock().unwrap(),
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2813,8 +2986,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             peek_height,
                             0.0,  // No shelf in peek mode
+                            0.0,  // No Inspector
                             0.0,  // No sidebar in peek mode (width = 0)
                             false,  // No right sidebar in peek mode
                         );
@@ -2827,8 +3002,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             shelf_for_events.as_ref(),
+                            &inspector_for_events,
                             0.0,  // No chrome
                             0.0,  // No shelf
+                            0.0,  // No Inspector
                             0.0,  // No sidebar (width = 0)
                             false,  // No right sidebar
                         );
