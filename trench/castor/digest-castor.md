@@ -317,3 +317,20 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - 79/79 `hiwave-app` tests pass.
     - GHA Run 42345068474: Dependency install green; reachability ratchet is the sole failure (standing exception since #85).
 - **Decisions for Atlas**: PR #98 on HOLD pending Talos delta on focus return (timestamp / XSetInputFocus inversion).
+
+## 2026-11-07 01:56 Castor R1 Delta on PR #98 (Stage S3 Part 1: Focus Return & Fallback)
+
+- **PR**: `hiwavebrowser/hiwave-linux#98` (`talos/chrome-s3`, author: Talos).
+- **Head SHA**: `af8cf28d36f33b805c19e5cbe876d818b84dc760` (delta `849acd6c..af8cf28d`). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #36 to exchange.
+- **Audit Findings**:
+  - **(1) Focus Return on Page Click**: Inverted take call via `chrome.focus_x11_window(toplevel)` calling `X11ViewHost::focus_window(window)` (`XSetInputFocus(self.display, window, RevertToParent, CurrentTime)`). Direct raw X call bypassing WM mediation entirely. Verified under mutter + XWayland (`gate-runner/wl_x11_focus.sh`, `_logs/wlx/b_typed.png`, `c_after_page_ctrl_t.png`).
+  - **(2) XShape Extension Probe**: `create()` starts with `x11_shape_supported()` via `XShapeQueryExtension`. Dedicated short-lived connection cleanly closed.
+  - **(3) Atlas Checks (c1 - c4)**:
+    - `(c1)`: Mutter run drove WebKit page (`UnifiedContentWebView::Wry`), the default page path. Chrome + RustKit page combo tracked for S3 part 2.
+    - `(c2)`: Chrome takes `surface` arm in `with_x11_view` (`HIWAVE_CONTENT_THREAD=1`); borrow is brief, no contention during GTK dispatch.
+    - `(c3)`: Silent None returns on `toplevel_xid` / missing X11 host tracked for S3 part 2 to add `warn!`.
+    - `(c4)`: `PageEndpoint::focus_x11_window` cfg guard tracked for S3 part 2.
+  - **(4) Tests & CI**: 79/79 `hiwave-app` tests pass; 45/45 `rustkit-viewhost` tests pass. GHA Run 42347619838 build step green, reachability ratchet is the sole failure (standing exception since #85).
+- **Decisions for Atlas**: PR #98 is CLEAR to merge to `develop`. Ready for live Atlas / Pete merge.
+
