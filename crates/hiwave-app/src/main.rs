@@ -19,6 +19,7 @@ use muda::Menu;
 use platform::get_platform_manager;
 #[cfg(not(feature = "native-linux"))]
 use std::rc::Rc;
+#[cfg(not(feature = "native-linux"))]
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 #[cfg(not(feature = "native-linux"))]
 use tao::{

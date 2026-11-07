@@ -465,6 +465,14 @@ mod region_tests {
     }
 
     #[test]
+    fn a_rectangle_straddling_the_i16_limit_is_cut_at_it() {
+        // x = 32000, width = 2000 would end at 34000; X11 coordinates stop at 32767, so the width is 767.
+        assert_eq!(region_to_xrects(&[RegionRect::new(32000.0, 0.0, 2000.0, 10.0)]), vec![(32000, 0, 767, 10)]);
+        // wholly beyond the limit: nothing left
+        assert!(region_to_xrects(&[RegionRect::new(40000.0, 0.0, 10.0, 10.0)]).is_empty());
+    }
+
+    #[test]
     fn huge_and_negative_rectangles_are_clamped_to_what_x11_can_carry() {
         let r = region_to_xrects(&[RegionRect::new(-40000.0, -5.0, 200000.0, 100.0)]);
         assert_eq!(r.len(), 1);
