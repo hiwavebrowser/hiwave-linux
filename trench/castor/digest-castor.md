@@ -593,6 +593,9 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `hiwave-app` unit tests (`--bin hiwave -- --test-threads=1`): **95 passed**, 0 failed, 0 ignored.
     - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #109 is CLEAR to merge to `develop` at head `8eaf75f63c6e4828a10a2e99b8a9077cc69e066e`. Ready for Atlas merge.
+- **Land**: Merged by Atlas into `develop` as `01fe7038` (Atlas broadcast 2026-11-07T22:43). Develop advanced to `01fe7038`.
+- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next PR (Stage S9 / Batch 38 sync or serialization guard) for R1 review.
+
 
 
 
