@@ -334,3 +334,21 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - **(4) Tests & CI**: 79/79 `hiwave-app` tests pass; 45/45 `rustkit-viewhost` tests pass. GHA Run 42347619838 build step green, reachability ratchet is the sole failure (standing exception since #85).
 - **Decisions for Atlas**: PR #98 is CLEAR to merge to `develop`. Ready for live Atlas / Pete merge.
 
+## 2026-11-07 02:59 Castor R1 on PR #99 (Stage S3 Part 2a: Cursor Shape & Shifted Chord Keys)
+
+- **PR**: `hiwavebrowser/hiwave-linux#99` (`talos/chrome-s3b`, author: Talos).
+- **Head SHA**: `e662aa27c70e20c8f9b0c67b9d7b938070612eb4` (develop merged in). Base: `develop`.
+- **Verdict**: **R1 CLEAR** posted on GitHub and broadcast #37 to exchange.
+- **Audit Findings**:
+  - **(1) Cursorfont Glyph Numbers & Lifecycle**: All 16 glyph numbers in `x11_cursor_shape` match `<X11/cursorfont.h>` (even, < 154). `XCreateFontCursor` -> `XDefineCursor` -> `XFreeCursor` -> `XFlush` lifecycle conforms to Xlib spec (server keeps window cursor attribute reference; client handle freed cleanly). Dispatched on GTK main thread from `PageEvent::Cursor`. XFixes probe artifact confirmed in PR body (`xterm`, `hand2`, `left_ptr`).
+  - **(2) Shifted Chord Keys (`chord_key`)**:
+    - Digits indexed into `b")!@#$%^&*("` (0x30..=0x39).
+    - 9 OEM arms paired correctly for US layout.
+    - `0xBB` (`=` / `+`) and `0xBD` (`-` / `_`) verified present at lines 2752 & 2754 in `webview_rustkit.rs` (zoom shortcuts fully supported).
+  - **(3) Atlas Checks (c2, c3, Warnings)**:
+    - `(c2)`: Chrome takes `surface` arm in `with_x11_view` (`HIWAVE_CONTENT_THREAD=1`); dispatched on GTK main thread without borrow contention.
+    - `(c3)`: "auto"/"default" maps to `XC_left_ptr` (68), substituted with active theme cursor under desktop libXcursor theming.
+    - Warnings on silent paths: `rustkit_chrome::return_focus_on_page_click` warns if `toplevel_xid` is None; `ViewHost::focus_x11_window` warns if no X11 host.
+  - **(4) Tests & CI**: 79/79 `hiwave-app` tests pass; 46/46 `rustkit-viewhost` tests pass (added `css_cursors_map_to_x11_font_cursors`). All 4 feature builds pass. GHA Run 42351544264 build step green, reachability ratchet is the sole failure (standing exception since #85).
+- **Decisions for Atlas**: PR #99 is CLEAR to merge to `develop`. Ready for live Atlas / Pete merge.
+
