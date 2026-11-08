@@ -63,6 +63,11 @@ windows = { version = "0.58", features = ["Win32_Foundation"] }
 cocoa = "0.25"
 objc = "0.2"
 
+# The system clipboard on Linux (X11 selections and Wayland data-control): plain text only, so the image features are off.
+# Declared Linux divergence: the engine's clipboard hook (system_clipboard) is a macOS NSPasteboard or an in-memory store upstream.
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
