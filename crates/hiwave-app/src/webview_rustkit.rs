@@ -1805,6 +1805,7 @@ mod tests {
 
     #[test]
     fn content_views_get_the_live_script_budget() {
+        let _turn = crate::engine_test_turn();
         let builder = content_engine_builder();
         assert_eq!(builder.config().script_budget_ms, 15_000);
         // Only the script budget is raised: the virtual timer clock and
@@ -1815,6 +1816,7 @@ mod tests {
 
     #[test]
     fn content_views_get_a_budget_for_script_after_the_load() {
+        let _turn = crate::engine_test_turn();
         let config = content_engine_builder().config().clone();
         assert!(config.interrupt_scripts_at_budget);
         assert_eq!(config.live_turn_budget_ms, 5_000);
@@ -1822,12 +1824,14 @@ mod tests {
 
     #[test]
     fn content_views_follow_a_page_s_own_navigation() {
+        let _turn = crate::engine_test_turn();
         assert!(content_engine_builder().config().follows_script_navigation);
         assert!(!rustkit_engine::EngineConfig::default().follows_script_navigation);
     }
 
     #[test]
     fn content_views_leave_requests_after_load_to_the_live_loop() {
+        let _turn = crate::engine_test_turn();
         assert!(content_engine_builder().config().post_load_requests_live);
         assert!(!rustkit_engine::EngineConfig::default().post_load_requests_live);
     }
@@ -1870,6 +1874,7 @@ mod tests {
     /// because the load ran to its end inside the event handler.
     #[test]
     fn a_slow_load_gives_the_event_loop_back_at_once() {
+        let _turn = crate::engine_test_turn();
         let url = slow_server(Duration::from_millis(2_000), "<title>slow</title><p>late</p>");
         let view = view();
         let started = Instant::now();
@@ -1880,6 +1885,7 @@ mod tests {
 
     #[test]
     fn a_load_driven_a_slice_at_a_time_finishes() {
+        let _turn = crate::engine_test_turn();
         let url = slow_server(Duration::from_millis(300), "<title>slow</title><p>late</p>");
         let view = view();
         view.wry_load_url(&url).unwrap();
@@ -1897,6 +1903,7 @@ mod tests {
 
     #[test]
     fn engine_calls_during_a_load_do_nothing_and_do_not_panic() {
+        let _turn = crate::engine_test_turn();
         let url = slow_server(Duration::from_millis(1_000), "<p>x</p>");
         let view = view();
         view.wry_load_url(&url).unwrap();
@@ -1915,6 +1922,7 @@ mod tests {
 
     #[test]
     fn a_panel_attached_during_a_load_is_watched_once_it_ends() {
+        let _turn = crate::engine_test_turn();
         // #803 review (2): the load holds the endpoint, so the attach could
         // neither watch the view nor reach the page. An idle page then never
         // woke the panel for its console.
@@ -1942,6 +1950,7 @@ mod tests {
 
     #[test]
     fn a_console_read_during_a_same_thread_load_is_answered() {
+        let _turn = crate::engine_test_turn();
         // #803 R1 (Prometheus, non-blocking): the load holds the endpoint, so
         // the read could not reach the Inspector and fell through to a page
         // command, which a load drops. The panel's console went quiet for the
@@ -1972,6 +1981,7 @@ mod tests {
 
     #[test]
     fn a_console_read_on_the_same_thread_path_wakes_the_window() {
+        let _turn = crate::engine_test_turn();
         // #803 review (1): the answer arrives on the devtools thread after
         // the ask returns; with no wake an idle page's line waited for an
         // unrelated one.
@@ -2004,6 +2014,7 @@ mod tests {
 
     #[test]
     fn a_hung_scripts_held_console_lines_reach_the_panel_while_it_runs() {
+        let _turn = crate::engine_test_turn();
         // #810 review: a hot loop past the live cap, then a hang. The calls
         // over the cap waited for the script's end and the panel showed
         // nothing. The panel's line comes from `console_held` (what `pump`
@@ -2054,6 +2065,7 @@ mod tests {
 
     #[test]
     fn stop_cancels_a_slow_load_without_waiting_for_it() {
+        let _turn = crate::engine_test_turn();
         let url = slow_server(Duration::from_secs(10), "<p>never</p>");
         let view = view();
         view.wry_load_url(&url).unwrap();
@@ -2109,6 +2121,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// `PageLoaded`.
     #[test]
     fn stop_ends_a_load_that_yielded_while_an_inserted_script_fetches() {
+        let _turn = crate::engine_test_turn();
         let url = yielding_server(Duration::from_millis(1_500));
         let view = view();
         view.wry_load_url(&url).unwrap();
@@ -2155,6 +2168,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// to back and the window took no event between them.
     #[test]
     fn a_slow_live_turn_is_not_followed_at_once_by_another() {
+        let _turn = crate::engine_test_turn();
         let url = slow_server(Duration::ZERO, "<p>x</p>");
         let view = view();
         view.wry_load_url(&url).unwrap();
@@ -2186,6 +2200,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// listener.
     #[test]
     fn a_click_after_a_stopped_live_turn_reaches_its_listener() {
+        let _turn = crate::engine_test_turn();
         let url = slow_server(
             Duration::ZERO,
             "<body style='margin:0'><div style='width:300px;height:200px'></div></body>",
@@ -2209,6 +2224,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
 
     #[test]
     fn a_new_load_replaces_the_one_in_progress() {
+        let _turn = crate::engine_test_turn();
         let slow = slow_server(Duration::from_secs(10), "<title>old</title>");
         let fast = slow_server(Duration::ZERO, "<title>new</title>");
         let view = view();
@@ -2268,6 +2284,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// never learned its title or that the load had ended.
     #[test]
     fn content_thread_the_chrome_is_told_the_committed_url_title_and_load_end() {
+        let _turn = crate::engine_test_turn();
         let view = content_view();
         let base = redirect_server();
         load_and_settle(&view, &format!("{base}start"));
@@ -2284,6 +2301,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// CH2.E9: the chrome's `window.ipc.postMessage` reaches the window.
     #[test]
     fn content_thread_the_window_takes_what_the_page_posts_on_window_ipc() {
+        let _turn = crate::engine_test_turn();
         let view = content_view();
         // The chrome's view is app-owned (CH3.A7).
         view.set_app_owned();
@@ -2319,6 +2337,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// on the WebKit chrome, more on a loaded Mac).
     #[test]
     fn content_thread_a_chrome_eval_round_trips_within_50_ms_while_the_page_is_held() {
+        let _turn = crate::engine_test_turn();
         fn committed(view: &RustKitView) {
             let deadline = Instant::now() + Duration::from_secs(10);
             while view.latest_commit.borrow().is_none() {
@@ -2375,6 +2394,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
 
     #[test]
     fn content_thread_a_web_document_sees_no_app_bridge() {
+        let _turn = crate::engine_test_turn();
         let view = content_view();
         assert!(!view.is_app_owned(), "a content view is not app-owned");
         view.load_html_internal(BRIDGE_PROBE).unwrap();
@@ -2402,6 +2422,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
 
     #[test]
     fn a_flag_off_web_document_sees_no_app_bridge() {
+        let _turn = crate::engine_test_turn();
         let view = view();
         assert!(!view.is_app_owned());
         view.load_html_internal(BRIDGE_PROBE).unwrap();
@@ -2413,6 +2434,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
 
     #[test]
     fn a_flag_off_app_owned_view_keeps_the_bridge() {
+        let _turn = crate::engine_test_turn();
         let view = view();
         view.set_app_owned();
         assert!(view.is_app_owned());
@@ -2426,6 +2448,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// A document the app loads itself keeps the address the app gave it.
     #[test]
     fn content_thread_an_app_document_reports_no_url() {
+        let _turn = crate::engine_test_turn();
         let view = content_view();
         view.load_html_internal("<title>New Tab</title><p>x</p>").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -2593,11 +2616,13 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
 
     #[test]
     fn content_thread_a_url_bar_navigation_lands_within_100_ms_while_a_page_script_spins() {
+        let _turn = crate::engine_test_turn();
         a_url_bar_navigation_lands_within_100_ms_while_a_page_script_spins(content_view());
     }
 
     #[test]
     fn content_thread_a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped() {
+        let _turn = crate::engine_test_turn();
         a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped(content_view());
     }
 
@@ -2607,6 +2632,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// looked unfocused and Backspace or the arrows were dropped.
     #[test]
     fn content_thread_the_window_learns_a_click_focused_a_field_and_a_scroll_reports_a_change() {
+        let _turn = crate::engine_test_turn();
         let view = content_view();
         let (base, _log) = logging_server(
             "<body style='margin:0'><input id=f style='width:200px;height:40px'>\
@@ -2636,6 +2662,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// without the window waiting.
     #[test]
     fn content_thread_the_inspector_gets_the_dom_tree_and_an_element() {
+        let _turn = crate::engine_test_turn();
         use rustkit_engine::{DevtoolsAnswer, DevtoolsQuery};
         let view = content_view();
         let (base, _log) = logging_server("<body><p id=hello class=greeting>hi</p></body>");
@@ -2673,6 +2700,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// the first key on the new page went to the page instead of the window.
     #[test]
     fn content_thread_a_new_document_starts_with_no_focused_field() {
+        let _turn = crate::engine_test_turn();
         let view = content_view();
         let (base, _log) = logging_server(
             "<body style='margin:0'><input id=f style='width:200px;height:40px'></body>",
@@ -2702,6 +2730,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// away.
     #[test]
     fn content_thread_a_script_navigation_from_the_page_a_new_tab_replaced_is_dropped() {
+        let _turn = crate::engine_test_turn();
         let view = content_view();
         let (base, _log) = logging_server("<body><p>old</p></body>");
         load_and_settle(&view, &base);
@@ -2724,6 +2753,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
 
     #[test]
     fn content_views_stop_a_script_that_outruns_the_budget() {
+        let _turn = crate::engine_test_turn();
         assert!(content_engine_builder().config().interrupt_scripts_at_budget);
         // The engine's default (parity-capture, the board) lets it run on.
         assert!(!rustkit_engine::EngineConfig::default().interrupt_scripts_at_budget);

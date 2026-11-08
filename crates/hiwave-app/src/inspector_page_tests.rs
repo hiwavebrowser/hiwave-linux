@@ -10,6 +10,10 @@
 use rustkit_engine::{Engine, EngineConfig, EngineViewId};
 use rustkit_viewhost::Bounds;
 
+fn one_engine_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    crate::engine_test_turn()
+}
+
 fn inspector() -> (Engine, EngineViewId) {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
@@ -66,6 +70,7 @@ fn rows(engine: &mut Engine, view: EngineViewId) -> usize {
 
 #[test]
 fn fifty_console_lines_force_at_most_one_layout_on_the_console_tab() {
+    let _turn = one_engine_at_a_time();
     let (mut engine, view) = inspector();
     frames(&mut engine, view, 2);
     eval(&mut engine, view, "document.querySelector('[data-tab=console]').click(); 0");
@@ -88,6 +93,7 @@ fn fifty_console_lines_force_at_most_one_layout_on_the_console_tab() {
 
 #[test]
 fn console_lines_on_the_elements_tab_force_no_layout() {
+    let _turn = one_engine_at_a_time();
     let (mut engine, view) = inspector();
     frames(&mut engine, view, 2);
     let before = forced(&engine, view);
@@ -102,6 +108,7 @@ fn console_lines_on_the_elements_tab_force_no_layout() {
 
 #[test]
 fn a_later_line_appends_one_row_and_keeps_the_rows_before_it() {
+    let _turn = one_engine_at_a_time();
     let (mut engine, view) = inspector();
     eval(&mut engine, view, "document.querySelector('[data-tab=console]').click(); 0");
     log_lines(&mut engine, view, 0, 3);
@@ -134,6 +141,7 @@ fn a_later_line_appends_one_row_and_keeps_the_rows_before_it() {
 
 #[test]
 fn a_new_document_marks_the_earlier_lines_stale_with_a_divider() {
+    let _turn = one_engine_at_a_time();
     let (mut engine, view) = inspector();
     eval(&mut engine, view, "document.querySelector('[data-tab=console]').click(); 0");
     log_lines(&mut engine, view, 0, 2);
@@ -178,6 +186,7 @@ fn console_tab(engine: &mut Engine, view: EngineViewId) {
 
 #[test]
 fn a_clear_then_as_many_new_lines_in_one_frame_shows_only_the_new_lines() {
+    let _turn = one_engine_at_a_time();
     let (mut engine, view) = inspector();
     console_tab(&mut engine, view);
     log_lines(&mut engine, view, 1000, 3);
@@ -196,6 +205,7 @@ fn a_clear_then_as_many_new_lines_in_one_frame_shows_only_the_new_lines() {
 
 #[test]
 fn a_clear_under_a_filter_then_new_lines_shows_only_the_new_lines() {
+    let _turn = one_engine_at_a_time();
     let (mut engine, view) = inspector();
     console_tab(&mut engine, view);
     eval(&mut engine, view, "document.querySelector('.console-filter-btn[data-filter=error]').click(); 0");
@@ -233,6 +243,7 @@ fn scroll_state(engine: &mut Engine, view: EngineViewId) -> (i64, i64) {
 
 #[test]
 fn a_user_scroll_up_while_lines_stream_is_kept_and_the_bottom_resumes_following() {
+    let _turn = one_engine_at_a_time();
     let (mut engine, view) = inspector();
     console_tab(&mut engine, view);
     frames(&mut engine, view, 2);
@@ -277,6 +288,7 @@ fn a_user_scroll_up_while_lines_stream_is_kept_and_the_bottom_resumes_following(
 
 #[test]
 fn the_first_lines_show_in_the_task_that_brings_them() {
+    let _turn = one_engine_at_a_time();
     // The chrome board (and a person) takes a frame before the page's next
     // animation frame runs: the lines must already be rows by then.
     let (mut engine, view) = inspector();
