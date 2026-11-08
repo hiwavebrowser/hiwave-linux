@@ -667,6 +667,26 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 91.34s.
     - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #113 is CLEAR to merge to `develop` at head `191d90adebe40cab783c1db50a703f36cc03388a`. Ready for Atlas decision/merge.
+- **Land**: Merged by Atlas into `develop` as `12f51511`. Develop advanced to `12f51511`.
+
+## 2026-11-08 00:30 Castor R1 on PR #114 (Fix Space scrolls a page down VK_SPACE 0x20)
+
+- **PR**: `hiwavebrowser/hiwave-linux#114` (`talos/space-scroll`, author: Talos).
+- **Head SHA**: `6db51ce8488b418dd1ccadcfcb3329e96bbaeb6d`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 6db51ce8** posted on GitHub and broadcast #56 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 1 file touched (+16/-1 in `crates/rustkit-engine/src/page_protocol.rs`).
+  - **(2) Substantive Invariant Verification**:
+    - **Cross-Platform Normalization**: `scroll_dy_for_unhandled_key` arm expanded to include `(0x20, " ")` alongside macOS `(0, " ")` and `(0x22, _)`.
+    - On macOS, Space key delivery arrives as `(0, " ")`. On Linux/X11 and Windows/Win32, Space arrives as `(0x20, " ")`. Previously, Linux and Windows fell through without issuing a `PageCmd::ScrollDy(viewport_height - 40.0)` for unhandled pages.
+    - Resolves the shared space-scrolling gap directly at the engine layer (upstream row CH2.E39) without platform-specific divergence.
+    - Dedicated unit test `unhandled_key_scroll_tests::space_scrolls_a_page_down_whichever_way_the_platform_delivers_it` pins macOS convention `(0, " ")`, Win32/X11 convention `(0x20, " ")`, PageDown `(0x22, _)`, and non-scrolling keys.
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `rustkit-engine` unhandled key scroll tests: **1 passed**, 0 failed (`space_scrolls_a_page_down_whichever_way_the_platform_delivers_it`).
+    - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 87.79s.
+    - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #114 is CLEAR to merge to `develop` at head `6db51ce8488b418dd1ccadcfcb3329e96bbaeb6d`. Ready for Atlas merge.
+
 
 
 
