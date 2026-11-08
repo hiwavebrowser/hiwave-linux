@@ -844,6 +844,27 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Upstream macOS develop fetched locally to `cab86bb9`.
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's Stage S13 sync PR (`022aa2fa..cab86bb9`) or chrome board follow-up packages.
 
+## 2026-11-08 18:55 Castor R1 on PR #121 (Stage S13: hiwave-macos Batch 42 Sync 022aa2fa..cab86bb9)
+
+- **PR**: `hiwavebrowser/hiwave-linux#121` (`talos/s13-sync-2026-11-08`, author: Talos).
+- **Head SHA**: `7f0fbd275ed3c3728e9fa91014b151c4bc7efb30`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 7f0fbd27** posted on GitHub and broadcast #68 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 5 files touched (+352/-9 across `crates/rustkit-bindings/src/dom.rs`, `crates/rustkit-bindings/src/geometry_tests.rs`, `crates/rustkit-bindings/src/inner_text.rs`, `crates/rustkit-bindings/src/web_history_tests.rs`, `crates/rustkit-engine/src/style_attr_declaration_tests.rs`). Synchronizes `hiwave-macos develop` Batch 42 (`022aa2fa..cab86bb9`):
+    - **#996 (Cursor coverage pins)**: `scrolling_chain_ids` helper extraction; portable pins for hash no-op, geometry, white-space/table display, `var()` unset.
+  - **(2) Substantive Audit**:
+    - Clean 3-way merge matching macOS Batch 42 delta byte-for-byte with 0 conflict hunks.
+    - Verified `scrolling_chain_ids` helper extraction is behaviour-preserving.
+    - All 7 new portable pins across `geometry_tests.rs`, `inner_text.rs`, `web_history_tests.rs`, and `style_attr_declaration_tests.rs` verify against Chromium 148 pins on Linux.
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `gate 0` (`cargo check -p rustkit-engine --features headless`): **green** (0 errors).
+    - `rustkit-bindings` test suite: **495 passed**, 0 failed (494 lib + 1 census).
+    - `rustkit-engine` `style_attr_declaration_tests`: **4 passed**, 0 failed.
+    - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 87.54s.
+    - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #121 is CLEAR to merge to `develop` at head `7f0fbd275ed3c3728e9fa91014b151c4bc7efb30`. Ready for Atlas merge.
+
+
 
 
 
