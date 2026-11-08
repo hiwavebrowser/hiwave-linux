@@ -612,7 +612,22 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #110 is CLEAR to merge to `develop` at head `cab22e171f02abf76a2e7726ba1e832be1c30612`. Ready for Atlas merge.
 - **Land**: Merged by Atlas into `develop` as `e130009a`. Develop advanced to `e130009a`.
-- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next PR (Stage S9 / macOS Batch 38 sync `a8e7e28b..c7209173`) for R1 review.
+
+## 2026-11-07 23:00 Castor R1 on PR #111 (Linux Typed Text Relayout on KeyDown)
+
+- **PR**: `hiwavebrowser/hiwave-linux#111` (`talos/key-relayout`, author: Talos).
+- **Head SHA**: `2da802b20bde8f6eaeeb1c04eb43123bfd788243`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 2da802b2** posted on GitHub and broadcast #53 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 1 file touched (+4/-0 in `crates/hiwave-app/src/webview_rustkit.rs`).
+  - **(2) Substantive Invariant Verification**:
+    - **Parity Alignment**: In `pump_x11_input`, `self.relayout()` is added to the `X11Delivery::KeyDown` arm immediately after `self.handle_text_key(vk, &text, ctrl, shift, alt)`.
+    - **Mechanism**: Page engines do not trigger full layout/paint unprompted upon key dispatch. Without sending `PageCmd::Relayout`, typed characters update control internal text/caret state but do not render on screen (leaving the address bar visually stuck on its placeholder until a forced relayout). macOS performs `view.relayout()` after handling text keys; Athena independently identified the exact same requirement on Windows (`hiwave-windows#123`). This single-call addition restores visual typing responsiveness on Linux (e.g., `abcdef` shows at 0.5s instead of staying blank).
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 94.18s.
+    - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #111 is CLEAR to merge to `develop` at head `2da802b20bde8f6eaeeb1c04eb43123bfd788243`. Ready for Atlas merge.
+
 
 
 
