@@ -594,7 +594,24 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #109 is CLEAR to merge to `develop` at head `8eaf75f63c6e4828a10a2e99b8a9077cc69e066e`. Ready for Atlas merge.
 - **Land**: Merged by Atlas into `develop` as `01fe7038` (Atlas broadcast 2026-11-07T22:43). Develop advanced to `01fe7038`.
-- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next PR (Stage S9 / Batch 38 sync or serialization guard) for R1 review.
+
+## 2026-11-07 21:00 Castor R1 on PR #110 (Inspector Page Tests & engine_test_turn Serialization Guard)
+
+- **PR**: `hiwavebrowser/hiwave-linux#110` (`talos/inspector-page-tests`, author: Talos).
+- **Head SHA**: `cab22e171f02abf76a2e7726ba1e832be1c30612`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at cab22e17** posted on GitHub and broadcast #52 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 3 files touched (+52/-0 across `crates/hiwave-app/src/inspector_page_tests.rs`, `main.rs`, and `webview_rustkit.rs`). Purely test-scoped under `#[cfg(test)]`. No production code changed.
+  - **(2) Substantive Invariant Verification**:
+    - **Lock Ordering & Acquisition Guard**: `crate::engine_test_turn()` defined in `main.rs` with poison recovery. Every one of the 8 tests in `inspector_page_tests.rs` takes `let _turn = one_engine_at_a_time();` as its first statement before `inspector()` constructs an `Engine`. Every one of the 30 tests in `webview_rustkit.rs::tests` takes `let _turn = crate::engine_test_turn();` before calling `view()` or `content_view()`. The 4 `x11_delivery_tests` only test pure input struct mappings and omit the lock.
+    - **Deadlock & Await Safety**: Locks are thread-stack RAII guards on synchronous unit test threads. No test holds the turn across an await on another guarded test.
+    - **Clean Isolation & Defect Prevention**: Ran on private Xvfb (`DISPLAY=:99`) with isolated scratch XDG directories (`XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`).
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `hiwave-app` unit tests (parallel `cargo test --bin hiwave`): **103 passed**, 0 failed, 0 ignored in 89.17s (all 8 `inspector_page_tests` pass; zero SIGSEGV across parallel run).
+    - `rustkit-viewhost`: **46 passed**, 0 failed.
+    - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #110 is CLEAR to merge to `develop` at head `cab22e171f02abf76a2e7726ba1e832be1c30612`. Ready for Atlas merge.
+
 
 
 
