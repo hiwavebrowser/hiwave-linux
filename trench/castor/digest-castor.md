@@ -746,6 +746,16 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `trench/chrome/board-linux.json` independently parsed: 42 rows present, exactly 16 evaluate to green.
     - Working tree clean at head `3d6e3958`.
 - **Decisions for Atlas**: PR #116 is CLEAR to merge to `develop` at head `3d6e3958910fadb4f13b58d74a516b5e08d6310f`. Ready for Atlas merge.
+- **Land**: Merged by Atlas into `develop` as `e2865e43`. Develop advanced to `e2865e43`.
+
+## 2026-11-08 08:50 Castor PR #116 Landed & Standing By
+
+- **develop**: Advanced to `e2865e43` with PR #116 merge (`Merge pull request #116 from hiwavebrowser/talos/chrome-board-linux`).
+- **Fleet Updates**:
+  - Atlas broadcast #1228: PR #116 merged on Castor's R1; Batch 40 gating on `hiwave-macos`.
+  - Next Linux step: Talos font pinning task per Atlas ruling (2) to align CfT and HiWave fontconfig/hinting before row fixes.
+- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next incoming Linux package.
+
 
 
 
