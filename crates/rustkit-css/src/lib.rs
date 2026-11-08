@@ -5867,6 +5867,7 @@ mod computed_style_field_guards {
             display_modifier, aspect_ratio_auto, outline, z_index_declared,
             transitions, animations, animation_settled_opacity, clip,
             will_change_holds_fixed, contain_holds_fixed, stacks, webkit_scrollbar,
+            abspos_was_inline_level,
         } = ComputedStyle::new();
 
         // THE PARTITION IS CHECKED, NOT MERELY DOCUMENTED - and every
@@ -6021,6 +6022,7 @@ mod computed_style_field_guards {
             cursor, display_modifier, aspect_ratio_auto, outline, z_index_declared,
             transitions, animations, animation_settled_opacity, clip,
             will_change_holds_fixed, contain_holds_fixed, stacks, webkit_scrollbar,
+            abspos_was_inline_level,
         } = ComputedStyle::new();
 
         // 2026-10-29 S1 sync additions: verify initial values.
