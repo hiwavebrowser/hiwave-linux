@@ -796,6 +796,10 @@ impl RustKitView {
                 }
                 X11Delivery::KeyDown { vk, text, ctrl, shift, alt } => {
                     self.handle_text_key(vk, &text, ctrl, shift, alt);
+                    // After a key the page does not lay out and publish a frame by itself: without this the typed text
+                    // is applied but not shown (the address bar stayed on its placeholder). macOS does the same
+                    // after handle_text_key (found independently by the Windows lane, hiwave-windows #123).
+                    self.relayout();
                 }
                 X11Delivery::KeyUp { vk, text, ctrl, shift, alt } => self.handle_key_up(vk, &text, ctrl, shift, alt),
                 X11Delivery::Ignore => {}
