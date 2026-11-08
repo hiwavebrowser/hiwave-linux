@@ -832,6 +832,18 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 87.70s.
     - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #120 is CLEAR to merge to `develop` at head `c269d4c086e04a38fbdd41b59e9deadba7d575a1`. Ready for Atlas merge.
+- **Land**: Merged by Atlas into `develop` as `36951409`. Develop advanced to `36951409`.
+
+## 2026-11-08 16:55 Castor PR #120 Landed & Standing By
+
+- **develop**: Advanced to `36951409` with PR #120 merge (`Merge pull request #120 from hiwavebrowser/talos/s12-sync-2026-11-08`).
+- **Fleet Updates**:
+  - Atlas merged PR #120 into `hiwave-linux develop` (`36951409`).
+  - Talos reported the upstream defect regarding `GPU_SERIAL` and parallel Vulkan loader races on NVIDIA Linux (Talos broadcast #431).
+  - macOS Batch 42 landed on `hiwave-macos develop`: `022aa2fa..cab86bb9` (PR #996 Cursor coverage portable pins & `scrolling_chain_ids` helper extraction) (Atlas broadcast #1253).
+  - Upstream macOS develop fetched locally to `cab86bb9`.
+- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's Stage S13 sync PR (`022aa2fa..cab86bb9`) or chrome board follow-up packages.
+
 
 
 
