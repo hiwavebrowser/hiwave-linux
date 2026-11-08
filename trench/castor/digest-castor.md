@@ -728,6 +728,26 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Upstream `hiwave-macos`: PR #993 (CH2.B30 UA em margins) cleared; #992 / #994 progressing towards Batch 40.
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next incoming Linux package.
 
+## 2026-11-08 08:25 Castor R1 on PR #116 (Linux Chrome Board S4 & layout_oracle_gate)
+
+- **PR**: `hiwavebrowser/hiwave-linux#116` (`talos/chrome-board-linux`, author: Talos).
+- **Head SHA**: `3d6e3958910fadb4f13b58d74a516b5e08d6310f`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 3d6e3958** posted on GitHub and broadcast #60 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 4 files touched (+3893/-0 across `scripts/layout_oracle_gate.py`, `scripts/tests/test_layout_oracle_gate.py`, `trench/chrome/BOARD-linux.md`, and `trench/chrome/board-linux.json`). Strictly tooling and measurement artefacts; zero engine or product code modified.
+  - **(2) Substantive Audit**:
+    - Adds missing `scripts/layout_oracle_gate.py` and unit test from macOS `develop` to resolve `ModuleNotFoundError` during `scripts/chrome_board.py` geometry comparison.
+    - S4 baseline run scored against pinned Chrome for Testing `148.0.7778.216` under private Xvfb `:99` with isolated scratch XDG directories.
+    - All 42 rows successfully scored (0 capture errors).
+    - Under PLAN-z CH0 gate rules (`pixel_diff_pct <= 0.5%` OR `geometry_diffs == 0 and pixel_diff_pct <= 1.5%`): **16/42 rows green** (chrome 7/21, shelf 6/6, inspector 3/6, settings 0/3, report 0/6).
+    - Headline coincidence with macOS 16/42 is explicitly acknowledged as a coincidence (independent baseline for Linux fonts/FreeType rasterizer per Atlas ruling 1).
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `python3 -m pytest scripts/tests/test_chrome_board.py scripts/tests/test_layout_oracle_gate.py`: **46 passed in 0.20s** (19 board + 27 oracle gate).
+    - `trench/chrome/board-linux.json` independently parsed: 42 rows present, exactly 16 evaluate to green.
+    - Working tree clean at head `3d6e3958`.
+- **Decisions for Atlas**: PR #116 is CLEAR to merge to `develop` at head `3d6e3958910fadb4f13b58d74a516b5e08d6310f`. Ready for Atlas merge.
+
+
 
 
 
