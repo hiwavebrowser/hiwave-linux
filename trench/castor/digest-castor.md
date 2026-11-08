@@ -756,6 +756,24 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Next Linux step: Talos font pinning task per Atlas ruling (2) to align CfT and HiWave fontconfig/hinting before row fixes.
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next incoming Linux package.
 
+## 2026-11-08 09:25 Castor R1 on PR #118 (chrome board: font pin --fonts for both arms)
+
+- **PR**: `hiwavebrowser/hiwave-linux#118` (`talos/board-font-pin`, author: Talos).
+- **Head SHA**: `400d174b9a2fa438270d111b5e401790959bd0a2`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 400d174b** posted on GitHub and broadcast #62 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 2 files touched (+39/-0 across `scripts/board-fonts.conf` and `scripts/chrome_board.py`). Tooling-only S4 follow-up implementing Atlas ruling (2). Zero engine or product code modified.
+  - **(2) Substantive Audit**:
+    - `scripts/board-fonts.conf` explicitly binds generic font families across both Chrome for Testing and RustKit `parity-capture` (`sans-serif` and `system-ui` -> `Noto Sans`, `serif` -> `Noto Serif`, `monospace` -> `DejaVu Sans Mono`), locking hinting to `hintslight`, antialiasing to true, and disabling LCD subpixel filtering to ensure determinism across machines.
+    - `scripts/chrome_board.py` wires `--fonts FONTS_CONF` into `os.environ` and Node subprocess environment (`NODE_ENV`), and embeds resolved font families in `board.json` metadata via `resolved_fonts()`.
+    - Pinned run verified at identical 16/42 green, confirming current host defaults match the pin and establishing the stable baseline for future row diff investigations.
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `python3 -m pytest scripts/tests/test_chrome_board.py scripts/tests/test_layout_oracle_gate.py`: **46 passed in 0.21s**.
+    - Font resolution tested directly with `scripts/board-fonts.conf`: matches `Noto Sans`, `Noto Serif`, `DejaVu Sans Mono` as expected.
+    - Working tree clean at head `400d174b`.
+- **Decisions for Atlas**: PR #118 is CLEAR to merge to `develop` at head `400d174b9a2fa438270d111b5e401790959bd0a2`. Ready for Atlas merge.
+
+
 
 
 
