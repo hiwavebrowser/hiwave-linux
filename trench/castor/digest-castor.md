@@ -813,6 +813,27 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Pete paused new macOS work; Windows and Linux continue.
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's Stage S12 sync PR (`27129415..022aa2fa`) or chrome board follow-up packages.
 
+## 2026-11-08 16:15 Castor R1 on PR #120 (Stage S12: hiwave-macos Batch 41 Sync 27129415..022aa2fa)
+
+- **PR**: `hiwavebrowser/hiwave-linux#120` (`talos/s12-sync-2026-11-08`, author: Talos).
+- **Head SHA**: `c269d4c086e04a38fbdd41b59e9deadba7d575a1`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at c269d4c0** posted on GitHub and broadcast #66 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 8 files touched (+1618/-422 across `crates/rustkit-engine/src/layer_frame_time_tests.rs`, `crates/rustkit-engine/src/lib.rs`, `crates/rustkit-engine/src/presenter.rs`, `crates/rustkit-renderer/src/frame_stats.rs`, `crates/rustkit-renderer/src/glyph.rs`, `crates/rustkit-renderer/src/layer_cost_tests.rs`, `crates/rustkit-renderer/src/lib.rs`, `crates/rustkit-renderer/src/scroll_cost_tests.rs`). Synchronizes `hiwave-macos develop` Batch 41 (`27129415..022aa2fa`):
+    - **#992 (LAT13)**: Single-encoder frame recording, vertex/index arena buffer, shared layer-texture slots, mid-frame glyph atlas reset discards/re-records, idle layer slot trimming.
+  - **(2) Substantive Audit**:
+    - **`glyph.rs` Line Ending & Mid-Frame Reset**: Cleanly resolved the CRLF vs LF conflict in `glyph.rs`. Applied upstream's 15-line `start_over`/`atlas_fill` logic while preserving LF and Linux FreeType backend caching (`ft_backend`), Skia subpixel positioning (`pen_and_phase`), and Linux emoji detection intact.
+    - **Linux Test Serialization Guard (`GPU_SERIAL`)**: Verified test-only `#[cfg(test)] pub(crate) static GPU_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());` in `crates/rustkit-renderer/src/lib.rs`, held during GPU test execution in `layer_cost_tests::gpu()` and `scroll_cost_tests::gpu()`. This completely resolves the Vulkan loader driver crash (`SIGSEGV` in `dlclose` under `vkEnumeratePhysicalDevices` on NVIDIA drivers) when running parallel tests, leaving production code bit-identical.
+    - **Timing Tests**: Confirmed `layer_frame_time_tests.rs` carries `#[ignore = "a timing, run by hand"]` matching macOS/Windows conventions.
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `gate 0` (`cargo check -p rustkit-engine --features headless`): **green** (0 errors).
+    - `rustkit-renderer` lib parallel tests: **152 passed**, 0 failed, 3 ignored in 76.20s.
+    - `rustkit-engine` lib suite (`--test-threads=1`): **928 passed**, 0 failed, 6 ignored in 409.31s.
+    - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 87.70s.
+    - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #120 is CLEAR to merge to `develop` at head `c269d4c086e04a38fbdd41b59e9deadba7d575a1`. Ready for Atlas merge.
+
+
 
 
 
