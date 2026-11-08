@@ -587,6 +587,18 @@ def rescore(path: Path) -> int:
     return 0
 
 
+def resolved_fonts() -> Dict[str, Any]:
+    """What fontconfig resolves for the generics the board pages request, under the pinned FONTCONFIG_FILE."""
+    res = {}
+    for fam in ("sans-serif", "serif", "monospace", "system-ui", "Helvetica", "Arial"):
+        try:
+            res[fam] = subprocess.run(["fc-match", "-f", "%{family} | %{style} | hintstyle=%{hintstyle}", fam],
+                                      capture_output=True, text=True, timeout=20).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            res[fam] = "unresolved (fc-match unavailable)"
+    return {"fontconfig_file": os.environ.get("FONTCONFIG_FILE"), "resolved": res}
+
+
 def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]] = capture) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--parity-capture", help="path to a built parity-capture binary (required unless --rescore)")
@@ -597,6 +609,9 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     ap.add_argument("--census", help="CSS census JSON (default: newest docs/census/CSS_PROPERTY_CENSUS_*.json)")
     ap.add_argument("--report-only", action="store_true",
                     help="rewrite BOARD.md from <out>/board.json with the census named by --census; no captures")
+    ap.add_argument("--fonts", metavar="FONTS_CONF",
+                    help="pin fontconfig for both arms: sets FONTCONFIG_FILE for parity-capture and the oracle, "
+                         "and records the resolved generic families in board.json (Linux; scripts/board-fonts.conf)")
     ap.add_argument("--rescore", metavar="BOARD_JSON",
                     help="print a board.json's green count before/after the current gate; no captures, no writes")
     args = ap.parse_args(argv)
@@ -605,6 +620,10 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     if not args.parity_capture:
         ap.error("--parity-capture is required")
 
+    fonts = None
+    if args.fonts:
+        os.environ["FONTCONFIG_FILE"] = NODE_ENV["FONTCONFIG_FILE"] = str(Path(args.fonts).resolve())
+        fonts = resolved_fonts()
     binary = Path(args.parity_capture)
     out = Path(args.out)
     work = Path(args.work)
@@ -635,6 +654,7 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
 
     census_path = Path(args.census) if args.census else latest_census()
     board_json = {
+        "fonts": fonts,
         "run": {
             "at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "sha": git_sha(REPO_ROOT),
