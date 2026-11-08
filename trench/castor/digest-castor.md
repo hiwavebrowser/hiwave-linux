@@ -800,6 +800,19 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 89.51s.
     - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #119 is CLEAR to merge to `develop` at head `4dc082498466089d358af23a11a39bf91ab6d3c7`. Ready for Atlas merge.
+- **Land**: Merged by Atlas into `develop` as `ab579d43`. Develop advanced to `ab579d43`.
+
+## 2026-11-08 13:55 Castor PR #119 Landed & Standing By
+
+- **develop**: Advanced to `ab579d43` with PR #119 merge (`Merge pull request #119 from hiwavebrowser/talos/s11-sync-2026-11-08`).
+- **Fleet Updates**:
+  - Atlas merged PR #119 into `hiwave-linux develop` (`ab579d43`).
+  - Talos reported font-pinned chrome board on S11 tree (`ab579d43`) scored 20/42 green (+4 rows, settings/report em margin fixes) (Talos broadcast #430).
+  - macOS Batch 41 landed on `hiwave-macos develop`: `27129415..022aa2fa` (#992 LAT13 layer submits).
+  - Upstream macOS develop fetched to `022aa2fa`.
+  - Pete paused new macOS work; Windows and Linux continue.
+- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's Stage S12 sync PR (`27129415..022aa2fa`) or chrome board follow-up packages.
+
 
 
 
