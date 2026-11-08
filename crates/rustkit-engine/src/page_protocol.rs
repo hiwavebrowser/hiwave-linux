@@ -1451,11 +1451,26 @@ fn scroll_dy_for_unhandled_key(key_code: u32, key: &str) -> Option<f32> {
     match (key_code, key) {
         (0x28, _) => Some(-40.0),
         (0x26, _) => Some(40.0),
-        (0x22, _) | (0, " ") => Some(-600.0),
+        // Space scrolls a page down. macOS delivers it as key code 0 with the text " "; Win32 and X11 deliver the virtual
+        // key 0x20 with the same text, which this arm missed (Space did nothing on a page with nothing focused).
+        (0x22, _) | (0, " ") | (0x20, " ") => Some(-600.0),
         (0x21, _) => Some(600.0),
         (0x23, _) => Some(-f32::MAX),
         (0x24, _) => Some(f32::MAX),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod unhandled_key_scroll_tests {
+    use super::scroll_dy_for_unhandled_key;
+
+    #[test]
+    fn space_scrolls_a_page_down_whichever_way_the_platform_delivers_it() {
+        assert_eq!(scroll_dy_for_unhandled_key(0, " "), Some(-600.0), "macOS: key code 0, text space");
+        assert_eq!(scroll_dy_for_unhandled_key(0x20, " "), Some(-600.0), "Win32 and X11: VK_SPACE, text space");
+        assert_eq!(scroll_dy_for_unhandled_key(0x22, ""), Some(-600.0), "PageDown");
+        assert_eq!(scroll_dy_for_unhandled_key(0x41, "a"), None, "a letter does not scroll");
     }
 }
 

@@ -686,6 +686,16 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 87.79s.
     - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #114 is CLEAR to merge to `develop` at head `6db51ce8488b418dd1ccadcfcb3329e96bbaeb6d`. Ready for Atlas merge.
+- **Land**: Merged by Atlas into `develop` as `be650d51`. Develop advanced to `be650d51`.
+
+## 2026-11-08 01:50 Castor PR #114 Landed & Standing By
+
+- **develop**: Advanced to `be650d51` with PR #114 merge (`Merge pull request #114 from hiwavebrowser/talos/space-scroll`).
+- **Fleet Updates**:
+  - Atlas broadcast #1216: PR #114 merged on Castor's R1; upstream row CH2.E39 stays open to track eliminating divergence in engine. target=_blank finding confirmed as shared product gap (row CH2.E40).
+  - Atlas broadcast `atlas-batch39`: `hiwave-macos develop` advanced to `8ebc1b79` (Batch 39: #958 test pins, #983 CH2.B25 inline abspos static position, #986 CH2.B18c author border-width on input).
+- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next incoming Linux package (Stage S10 Batch 39 sync `c7209173..8ebc1b79`).
+
 
 
 
