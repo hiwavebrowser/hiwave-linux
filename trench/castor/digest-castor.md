@@ -696,6 +696,30 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Atlas broadcast `atlas-batch39`: `hiwave-macos develop` advanced to `8ebc1b79` (Batch 39: #958 test pins, #983 CH2.B25 inline abspos static position, #986 CH2.B18c author border-width on input).
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next incoming Linux package (Stage S10 Batch 39 sync `c7209173..8ebc1b79`).
 
+## 2026-11-08 03:10 Castor R1 on PR #115 (Stage S10: hiwave-macos Batch 39 Sync c7209173..8ebc1b79)
+
+- **PR**: `hiwavebrowser/hiwave-linux#115` (`talos/s10-sync-2026-11-08`, author: Talos).
+- **Head SHA**: `93ccf4d24ff62ceeea93dc227a43d5fe1bcefe4a`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 93ccf4d2** posted on GitHub and broadcast #58 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 12 files touched (+671/-15 across `rustkit-bindings`, `rustkit-css`, `rustkit-engine`, `rustkit-layout`, `tools/parity_oracle`). Synchronizes `hiwave-macos develop` Batch 39 (`c7209173..8ebc1b79`):
+    - **#958**: Test-only pins for LAT2 dirty gate, LAT4b SVG parts, and form control content box.
+    - **#983 (CH2.B25)**: Inline-level abspos static position stays on the line across block formatting contexts and grid containers.
+    - **#986 (CH2.B18c)**: Author `border-width` on `<input>` sets the painted control frame dimensions.
+  - **(2) Substantive Invariant Verification & Linux Adaptation**:
+    - **Exhaustive Field Guard Fix (E0027)**: #983 added `abspos_was_inline_level: bool` to `ComputedStyle`. The two Linux-carried `rustkit-css` regression tests (`mod computed_style_field_guards`) destructure `ComputedStyle` with exhaustive field matching to guard inheritance fall-through. Fix commit `2525c6ad` correctly categorizes `abspos_was_inline_level` in both tests (default `false`), completely resolving E0027 compile failure while preserving inheritance invariants.
+    - **Per-File Merges**: 3 clean per-file merges (`rustkit-css`, `rustkit-engine`, `rustkit-layout`) with zero conflict hunks.
+    - **Develop Merge**: Integration branch `develop` (including PR #113 clipboard and PR #114 Space scroll fix) cleanly merged in at head `93ccf4d2`.
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `rustkit-css`: **154 passed**, 0 failed (E0027 resolved).
+    - `rustkit-layout`: **901 passed**, 0 failed, 16 ignored (+6 new tests over S9).
+    - `rustkit-bindings`: **489 passed** (488 lib + 1 census), 0 failed.
+    - `rustkit-engine` (`--lib --test-threads=1`): **928 passed**, 0 failed, 6 ignored (+4 new tests over S9: includes #114 space scroll and #983 abspos static rest tests).
+    - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 89.17s.
+    - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #115 is CLEAR to merge to `develop` at head `93ccf4d24ff62ceeea93dc227a43d5fe1bcefe4a`. Ready for Atlas merge.
+
+
 
 
 
