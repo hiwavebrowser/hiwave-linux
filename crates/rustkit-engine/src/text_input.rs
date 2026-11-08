@@ -309,9 +309,64 @@ pub(crate) fn system_clipboard() -> rustkit_dom::clipboard::SharedClipboard {
     {
         std::rc::Rc::new(Pasteboard)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        std::rc::Rc::new(LinuxClipboard)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         rustkit_dom::clipboard::MemoryClipboard::shared()
+    }
+}
+
+/// The Linux system clipboard (X11 CLIPBOARD selection, Wayland data-control), plain text, through `arboard`.
+/// Declared Linux divergence. One process-wide handle: on X11 the text stays available to other applications only
+/// while the handle that set it is alive (arboard serves the selection from its own thread), so it is kept, not
+/// created per call. Any failure (no display, no clipboard manager) falls back to nothing read and nothing written,
+/// which is what an in-memory clipboard that nobody else can see amounts to; a failed write is logged once.
+#[cfg(target_os = "linux")]
+struct LinuxClipboard;
+
+#[cfg(target_os = "linux")]
+fn linux_clipboard() -> &'static std::sync::Mutex<Option<arboard::Clipboard>> {
+    static HANDLE: std::sync::OnceLock<std::sync::Mutex<Option<arboard::Clipboard>>> = std::sync::OnceLock::new();
+    HANDLE.get_or_init(|| {
+        let handle = match arboard::Clipboard::new() {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                tracing::warn!(%error, "system clipboard unavailable, copy and paste stay inside the app");
+                None
+            }
+        };
+        std::sync::Mutex::new(handle)
+    })
+}
+
+/// The in-app copy of the last text written, so a machine with no usable clipboard still pastes what it copied.
+#[cfg(target_os = "linux")]
+fn linux_clipboard_fallback() -> &'static std::sync::Mutex<Option<String>> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
+    LAST.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(target_os = "linux")]
+impl rustkit_dom::clipboard::Clipboard for LinuxClipboard {
+    fn read_text(&self) -> Option<String> {
+        let mut guard = linux_clipboard().lock().unwrap_or_else(|p| p.into_inner());
+        match guard.as_mut() {
+            Some(handle) => handle.get_text().ok().filter(|t| !t.is_empty()),
+            None => linux_clipboard_fallback().lock().unwrap_or_else(|p| p.into_inner()).clone(),
+        }
+    }
+
+    fn write_text(&self, text: &str) {
+        *linux_clipboard_fallback().lock().unwrap_or_else(|p| p.into_inner()) = Some(text.to_string());
+        let mut guard = linux_clipboard().lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(handle) = guard.as_mut() {
+            if let Err(error) = handle.set_text(text.to_string()) {
+                tracing::warn!(%error, "system clipboard write failed");
+            }
+        }
     }
 }
 
