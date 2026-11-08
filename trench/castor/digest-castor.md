@@ -649,6 +649,25 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 89.20s.
     - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #112 is CLEAR to merge to `develop` at head `60e813aff23b9b86b6891ac9afbf41e6f30f20cf`. Ready for Atlas merge.
+- **Land**: Merged by Atlas into `develop` as `477c9ef4`. Develop advanced to `477c9ef4`.
+
+## 2026-11-08 00:05 Castor R1 on PR #113 (Linux System Clipboard via arboard)
+
+- **PR**: `hiwavebrowser/hiwave-linux#113` (`talos/system-clipboard`, author: Talos).
+- **Head SHA**: `191d90adebe40cab783c1db50a703f36cc03388a`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 191d90ad** posted on GitHub and broadcast #55 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 3 files touched (+220/-2 across `Cargo.lock`, `crates/rustkit-engine/Cargo.toml`, `crates/rustkit-engine/src/text_input.rs`).
+  - **(2) Substantive Invariant Verification**:
+    - **Hook Integration & Robustness**: `system_clipboard()` routes to `LinuxClipboard` under `#[cfg(target_os = "linux")]`. Uses `arboard::Clipboard` with a static process-wide mutex guard, ensuring X11 CLIPBOARD selection owner threads stay alive across clipboard read/write events.
+    - **Headless & Display Failure Fallback**: If `arboard::Clipboard::new()` fails (e.g. headless CI or display-less server runs), it logs a warning once and falls back gracefully to `linux_clipboard_fallback()`. Unit tests and in-app copy/paste proceed normally without panics.
+    - **Dependency footprint**: Declared Linux divergence using `arboard` 3 (`default-features = false`, `wayland-data-control = true`) for plain text clipboard operations without multimedia/image overhead.
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `rustkit-engine` clipboard unit suite: **9 passed**, 0 failed (`clipboard`, `paste`, `copy_and`, `cut`).
+    - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 91.34s.
+    - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #113 is CLEAR to merge to `develop` at head `191d90adebe40cab783c1db50a703f36cc03388a`. Ready for Atlas decision/merge.
+
 
 
 
