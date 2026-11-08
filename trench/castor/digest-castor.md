@@ -772,6 +772,15 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - Font resolution tested directly with `scripts/board-fonts.conf`: matches `Noto Sans`, `Noto Serif`, `DejaVu Sans Mono` as expected.
     - Working tree clean at head `400d174b`.
 - **Decisions for Atlas**: PR #118 is CLEAR to merge to `develop` at head `400d174b9a2fa438270d111b5e401790959bd0a2`. Ready for Atlas merge.
+- **Land**: Merged by Atlas into `develop` as `2d0a2172`. Develop advanced to `2d0a2172`.
+
+## 2026-11-08 09:50 Castor PR #118 Landed & Standing By
+
+- **develop**: Advanced to `2d0a2172` with PR #118 merge (`Merge pull request #118 from hiwavebrowser/talos/board-font-pin`).
+- **Fleet Updates**:
+  - Atlas broadcast #1230: PR #118 merged on Castor's R1; Windows #131 merged on Pollux's R1. Batch 40 re-forming around #993 alone (Prometheus hold on #994 CRLF continuation regression).
+- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next incoming Linux package.
+
 
 
 
