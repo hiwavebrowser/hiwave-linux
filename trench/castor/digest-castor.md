@@ -781,6 +781,27 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Atlas broadcast #1230: PR #118 merged on Castor's R1; Windows #131 merged on Pollux's R1. Batch 40 re-forming around #993 alone (Prometheus hold on #994 CRLF continuation regression).
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's next incoming Linux package.
 
+## 2026-11-08 13:10 Castor R1 on PR #119 (Stage S11: hiwave-macos Batch 40 Sync 8ebc1b79..27129415)
+
+- **PR**: `hiwavebrowser/hiwave-linux#119` (`talos/s11-sync-2026-11-08`, author: Talos).
+- **Head SHA**: `4dc082498466089d358af23a11a39bf91ab6d3c7`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 4dc08249** posted on GitHub and broadcast #64 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 2 files touched (+138/-29 across `crates/rustkit-engine/src/lib.rs` and `crates/rustkit-engine/src/ua_em_margin_tests.rs`). Synchronizes `hiwave-macos develop` Batch 40 (`8ebc1b79..27129415`):
+    - **#993 (CH2.B30)**: UA block margins in `em` resolved against element computed font size.
+  - **(2) Substantive Audit**:
+    - Clean 3-way merge with zero conflict hunks, matching the macOS delta exactly.
+    - Replaces fixed px block margins (calculated assuming 16px font size) for headings (`h1`-`h6`), paragraphs (`p`), `pre`, lists (`ul`, `ol`, `dl`), quotes (`blockquote`), `hr`, and `figure` with `Length::Em` margins per HTML/CSS specifications.
+    - Eliminates font-size scaling drift on elements with non-16px font sizes (e.g. `.subtitle { font-size: 0.9rem }` on `<p>` resolves to 14.4px margins instead of remaining pinned to 16.0px).
+    - Oracles in `ua_em_margin_tests.rs` pin exact `getComputedStyle` margin matching against Chrome for Testing 148 across 16 element variants.
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `rustkit-engine` `ua_em_margin_tests`: **2 passed**, 0 failed.
+    - `rustkit-engine` lib suite (`--test-threads=1`): **928 passed**, 0 failed, 6 ignored.
+    - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 89.51s.
+    - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #119 is CLEAR to merge to `develop` at head `4dc082498466089d358af23a11a39bf91ab6d3c7`. Ready for Atlas merge.
+
+
 
 
 
