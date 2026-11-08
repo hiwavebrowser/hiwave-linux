@@ -627,6 +627,29 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 94.18s.
     - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #111 is CLEAR to merge to `develop` at head `2da802b20bde8f6eaeeb1c04eb43123bfd788243`. Ready for Atlas merge.
+- **Land**: Merged by Atlas into `develop` as `76af95d7`. Develop advanced to `76af95d7`.
+
+## 2026-11-07 23:45 Castor R1 on PR #112 (Stage S9: hiwave-macos Batch 38 Sync a8e7e28b..c7209173)
+
+- **PR**: `hiwavebrowser/hiwave-linux#112` (`talos/s9-sync-2026-11-08`, author: Talos).
+- **Head SHA**: `60e813aff23b9b86b6891ac9afbf41e6f30f20cf`. Base: `develop`.
+- **Verdict**: **R1 CLEAR at 60e813af** posted on GitHub and broadcast #54 to exchange.
+- **Audit Findings**:
+  - **(1) Scope**: 16 files touched (+1307/-62 across `rustkit-bindings`, `rustkit-css`, `rustkit-engine`, `rustkit-layout`, `tools/parity_oracle`). Zero conflict hunks across 2 per-file merges.
+  - **(2) Substantive Invariant Verification**:
+    - **#980 (Test-Only Pins)**: Integrates pins for relative offsets (`relative_offset_unit_tests.rs`), display inherit (`display_inherit_apply_tests.rs`), css display (`css_display_apply_tests.rs`), flex shorthand (`flex_shorthand_tests.rs`), scroll helpers (`element_scroll_helper_tests.rs`), border medium (`border_medium_apply_tests.rs`).
+    - **#968 (CH2.E18 - Attribute Selector `i` Flag)**: Case-insensitive `i` flag supported across attribute selector matching (`attribute_flag_tests.rs`).
+    - **#951 (CH2.E13b - `innerText` White-Space & Display Parity)**: In `inner_text.rs`, `space_of` reads computed `white-space`, table checks read computed `display`, and boxless `display: contents` `<p>` elements generate zero required breaks, exactly matching Chromium 143 pins.
+    - **#956 (CH2.E14b - Element `var()` Unset & Linux Shorthand Adaptation)**: Custom property `var()` with no value and no fallback computes as unset. Linux declared divergence cleanly calls `Self::apply_initial_value_impl(style, &format!("{prefix}-{side}{suffix}"))` for 4-sided shorthand expansions (`margin`, `padding`, `border-width`), completely resolving E0424 compile hazards.
+    - **#981 & #982 (C8d - `clip-path` Inset Round & Inlines)**: `clip_path_clip` extended to non-replaced inline boxes (`BoxType::Inline`) with vertical margin calculation matching WPT `clip-path-inline-004`. Inset round percentages correctly resolve against reference box dimensions per CSS Shapes 1 §3.1.
+  - **(3) Verification Evidence on Linux (`legion5`, x86_64)**:
+    - `rustkit-layout`: **895 passed**, 0 failed, 16 ignored (+9 new tests).
+    - `rustkit-bindings`: **483 passed**, 0 failed (482 lib + 1 census).
+    - `rustkit-engine` (`--lib --test-threads=1`): **924 passed**, 0 failed, 6 ignored (+20 new tests).
+    - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 89.20s.
+    - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #112 is CLEAR to merge to `develop` at head `60e813aff23b9b86b6891ac9afbf41e6f30f20cf`. Ready for Atlas merge.
+
 
 
 
