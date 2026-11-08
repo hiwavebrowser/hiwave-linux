@@ -1,0 +1,2410 @@
+{
+  "run": {
+    "at": "2026-11-08 12:57 UTC",
+    "sha": "5c3f1496",
+    "base": "5c3f1496",
+    "chromium": "148.0.7778.216",
+    "parity_capture": "target/release/parity-capture",
+    "gate_pct": 0.5,
+    "gate_geometry_pixel_pct": 1.5
+  },
+  "sizes": [
+    [
+      1280,
+      800
+    ],
+    [
+      1024,
+      700
+    ],
+    [
+      1600,
+      1000
+    ]
+  ],
+  "states": {
+    "address_focused": [
+      {
+        "type": "click",
+        "selector": "#urlInput"
+      },
+      {
+        "type": "key",
+        "selector": "#urlInput",
+        "text": "hiwave.dev/docs"
+      }
+    ],
+    "console_tab": [
+      {
+        "type": "click",
+        "selector": ".toolbar-tab[data-tab=\"console\"]"
+      }
+    ],
+    "default": [],
+    "downloads_open": [
+      {
+        "type": "click",
+        "selector": "#toolbarMenuBtn"
+      }
+    ],
+    "find_open": [
+      {
+        "type": "key",
+        "key": "F3"
+      }
+    ],
+    "focus_mode": [
+      {
+        "type": "key",
+        "key": "F",
+        "modifiers": [
+          "Control",
+          "Shift"
+        ]
+      }
+    ],
+    "hover_tab2": [
+      {
+        "type": "hover",
+        "selector": "#tabs .tab:nth-child(2)"
+      }
+    ],
+    "shelf_search": [
+      {
+        "type": "click",
+        "selector": "#commandInput"
+      },
+      {
+        "type": "key",
+        "selector": "#commandInput",
+        "text": "sh"
+      }
+    ],
+    "sidebar_collapsed": [
+      {
+        "type": "click",
+        "selector": "#sidebarLogoToggle"
+      }
+    ],
+    "weekly": [
+      {
+        "type": "click",
+        "selector": ".period-btn[data-period=\"weekly\"]"
+      }
+    ]
+  },
+  "rows": [
+    {
+      "page": "chrome",
+      "state": "default",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 2.014,
+      "geometry_diffs": 161,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 72.2
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.8
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 1.7
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 82.0146484375,
+        "form_control": 1.0240234375000001
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "default",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 2.592,
+      "geometry_diffs": 161,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 66.7
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
+          "pct": 1.9
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2)",
+          "pct": 1.7
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 76.64494977678572,
+        "form_control": 1.8062220982142858
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "default",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 1.351,
+      "geometry_diffs": 161,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 77.6
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section shelf-section:nth-of-type(4)",
+          "pct": 2.4
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.9
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 87.4640625,
+        "form_control": 0.935375
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "hover_tab2",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 2.015,
+      "geometry_diffs": 161,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 72.2
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.8
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 1.7
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 82.0146484375,
+        "form_control": 1.0240234375000001
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "hover_tab2",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 2.594,
+      "geometry_diffs": 161,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 66.7
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
+          "pct": 1.9
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2)",
+          "pct": 1.7
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 76.64494977678572,
+        "form_control": 1.8062220982142858
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "hover_tab2",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 1.352,
+      "geometry_diffs": 161,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 77.6
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section shelf-section:nth-of-type(4)",
+          "pct": 2.4
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.9
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 87.4640625,
+        "form_control": 0.935375
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "address_focused",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 2.265,
+      "geometry_diffs": 161,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 72.2
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.8
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 1.7
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 82.0146484375,
+        "form_control": 1.0240234375000001
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "address_focused",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 2.808,
+      "geometry_diffs": 161,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 66.7
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
+          "pct": 1.9
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2)",
+          "pct": 1.7
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 76.64494977678572,
+        "form_control": 1.8062220982142858
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "address_focused",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 1.592,
+      "geometry_diffs": 161,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 77.6
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section shelf-section:nth-of-type(4)",
+          "pct": 2.4
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.9
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 87.4640625,
+        "form_control": 0.935375
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "sidebar_collapsed",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 0.304,
+      "geometry_diffs": 194,
+      "top": [
+        {
+          "selector": "html > body",
+          "pct": 84.2
+        },
+        {
+          "selector": "#tabs",
+          "pct": 2.6
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 2.2
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 93.45166015625,
+        "form_control": 1.3248046875000001
+      },
+      "join_failures": 10,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "sidebar_collapsed",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 0.434,
+      "geometry_diffs": 191,
+      "top": [
+        {
+          "selector": "html > body",
+          "pct": 81.3
+        },
+        {
+          "selector": "#tabs",
+          "pct": 2.3
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 2.3
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 91.630859375,
+        "form_control": 1.392578125
+      },
+      "join_failures": 11,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "sidebar_collapsed",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 0.195,
+      "geometry_diffs": 194,
+      "top": [
+        {
+          "selector": "html > body",
+          "pct": 87.6
+        },
+        {
+          "selector": "#tabs",
+          "pct": 2.4
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 1.8
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 95.08006250000003,
+        "form_control": 1.127875
+      },
+      "join_failures": 10,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "find_open",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 1.881,
+      "geometry_diffs": 180,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 72.2
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
+          "pct": 1.6
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 1.6
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 81.0451171875,
+        "form_control": 1.0240234375000001
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "find_open",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 2.42,
+      "geometry_diffs": 180,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 66.7
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
+          "pct": 1.9
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 1.5
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 75.63253348214289,
+        "form_control": 1.8062220982142858
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "find_open",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 1.283,
+      "geometry_diffs": 180,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 77.6
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section shelf-section:nth-of-type(4)",
+          "pct": 2.4
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 1.4
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 86.56356249999999,
+        "form_control": 0.935375
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "downloads_open",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 0.559,
+      "geometry_diffs": 182,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 69.0
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "pct": 10.0
+        },
+        {
+          "selector": "body > aside.right-sidebar:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4)",
+          "pct": 2.0
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 88.32080078125001,
+        "form_control": 1.0240234375000001
+      },
+      "join_failures": 10,
+      "worst_geometry": [
+        {
+          "selector": "#modeSelector",
+          "max_delta_px": 78.49
+        },
+        {
+          "selector": "body > aside.sidebar collapsed:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3) > div.section-header:nth-of-type(1)",
+          "max_delta_px": 73.66
+        },
+        {
+          "selector": "#workspaceContent",
+          "max_delta_px": 73.66
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "downloads_open",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 0.799,
+      "geometry_diffs": 179,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 62.6
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "pct": 11.5
+        },
+        {
+          "selector": "body > aside.right-sidebar:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4)",
+          "pct": 2.5
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 84.41210937499999,
+        "form_control": 0.962890625
+      },
+      "join_failures": 11,
+      "worst_geometry": [
+        {
+          "selector": "#modeSelector",
+          "max_delta_px": 78.49
+        },
+        {
+          "selector": "body > aside.sidebar collapsed:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3) > div.section-header:nth-of-type(1)",
+          "max_delta_px": 73.66
+        },
+        {
+          "selector": "#workspaceContent",
+          "max_delta_px": 73.66
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "downloads_open",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 0.358,
+      "geometry_diffs": 182,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 75.1
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "pct": 8.8
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.9
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 91.77331249999999,
+        "form_control": 0.935375
+      },
+      "join_failures": 10,
+      "worst_geometry": [
+        {
+          "selector": "#modeSelector",
+          "max_delta_px": 78.49
+        },
+        {
+          "selector": "body > aside.sidebar collapsed:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3) > div.section-header:nth-of-type(1)",
+          "max_delta_px": 73.66
+        },
+        {
+          "selector": "#workspaceContent",
+          "max_delta_px": 73.66
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "focus_mode",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 0.174,
+      "geometry_diffs": 194,
+      "top": [
+        {
+          "selector": "html > body.focus-mode",
+          "pct": 84.2
+        },
+        {
+          "selector": "#tabs",
+          "pct": 2.3
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 2.2
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 92.8513671875,
+        "form_control": 1.3248046875000001
+      },
+      "join_failures": 12,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "focus_mode",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 0.249,
+      "geometry_diffs": 191,
+      "top": [
+        {
+          "selector": "html > body.focus-mode",
+          "pct": 81.3
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 2.3
+        },
+        {
+          "selector": "#tabs",
+          "pct": 2.1
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 90.98814174107144,
+        "form_control": 1.392578125
+      },
+      "join_failures": 13,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "focus_mode",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 0.112,
+      "geometry_diffs": 194,
+      "top": [
+        {
+          "selector": "html > body.focus-mode",
+          "pct": 87.6
+        },
+        {
+          "selector": "#tabs",
+          "pct": 2.1
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "pct": 1.8
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 94.66231250000003,
+        "form_control": 1.127875
+      },
+      "join_failures": 12,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 134.14
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 110.14
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 110.14
+        }
+      ]
+    },
+    {
+      "page": "shelf",
+      "state": "default",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 0.279,
+      "geometry_diffs": 0,
+      "top": [
+        {
+          "selector": "#commandResults",
+          "pct": 79.6
+        },
+        {
+          "selector": "body > div.command-palette:nth-of-type(2)",
+          "pct": 6.8
+        },
+        {
+          "selector": "body > div.shelf-header:nth-of-type(1)",
+          "pct": 4.9
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 93.83085937500002,
+        "form_control": 4.6796875
+      },
+      "join_failures": 0,
+      "worst_geometry": []
+    },
+    {
+      "page": "shelf",
+      "state": "default",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 0.404,
+      "geometry_diffs": 0,
+      "top": [
+        {
+          "selector": "#commandResults",
+          "pct": 74.7
+        },
+        {
+          "selector": "body > div.command-palette:nth-of-type(2)",
+          "pct": 7.9
+        },
+        {
+          "selector": "body > div.shelf-header:nth-of-type(1)",
+          "pct": 5.6
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 92.14899553571426,
+        "form_control": 5.256696428571429
+      },
+      "join_failures": 0,
+      "worst_geometry": []
+    },
+    {
+      "page": "shelf",
+      "state": "default",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 0.181,
+      "geometry_diffs": 0,
+      "top": [
+        {
+          "selector": "#commandResults",
+          "pct": 84.0
+        },
+        {
+          "selector": "body > div.command-palette:nth-of-type(2)",
+          "pct": 5.4
+        },
+        {
+          "selector": "body > div.shelf-header:nth-of-type(1)",
+          "pct": 4.0
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 95.17081250000001,
+        "form_control": 3.795
+      },
+      "join_failures": 0,
+      "worst_geometry": []
+    },
+    {
+      "page": "shelf",
+      "state": "shelf_search",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 0.158,
+      "geometry_diffs": 0,
+      "top": [
+        {
+          "selector": "#commandResults",
+          "pct": 81.3
+        },
+        {
+          "selector": "body > div.command-palette:nth-of-type(2)",
+          "pct": 6.8
+        },
+        {
+          "selector": "body > div.shelf-header:nth-of-type(1)",
+          "pct": 4.9
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 94.88525390625001,
+        "form_control": 4.6796875
+      },
+      "join_failures": 0,
+      "worst_geometry": []
+    },
+    {
+      "page": "shelf",
+      "state": "shelf_search",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 0.227,
+      "geometry_diffs": 0,
+      "top": [
+        {
+          "selector": "#commandResults",
+          "pct": 77.5
+        },
+        {
+          "selector": "body > div.command-palette:nth-of-type(2)",
+          "pct": 7.9
+        },
+        {
+          "selector": "body > div.shelf-header:nth-of-type(1)",
+          "pct": 5.6
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 94.04255022321428,
+        "form_control": 5.256696428571429
+      },
+      "join_failures": 0,
+      "worst_geometry": []
+    },
+    {
+      "page": "shelf",
+      "state": "shelf_search",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 0.102,
+      "geometry_diffs": 0,
+      "top": [
+        {
+          "selector": "#commandResults",
+          "pct": 85.2
+        },
+        {
+          "selector": "body > div.command-palette:nth-of-type(2)",
+          "pct": 5.4
+        },
+        {
+          "selector": "body > div.shelf-header:nth-of-type(1)",
+          "pct": 4.0
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 95.90887500000001,
+        "form_control": 3.795
+      },
+      "join_failures": 0,
+      "worst_geometry": []
+    },
+    {
+      "page": "inspector",
+      "state": "default",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 2.229,
+      "geometry_diffs": 27,
+      "top": [
+        {
+          "selector": "#dom-tree-container",
+          "pct": 23.4
+        },
+        {
+          "selector": "#styles-container",
+          "pct": 7.6
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1)",
+          "pct": 3.1
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 47.523828124999994
+      },
+      "join_failures": 28,
+      "worst_geometry": [
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1) > div.box-model:nth-of-type(2) > div.box-model-diagram > div.box-margin > div > div.box-border > div > div.box-padding > span.box-label:nth-of-type(1)",
+          "max_delta_px": 49.0
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1) > div.box-model:nth-of-type(2) > div.box-model-diagram > div.box-margin > div > div.box-border > span.box-label:nth-of-type(1)",
+          "max_delta_px": 25.0
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(1) > div.dom-node-line:nth-of-type(1) > span.dom-toggle expanded:nth-of-type(1) > svg > path",
+          "max_delta_px": 2.5
+        }
+      ]
+    },
+    {
+      "page": "inspector",
+      "state": "default",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 2.435,
+      "geometry_diffs": 27,
+      "top": [
+        {
+          "selector": "#dom-tree-container",
+          "pct": 14.8
+        },
+        {
+          "selector": "#styles-container",
+          "pct": 6.0
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1) > div.box-model:nth-of-type(2)",
+          "pct": 3.6
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 39.06752232142857
+      },
+      "join_failures": 28,
+      "worst_geometry": [
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1) > div.box-model:nth-of-type(2) > div.box-model-diagram > div.box-margin > div > div.box-border > div > div.box-padding > span.box-label:nth-of-type(1)",
+          "max_delta_px": 49.0
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1) > div.box-model:nth-of-type(2) > div.box-model-diagram > div.box-margin > div > div.box-border > span.box-label:nth-of-type(1)",
+          "max_delta_px": 25.0
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(1) > div.dom-node-line:nth-of-type(1) > span.dom-toggle expanded:nth-of-type(1) > svg > path",
+          "max_delta_px": 2.5
+        }
+      ]
+    },
+    {
+      "page": "inspector",
+      "state": "default",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 1.847,
+      "geometry_diffs": 27,
+      "top": [
+        {
+          "selector": "#dom-tree-container",
+          "pct": 35.7
+        },
+        {
+          "selector": "#styles-container",
+          "pct": 9.3
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1)",
+          "pct": 2.7
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 58.73275
+      },
+      "join_failures": 28,
+      "worst_geometry": [
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1) > div.box-model:nth-of-type(2) > div.box-model-diagram > div.box-margin > div > div.box-border > div > div.box-padding > span.box-label:nth-of-type(1)",
+          "max_delta_px": 49.0
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1) > div.box-model:nth-of-type(2) > div.box-model-diagram > div.box-margin > div > div.box-border > span.box-label:nth-of-type(1)",
+          "max_delta_px": 25.0
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(1) > div.dom-node-line:nth-of-type(1) > span.dom-toggle expanded:nth-of-type(1) > svg > path",
+          "max_delta_px": 2.5
+        }
+      ]
+    },
+    {
+      "page": "inspector",
+      "state": "console_tab",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 0.273,
+      "geometry_diffs": 0,
+      "top": [
+        {
+          "selector": "#console-output",
+          "pct": 74.4
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.console-panel active:nth-of-type(4) > div.console-toolbar:nth-of-type(1)",
+          "pct": 3.6
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1)",
+          "pct": 3.3
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 92.02597656249999,
+        "form_control": 2.6833984375
+      },
+      "join_failures": 1,
+      "worst_geometry": []
+    },
+    {
+      "page": "inspector",
+      "state": "console_tab",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 0.39,
+      "geometry_diffs": 0,
+      "top": [
+        {
+          "selector": "#console-output",
+          "pct": 70.7
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.console-panel active:nth-of-type(4) > div.console-toolbar:nth-of-type(1)",
+          "pct": 4.0
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1)",
+          "pct": 3.5
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 90.35853794642857,
+        "form_control": 3.0477120535714284
+      },
+      "join_failures": 1,
+      "worst_geometry": []
+    },
+    {
+      "page": "inspector",
+      "state": "console_tab",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 0.175,
+      "geometry_diffs": 0,
+      "top": [
+        {
+          "selector": "#console-output",
+          "pct": 79.5
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.console-panel active:nth-of-type(4) > div.console-toolbar:nth-of-type(1)",
+          "pct": 3.0
+        },
+        {
+          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1)",
+          "pct": 2.8
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 93.916625,
+        "form_control": 2.157375
+      },
+      "join_failures": 1,
+      "worst_geometry": []
+    },
+    {
+      "page": "settings",
+      "state": "default",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 1.602,
+      "geometry_diffs": 251,
+      "top": [
+        {
+          "selector": "html > body",
+          "pct": 47.5
+        },
+        {
+          "selector": "body > div.container",
+          "pct": 5.1
+        },
+        {
+          "selector": "body > div.container > div.section:nth-of-type(1)",
+          "pct": 4.6
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 74.810546875
+      },
+      "join_failures": 0,
+      "worst_geometry": [
+        {
+          "selector": "#theme",
+          "max_delta_px": 22.18
+        },
+        {
+          "selector": "#defaultMode",
+          "max_delta_px": 21.54
+        },
+        {
+          "selector": "#clearShelf",
+          "max_delta_px": 17.88
+        }
+      ]
+    },
+    {
+      "page": "settings",
+      "state": "default",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 1.953,
+      "geometry_diffs": 251,
+      "top": [
+        {
+          "selector": "html > body",
+          "pct": 34.8
+        },
+        {
+          "selector": "body > div.container",
+          "pct": 6.8
+        },
+        {
+          "selector": "body > div.container > div.section:nth-of-type(1)",
+          "pct": 6.6
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 69.76478794642857
+      },
+      "join_failures": 0,
+      "worst_geometry": [
+        {
+          "selector": "#theme",
+          "max_delta_px": 22.18
+        },
+        {
+          "selector": "#defaultMode",
+          "max_delta_px": 21.54
+        },
+        {
+          "selector": "#clearShelf",
+          "max_delta_px": 17.88
+        }
+      ]
+    },
+    {
+      "page": "settings",
+      "state": "default",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 1.374,
+      "geometry_diffs": 251,
+      "top": [
+        {
+          "selector": "html > body",
+          "pct": 57.6
+        },
+        {
+          "selector": "body > div.container",
+          "pct": 3.8
+        },
+        {
+          "selector": "body > div.container > div.section:nth-of-type(1)",
+          "pct": 3.0
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 76.61250000000001
+      },
+      "join_failures": 0,
+      "worst_geometry": [
+        {
+          "selector": "#theme",
+          "max_delta_px": 22.18
+        },
+        {
+          "selector": "#defaultMode",
+          "max_delta_px": 21.54
+        },
+        {
+          "selector": "#clearShelf",
+          "max_delta_px": 17.88
+        }
+      ]
+    },
+    {
+      "page": "report",
+      "state": "default",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 0.99,
+      "geometry_diffs": 63,
+      "top": [
+        {
+          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(2) > div.chart-container:nth-of-type(2)",
+          "pct": 33.7
+        },
+        {
+          "selector": "html > body",
+          "pct": 10
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1)",
+          "pct": 9.5
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 82.4736328125
+      },
+      "join_failures": 1,
+      "worst_geometry": [
+        {
+          "selector": "#activityChart",
+          "max_delta_px": 1150.0
+        },
+        {
+          "selector": "#protectionChart",
+          "max_delta_px": 1150.0
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div.header:nth-of-type(1)",
+          "max_delta_px": 1.61
+        }
+      ]
+    },
+    {
+      "page": "report",
+      "state": "default",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 1.424,
+      "geometry_diffs": 63,
+      "top": [
+        {
+          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(2) > div.chart-container:nth-of-type(2)",
+          "pct": 28.2
+        },
+        {
+          "selector": "html > body",
+          "pct": 10.5
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1)",
+          "pct": 7.5
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 75.35072544642857
+      },
+      "join_failures": 1,
+      "worst_geometry": [
+        {
+          "selector": "#activityChart",
+          "max_delta_px": 910.0
+        },
+        {
+          "selector": "#protectionChart",
+          "max_delta_px": 910.0
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div.header:nth-of-type(1)",
+          "max_delta_px": 1.61
+        }
+      ]
+    },
+    {
+      "page": "report",
+      "state": "default",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 0.694,
+      "geometry_diffs": 63,
+      "top": [
+        {
+          "selector": "html > body",
+          "pct": 27.4
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(2) > div.chart-container:nth-of-type(2)",
+          "pct": 21.6
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(3) > div.chart-container:nth-of-type(2)",
+          "pct": 8.9
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 85.28312500000001
+      },
+      "join_failures": 1,
+      "worst_geometry": [
+        {
+          "selector": "#activityChart",
+          "max_delta_px": 1150.0
+        },
+        {
+          "selector": "#protectionChart",
+          "max_delta_px": 1150.0
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div.header:nth-of-type(1)",
+          "max_delta_px": 1.61
+        }
+      ]
+    },
+    {
+      "page": "report",
+      "state": "weekly",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 1.061,
+      "geometry_diffs": 88,
+      "top": [
+        {
+          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(2) > div.chart-container:nth-of-type(2)",
+          "pct": 33.7
+        },
+        {
+          "selector": "html > body",
+          "pct": 10
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1)",
+          "pct": 9.5
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 82.4736328125
+      },
+      "join_failures": 1,
+      "worst_geometry": [
+        {
+          "selector": "#activityChart",
+          "max_delta_px": 1150.0
+        },
+        {
+          "selector": "#protectionChart",
+          "max_delta_px": 1150.0
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div.header:nth-of-type(1)",
+          "max_delta_px": 1.61
+        }
+      ]
+    },
+    {
+      "page": "report",
+      "state": "weekly",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 1.525,
+      "geometry_diffs": 88,
+      "top": [
+        {
+          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(2) > div.chart-container:nth-of-type(2)",
+          "pct": 28.2
+        },
+        {
+          "selector": "html > body",
+          "pct": 10.5
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1)",
+          "pct": 7.5
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 75.35072544642857
+      },
+      "join_failures": 1,
+      "worst_geometry": [
+        {
+          "selector": "#activityChart",
+          "max_delta_px": 910.0
+        },
+        {
+          "selector": "#protectionChart",
+          "max_delta_px": 910.0
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div.header:nth-of-type(1)",
+          "max_delta_px": 1.61
+        }
+      ]
+    },
+    {
+      "page": "report",
+      "state": "weekly",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 0.739,
+      "geometry_diffs": 88,
+      "top": [
+        {
+          "selector": "html > body",
+          "pct": 27.4
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(2) > div.chart-container:nth-of-type(2)",
+          "pct": 21.6
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(3) > div.chart-container:nth-of-type(2)",
+          "pct": 8.9
+        }
+      ],
+      "notes": [
+        "chromium pageerror: error (54 chars)"
+      ],
+      "taxonomy": {
+        "unknown": 85.28312500000001
+      },
+      "join_failures": 1,
+      "worst_geometry": [
+        {
+          "selector": "#activityChart",
+          "max_delta_px": 1150.0
+        },
+        {
+          "selector": "#protectionChart",
+          "max_delta_px": 1150.0
+        },
+        {
+          "selector": "body > div.container:nth-of-type(1) > div.header:nth-of-type(1)",
+          "max_delta_px": 1.61
+        }
+      ]
+    }
+  ],
+  "census": {
+    "source": "CSS_PROPERTY_CENSUS_2026-11-03.json",
+    "report": null,
+    "date": "2026-11-03",
+    "oracle": "143.0.7499.4",
+    "red_total": 212,
+    "pages": {
+      "chrome": {
+        "declared": 93,
+        "red": [
+          {
+            "property": "-webkit-text-fill-color",
+            "class": "parse",
+            "sites": 30
+          },
+          {
+            "property": "-webkit-user-select",
+            "class": "unsupported",
+            "sites": 59
+          },
+          {
+            "property": "animation",
+            "class": "parse",
+            "sites": 65
+          },
+          {
+            "property": "animation-delay",
+            "class": "parse",
+            "sites": 44
+          },
+          {
+            "property": "animation-duration",
+            "class": "parse",
+            "sites": 58
+          },
+          {
+            "property": "animation-fill-mode",
+            "class": "parse",
+            "sites": 39
+          },
+          {
+            "property": "animation-iteration-count",
+            "class": "parse",
+            "sites": 38
+          },
+          {
+            "property": "appearance",
+            "class": "unsupported",
+            "sites": 59
+          },
+          {
+            "property": "backdrop-filter",
+            "class": "unsupported",
+            "sites": 47
+          },
+          {
+            "property": "background-clip",
+            "class": "parse",
+            "sites": 50
+          },
+          {
+            "property": "background-image",
+            "class": "parse",
+            "sites": 65
+          },
+          {
+            "property": "background-position",
+            "class": "parse",
+            "sites": 64
+          },
+          {
+            "property": "background-repeat",
+            "class": "parse",
+            "sites": 65
+          },
+          {
+            "property": "background-size",
+            "class": "parse",
+            "sites": 63
+          },
+          {
+            "property": "border-style",
+            "class": "parse",
+            "sites": 61
+          },
+          {
+            "property": "box-shadow",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "cursor",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "display",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "filter",
+            "class": "parse",
+            "sites": 63
+          },
+          {
+            "property": "flex-direction",
+            "class": "computed",
+            "sites": 66
+          },
+          {
+            "property": "font-family",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "letter-spacing",
+            "class": "computed",
+            "sites": 64
+          },
+          {
+            "property": "outline",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "outline-color",
+            "class": "unsupported",
+            "sites": 53
+          },
+          {
+            "property": "outline-offset",
+            "class": "unsupported",
+            "sites": 65
+          },
+          {
+            "property": "overscroll-behavior",
+            "class": "unsupported",
+            "sites": 29
+          },
+          {
+            "property": "scrollbar-color",
+            "class": "unsupported",
+            "sites": 31
+          },
+          {
+            "property": "scrollbar-width",
+            "class": "unsupported",
+            "sites": 53
+          },
+          {
+            "property": "text-align",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "text-decoration",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "text-transform",
+            "class": "computed",
+            "sites": 62
+          },
+          {
+            "property": "transform-origin",
+            "class": "parse",
+            "sites": 57
+          },
+          {
+            "property": "transition",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "transition-duration",
+            "class": "parse",
+            "sites": 57
+          },
+          {
+            "property": "user-select",
+            "class": "unsupported",
+            "sites": 62
+          },
+          {
+            "property": "z-index",
+            "class": "computed",
+            "sites": 67
+          }
+        ]
+      },
+      "shelf": {
+        "declared": 50,
+        "red": [
+          {
+            "property": "animation",
+            "class": "parse",
+            "sites": 65
+          },
+          {
+            "property": "box-shadow",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "cursor",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "display",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "flex-direction",
+            "class": "computed",
+            "sites": 66
+          },
+          {
+            "property": "font-family",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "letter-spacing",
+            "class": "computed",
+            "sites": 64
+          },
+          {
+            "property": "outline",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "text-align",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "text-transform",
+            "class": "computed",
+            "sites": 62
+          },
+          {
+            "property": "transition",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "user-select",
+            "class": "unsupported",
+            "sites": 62
+          },
+          {
+            "property": "z-index",
+            "class": "computed",
+            "sites": 67
+          }
+        ]
+      },
+      "inspector": {
+        "declared": 56,
+        "red": [
+          {
+            "property": "cursor",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "display",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "flex-direction",
+            "class": "computed",
+            "sites": 66
+          },
+          {
+            "property": "font-family",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "letter-spacing",
+            "class": "computed",
+            "sites": 64
+          },
+          {
+            "property": "outline",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "outline-offset",
+            "class": "unsupported",
+            "sites": 65
+          },
+          {
+            "property": "text-align",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "text-decoration",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "text-transform",
+            "class": "computed",
+            "sites": 62
+          },
+          {
+            "property": "transition",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "user-select",
+            "class": "unsupported",
+            "sites": 62
+          },
+          {
+            "property": "vertical-align",
+            "class": "parse",
+            "sites": 66
+          }
+        ]
+      },
+      "settings": {
+        "declared": 60,
+        "red": [
+          {
+            "property": "-webkit-text-fill-color",
+            "class": "parse",
+            "sites": 30
+          },
+          {
+            "property": "accent-color",
+            "class": "unsupported",
+            "sites": 7
+          },
+          {
+            "property": "animation",
+            "class": "parse",
+            "sites": 65
+          },
+          {
+            "property": "animation-delay",
+            "class": "parse",
+            "sites": 44
+          },
+          {
+            "property": "animation-duration",
+            "class": "parse",
+            "sites": 58
+          },
+          {
+            "property": "background-clip",
+            "class": "parse",
+            "sites": 50
+          },
+          {
+            "property": "box-shadow",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "cursor",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "display",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "flex-direction",
+            "class": "computed",
+            "sites": 66
+          },
+          {
+            "property": "font-family",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "letter-spacing",
+            "class": "computed",
+            "sites": 64
+          },
+          {
+            "property": "outline",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "scrollbar-color",
+            "class": "unsupported",
+            "sites": 31
+          },
+          {
+            "property": "scrollbar-width",
+            "class": "unsupported",
+            "sites": 53
+          },
+          {
+            "property": "text-align",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "text-transform",
+            "class": "computed",
+            "sites": 62
+          },
+          {
+            "property": "transition",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "transition-duration",
+            "class": "parse",
+            "sites": 57
+          }
+        ]
+      },
+      "report": {
+        "declared": 48,
+        "red": [
+          {
+            "property": "-webkit-text-fill-color",
+            "class": "parse",
+            "sites": 30
+          },
+          {
+            "property": "background-clip",
+            "class": "parse",
+            "sites": 50
+          },
+          {
+            "property": "box-shadow",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "cursor",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "display",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "flex-direction",
+            "class": "computed",
+            "sites": 66
+          },
+          {
+            "property": "font-family",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "letter-spacing",
+            "class": "computed",
+            "sites": 64
+          },
+          {
+            "property": "scrollbar-color",
+            "class": "unsupported",
+            "sites": 31
+          },
+          {
+            "property": "scrollbar-width",
+            "class": "unsupported",
+            "sites": 53
+          },
+          {
+            "property": "text-align",
+            "class": "computed",
+            "sites": 67
+          },
+          {
+            "property": "text-transform",
+            "class": "computed",
+            "sites": 62
+          },
+          {
+            "property": "transition",
+            "class": "parse",
+            "sites": 67
+          },
+          {
+            "property": "z-index",
+            "class": "computed",
+            "sites": 67
+          }
+        ]
+      }
+    }
+  }
+}
