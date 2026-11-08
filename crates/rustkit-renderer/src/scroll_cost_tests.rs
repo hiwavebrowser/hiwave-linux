@@ -15,14 +15,17 @@ const VIEW_H: u32 = 768;
 const ROW_H: f32 = 20.0;
 
 struct Gpu {
+    /// Linux divergence (S12): see `crate::GPU_SERIAL`. Declared last so it drops after the device.
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     adapter: String,
     device_type: wgpu::DeviceType,
+    _serial: std::sync::MutexGuard<'static, ()>,
 }
 
 /// One device per test (the renderer's tests share no GPU state).
 fn gpu() -> Option<Gpu> {
+    let serial = crate::GPU_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         ..Default::default()
@@ -47,6 +50,7 @@ fn gpu() -> Option<Gpu> {
     Some(Gpu {
         device: Arc::new(device),
         queue: Arc::new(queue),
+        _serial: serial,
         adapter: name,
         device_type,
     })
