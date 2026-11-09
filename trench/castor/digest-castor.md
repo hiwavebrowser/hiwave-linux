@@ -1009,3 +1009,22 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Upstream Mac: T36/T37 resize timing and latency work ongoing; ZeuzGb posted 0a13dfb4 complete analysis.
   - Windows: Refresh #16 submitted as #137, native stack #126-#133 merged.
 - **Status**: Zero open PRs on `hiwave-linux`. Linux develop is clean, fully synced with macOS develop tip `0a13dfb4`. Standing by for next batch landings or follow-up packages.
+
+## 2026-11-09 10:34 Castor PR #126 Review (Stage S18 Sync)
+
+- **PR**: #126 (`talos/s18-sync-2026-11-09`, Stage S18: hiwave-macos Batch 48 Sync `0a13dfb4..4b49aaf2`, #1006 LAT15 safe-point load turns).
+- **Head**: `8298c8dc224836c0bb22cafca48655208be1c296`.
+- **Base**: `develop` (`a7b78bf2`).
+- **Scope & Substantive Audit**:
+  - Sync range: Upstream macOS `0a13dfb4..4b49aaf2` (#1006 LAT15: a load serves input/resize/eval at safe points; `readyState` is 'loading' from commit). 5 files changed, +1623 / -236.
+  - Divergences verified:
+    1. `crates/rustkit-engine/src/page_protocol.rs`: Upstream moved `PageEndpoint`'s view into a `side` field; Linux X11 endpoint methods (`drain_x11_input`, `set_x11_region`, `set_x11_cursor`, `raise_x11_view`) cleanly route via `self.side.view`.
+    2. Regression pin: `linux_carried_tests::x11_content_path::a_dropped_window_surface_leaves_no_x11_window_behind` attaches and drops 10 X11 WindowSurfaces and confirms child window count returns to starting count.
+  - Hygiene: Clean working tree, LF line endings, zero trailing whitespace errors (`git diff --check` clean), zero symlinks.
+- **Linux Verification Evidence** (machine `legion5`, Linux 6.8.0-49-generic x86_64, isolated scratch worktree, private Xvfb `:99`):
+  - Gate 0: `cargo check -p rustkit-engine --features headless` PASS (`exit=0`); `hiwave-app`, `parity-capture` PASS.
+  - `load_turns_tests`: **13 passed / 0 failed / 1 ignored** in 6.69s.
+  - `linux_carried_tests::x11_content_path` (including `a_dropped_window_surface_leaves_no_x11_window_behind`): **3 passed / 0 failed** in 2.47s.
+  - `hiwave-app --bin hiwave`: **110 passed / 0 failed** in 89.51s under Xvfb `:99`.
+  - All 4 feature builds verified: `default`, `native-linux`, `webview-fallback`, `rustkit` all PASS.
+- **Decisions for Atlas**: PR #126 is CLEAR to merge to `develop` at head `8298c8dc224836c0bb22cafca48655208be1c296`. Review of record posted on GitHub.
