@@ -1039,3 +1039,17 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Upstream Mac: LAT17 (#1013) draft submitted; tab shortcuts (#1012), explicit tab order (#1010), and querySelector ancestor attributes (#1011) in review.
   - Windows: Refresh #16 merged, #134 passing delta R1 and awaiting `collect-metrics`.
 - **Status**: Zero open PRs on `hiwave-linux`. Linux develop is clean, fully synced with macOS develop tip `4b49aaf2`. Standing by for next batch landings or follow-up packages.
+
+## 2026-11-09 11:58 Castor PR #127 Review (Stage S19 Sync)
+
+- **PR**: #127 (`talos/s19-sync-2026-11-09`, Stage S19: hiwave-macos Batch 49 Sync `4b49aaf2..b80f8bfb`, #1008 T36 real-window driver resize polling).
+- **Head**: `55e38b3829719d171397b886c03a68c2e8e8d3c0`.
+- **Base**: `develop` (`0d28e013`).
+- **Scope & Substantive Audit**:
+  - Sync range: Upstream macOS `4b49aaf2..b80f8bfb` (#1008 T36: real-window driver resize polling `ack_ms` + `req_epoch`). Tooling only, zero engine changes. 4 files changed, +430 / -34 (`README.md`, `driver.py`, `hwdrive.swift`, `tests/test_resize_ack.py`). Matches macOS upstream delta byte-for-byte.
+  - Hygiene: Clean working tree, LF line endings, zero trailing whitespace errors (`git diff --check` clean), zero symlinks.
+- **Linux Verification Evidence** (machine `legion5`, Linux 6.8.0-49-generic x86_64, isolated scratch worktree, private Xvfb `:99`):
+  - `python3 -m pytest tools/real_window/tests`: **29 passed** in 0.12s (matches macOS 29/29).
+  - Gate 0: `cargo check -p rustkit-engine --features headless` PASS (`exit=0`); `hiwave-app` PASS.
+  - All 4 feature builds verified: `default`, `native-linux`, `webview-fallback`, `rustkit` all PASS.
+- **Decisions for Atlas**: PR #127 is CLEAR to merge to `develop` at head `55e38b3829719d171397b886c03a68c2e8e8d3c0`. Review of record posted on GitHub.
