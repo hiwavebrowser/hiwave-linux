@@ -906,3 +906,30 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Local macOS mirror fetched to `28c79bff`.
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's Stage S15 sync PR (`f712df45..28c79bff`, macOS develop Batch 44 / #997) or chrome board follow-up packages.
 
+## 2026-11-09 00:05 Castor PR #123 Review (Stage S15 Sync)
+
+- **PR**: #123 (`talos/s15-sync-2026-11-09`, Stage S15: hiwave-macos Batch 44 Sync `f712df45..28c79bff`, #997 chrome board rounds 1-3).
+- **Head**: `1cbed511f99819d20d133f6f5ea6874589bb3e4a`.
+- **Base**: `develop` (`dde71dd6`).
+- **Scope & Substantive Audit**:
+  - Upstream delta: 31 files (+2547 / -354). macOS #997 scorer/exporter fixes, UA heading em sizes (CH2.B31), emoji-presentation face recording/reuse, attribute-value CSS escapes, inline half-leading, report/settings control fixes.
+  - Verified declared divergences:
+    - `rustkit-renderer/src/glyph.rs`: clean LF merge; preserved Linux FreeType `ft_backend()` and colour-glyph arm of `get_or_rasterize_color`; integrated upstream macOS face contract methods.
+    - `rustkit-renderer/src/lib.rs`: preserved upstream face-contract loop, preserved Linux subpixel pen anchor and emoji colour arm.
+    - `rustkit-layout/src/text.rs`: shaper constructs `PositionedGlyph` with `face: GlyphFace::Primary`.
+    - `rustkit-engine/src/linux_carried_tests.rs`: `ua_defaults_win_over_an_inherited_value` updated to 20px matching Blink / Chromium 148 em heading defaults.
+- **Nit Logged**:
+  - `tools/parity_oracle/node_modules` was inadvertently committed as an absolute symlink to `/home/petec/repos/hiwave-linux-board/tools/parity_oracle/node_modules` (mode 120000). Host-specific path breaks clean clones outside `legion5`. Logged as non-blocking cleanup for author/merger to drop.
+- **Linux Verification Evidence** (machine `legion5`, Linux 6.8.0-49-generic x86_64):
+  - Gate 0 (`cargo check -p rustkit-engine --features headless`): **PASS**.
+  - `cargo test -p rustkit-text`: **PASS** (85 passed).
+  - `cargo test -p rustkit-css`: **PASS** (155 passed).
+  - `cargo test -p rustkit-svg`: **PASS** (51 passed).
+  - `cargo test -p rustkit-renderer`: **PASS** (152 passed).
+  - `cargo test -p rustkit-bindings`: **PASS** (495 passed).
+  - `cargo test -p rustkit-layout`: **PASS** with 2 allowlisted font-metric bounds (902 passed, 2 failed: `test_an_emoji_label_lifts_a_styled_buttons_line` 32 vs 39 and `test_negative_half_leading_inline_keeps_the_line_baseline` 27 vs 28).
+  - `cargo test -p rustkit-engine`: `ua_defaults_win_over_an_inherited_value` **PASS**.
+  - `hiwave-app` unit tests (`cargo test -p hiwave-app --bin hiwave` under private Xvfb `:99` & scratch XDG paths): **103 passed**, 0 failed in 88.12s.
+  - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #123 is CLEAR WITH NIT to merge to `develop` at head `1cbed511f99819d20d133f6f5ea6874589bb3e4a`. Recommend dropping the `tools/parity_oracle/node_modules` symlink on merge. Review posted on GitHub.
+
