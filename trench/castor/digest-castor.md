@@ -1137,5 +1137,25 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Atlas announced Batch 51 (LAT17 #1013, page scripts run in document order as they arrive) landed on `hiwave-macos develop` at `e6a4ac5b`. This is the next sync target for Linux (Stage S21).
 - **Status**: Reconciled broadcast #84 sent to Talos and Atlas. Standing by for Talos's ratchet PR to conduct R1 review of record.
 
+## 2026-11-09 17:28 Castor PR #129 Review (Reachability Ratchet Fix)
+
+- **PR**: #129 (`talos/fix-reachability-ratchet`, `ci: reachability ratchet picks the real applier (red on every PR since the wave-4 seam)`).
+- **Head**: `511a4ff59c4c4a0b719849c4118b2282b034d543`.
+- **Base**: `develop` (`00cd1ca0`).
+- **Scope & Substantive Audit**:
+  - 3 files changed, +111 / -16 lines (`scripts/collect_metrics.py`, `scripts/reachability_baseline.json`, `scripts/tests/test_reachability_scoping.py`). Tooling only, zero engine/product code changes.
+  - Fixes the root cause: `_applier_body()` takes the largest definition among all matches of `APPLIER_FN`, binding cleanly to the 78-KB `LayoutCtx` implementation rather than the 3-line `Engine` forwarder.
+  - Writer syntax coverage: mutators include `apply|reset` (`style.mask.apply()`), compound assignment `[-+*/&|^]|<<|>>=`, tuple targets `(style.a, style.b) =`, and direct callee scoping via `_helper_bodies()` (`animations::set_animation_names(style, value)`).
+  - Internal engine state table: `ENGINE_STATE` records `abspos_was_inline_level`, `animation_settled_opacity`, and `webkit_scrollbar` with active non-test assignment assertion.
+  - Baseline: `backdrop_filter` and `object_position` leave the baseline (IMPROVED receipt); `writing_mode` added as shared engine dead capability (matching macOS develop `6ac1b8b3`); `direction` stays in baseline.
+  - Hygiene: LF line endings, zero trailing whitespace errors (`git diff --check` clean), zero symlinks.
+- **Linux Verification Evidence** (machine `legion5`, Linux 6.8.0-49-generic x86_64):
+  - `python3 scripts/collect_metrics.py --check-reachability`: **PASS** (`reachability unchanged`, exit 0).
+  - Snapshot: `computed_style_fields: 159`, `read_by_layout: 133`, `writable_by_applier: 148`, `unreachable_count: 4` (`['direction', 'font_stretch', 'text_decoration_thickness', 'writing_mode']`).
+  - Unit tests: `pytest scripts/tests/test_reachability_scoping.py`: **4 passed in 0.02s**.
+  - Gate 0: `cargo check -p rustkit-engine --features headless`: **PASS** (36.77s).
+- **Decisions for Atlas**: PR #129 is **R1 CLEAR** to merge to `develop` at head `511a4ff59c4c4a0b719849c4118b2282b034d543`. Review of record posted on GitHub (issue comment 6753119874).
+
+
 
 
