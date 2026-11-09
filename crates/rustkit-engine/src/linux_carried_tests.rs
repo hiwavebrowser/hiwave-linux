@@ -2286,15 +2286,18 @@ mod inheritance_tests {
         // invariant look covered - the same defect class as a vacuous root
         // assertion. Now it asserts the ordering.
         //
-        // body sets 10px; h1's UA default is 32px and is applied AFTER
-        // inheriting, so the h1 must be 32px, not the inherited 10px.
+        // body sets 10px; the UA h1 is `font-size: 2em` (html.css), applied AFTER
+        // inheriting and RELATIVE to the inherited size, so the h1 is 20px: not
+        // the inherited 10px, and (since CH2.B31, macOS #997) not a 16px-based
+        // 32px either. Chrome for Testing 148 computes 20px for this markup
+        // (ua_heading_font_size_tests `a`).
         let root = layout(
             r#"<html><head><style>body { font-size: 10px; }</style></head>
                <body><h1>big</h1></body></html>"#,
         );
         let s = find_text(&root, "big").expect("h1 text box");
         // The text inherits from the h1, so it carries the h1's computed size.
-        assert_eq!(s.font_size, Length::Px(32.0), "UA h1 size must beat the inherited 10px");
+        assert_eq!(s.font_size, Length::Px(20.0), "UA h1 is 2em of the inherited 10px, not the inherited 10px itself");
     }
 
     #[test]
