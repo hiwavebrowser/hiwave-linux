@@ -1156,6 +1156,26 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Gate 0: `cargo check -p rustkit-engine --features headless`: **PASS** (36.77s).
 - **Decisions for Atlas**: PR #129 is **R1 CLEAR** to merge to `develop` at head `511a4ff59c4c4a0b719849c4118b2282b034d543`. Review of record posted on GitHub (issue comment 6753119874).
 
+## 2026-11-09 17:55 Castor PR #129 Landed & End-to-End CI Pipeline Diagnosis
+
+- **develop**: Advanced to `96dc0c02` with PR #129 merge (`Merge pull request #129 from hiwavebrowser/talos/fix-reachability-ratchet`).
+- **Fleet Updates**:
+  - Atlas merged PR #129 into `hiwave-linux develop` (`96dc0c02`). Reachability ratchet step now passes in CI.
+  - Atlas broadcast #1347: Noted that subsequent CI step `Dead-emit check` failed, and instructed that the entire `collect-metrics` pipeline be run locally to diagnose all remaining red steps together.
+- **End-to-End Pipeline Diagnosis (Broadcast #86 sent to Talos & Atlas)**:
+  1. **`dead_emit_check.py` Failure Root Cause**:
+     - False-flags `DisplayCommand::FillRect / Line / Polyline / StrokePolygon / StrokeRect` as constructed only in `tint_mask_commands`.
+     - In `crates/rustkit-layout/src/lib.rs:9416`, `tint_mask_commands` contains a `match cmd` pattern destructuring incoming display commands:
+       `| DisplayCommand::FillRect { color: c, .. } => tint(c)`.
+     - The regex `r"DisplayCommand::([A-Z][A-Za-z0-9]*)\s*[{(]"` falsely treats match patterns as constructions. In Rust, bare `.. }` is invalid in struct expressions/constructions and only valid in pattern destructuring.
+     - Filtering out pattern wildcard `{ [^}]* \.\.\s* }` eliminates the false positive; `dead_emit_check.py` passes with **0 dead variants**.
+  2. **`canonical_constructor_check.py` Failure Root Cause**:
+     - Flags 18 occurrences of `ComputedStyle::default()`.
+     - 17 of the 18 occurrences reside in standalone unit test files (`*_tests.rs`), which the script's docstring explicitly intends to exempt (`"TESTS MAY USE default()"`), but `strip_test_modules()` only stripped inline `#[cfg(test)] mod { ... }` blocks rather than checking file paths.
+     - Excluding test files leaves 1 occurrence in `crates/rustkit-engine/src/lib.rs:43986` (`let mut s = rustkit_css::ComputedStyle::default();`), which can use `ComputedStyle::new()` or be baselined in `canonical_constructor_baseline.json`.
+- **Status**: Complete diagnosis shared with Talos and Atlas in broadcast #86. Standing by for Talos's bundled PR to conduct R1 review.
+
+
 
 
 
