@@ -969,3 +969,32 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - macOS seats active reviewing LAT/H19/memory PRs (#1000, #1001, #1002, #1003, #1004, #1005) and LAT15 safe-point load input design.
 - **Status**: Zero open PRs on `hiwave-linux`. Linux develop is clean and up to date with macOS develop pause head. Standing by for next batch landings or chrome board follow-up packages.
 
+
+## 2026-11-09 07:42 Castor PR #125 Review (Stage S17 Sync)
+
+- **PR**: #125 (`talos/s17-sync-2026-11-09`, Stage S17: hiwave-macos Batches 46-47 Sync `0db52779..0a13dfb4`).
+- **Head**: `d5eb72fc1a0c244f772f71b26c25b70216c84bd5`.
+- **Base**: `develop` (`c80d7786`).
+- **Scope & Substantive Audit**:
+  - Sync range: Upstream macOS `0db52779..0a13dfb4` combining Batch 46 (#1000 LAT14 animation layer reset, #1001 LAT1c input-to-present metrics) and Batch 47 (#1002 H19 budget stop, #1004 M1 Cmd+W IIFE, #1003 E35 tab close surface drop, #1005 M2 navigation document release). 34 files changed, +3011 / -170.
+  - Divergences verified:
+    1. `rustkit-viewhost/src/macos.rs` omitted on Linux.
+    2. `hiwave-app/src/main.rs`: Linux main preserved wholesale.
+    3. `hiwave-app/src/webview_rustkit.rs`: `note_input(e)` signature updated to upstream event contract; Linux X11 event translation and delivery tests intact.
+    4. `rustkit-engine/src/lib.rs`: `create_x11_view` initializers cleanly updated with `input_pending: Vec::new()`, `inputs_unpresented: 0`, and `visit_host: Arc::from("-")`.
+    5. `rustkit-engine/src/linux_carried_tests.rs`: X11 `FrameCommit` test fixture constructor cleanly updated with new `inputs`, `inputs_unpresented`, and `visit: VisitTag::none()`.
+    6. `rustkit-viewhost/src/lib.rs`: `destroy_view` cleanly unregisters views without macOS-specific NSView teardown.
+    7. Open Linux follow-up noted: #1003's `impl Drop for WindowSurface` is `cfg(any(target_os = "macos", target_os = "windows"))`; documented Linux gap for X11 surface teardown to be addressed in follow-up.
+  - Hygiene: Clean working tree, LF line endings, zero trailing whitespace errors (`git diff --check` clean), zero symlinks.
+- **Linux Verification Evidence** (machine `legion5`, Linux 6.8.0-49-generic x86_64, isolated scratch worktree, private Xvfb `:99`):
+  - Gate 0: `cargo check -p rustkit-engine --features headless` PASS (`exit=0`); `rustkit-viewhost`, `rustkit-js` PASS.
+  - `rustkit-viewhost` unit & integration tests: PASS.
+  - `rustkit-js` unit & integration tests (`vm_interrupt`, `vm_interrupt_promises`, `vm_stop_finally`, `watchdog_turns`): PASS.
+  - `rustkit-engine` touched tests:
+    - `animation_layer_reset_tests`: **5 passed / 0 failed** in 21.60s.
+    - `navigation_release_tests`: **3 passed / 0 failed** in 25.59s.
+    - `frame_commit_tests`: **9 passed / 0 failed** in 13.39s.
+    - `linux_carried_tests::x11_content_path`: **2 passed / 0 failed** in 1.89s.
+  - `hiwave-app --bin hiwave`: **110 passed / 0 failed** in 89.14s under Xvfb `:99`.
+  - All 4 feature builds verified: `default`, `native-linux`, `webview-fallback`, `rustkit` all PASS.
+- **Decisions for Atlas**: PR #125 is CLEAR to merge to `develop` at head `d5eb72fc1a0c244f772f71b26c25b70216c84bd5`. Review of record posted on GitHub.
