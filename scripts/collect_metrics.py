@@ -49,6 +49,16 @@ def run(cmd: list[str]) -> tuple[int, str]:
 
 APPLIER_FN = "fn apply_style_property_impl"
 
+# ComputedStyle fields the layout reads that are ENGINE-INTERNAL STATE, not CSS properties: nothing in
+# the applier can set them because no author declaration maps to them. Each is set by the cascade or the
+# animation system. Listing one here is not an exemption from evidence: `reachability()` still requires
+# an assignment to it in the engine's non-test source, so a removed setter re-fires the ratchet.
+ENGINE_STATE = {
+    "abspos_was_inline_level": "cascade flag: the element's display before out-of-flow blockification",
+    "animation_settled_opacity": "animation system: the opacity a settled animation leaves for paint",
+    "webkit_scrollbar": "cascade: built from ::-webkit-scrollbar pseudo-element rules, not a property",
+}
+
 
 def _applier_body(engine: str) -> tuple[str, bool]:
     """The body of the CSS applier, brace-matched.
@@ -70,9 +80,13 @@ def _applier_body(engine: str) -> tuple[str, bool]:
     # function's body without firing the fallback - Argos's soft note on #37.
     # A rename that ADDS a suffix is exactly the shape a refactor produces, so
     # the substring form is loud only for the renames least likely to happen.
-    m = re.search(re.escape(APPLIER_FN) + r"\s*[(<]", engine)
-    i = m.start() if m else -1
-    if i < 0:
+    # EVERY definition, not the first. Linux carries a thin `Engine::apply_style_property_impl`
+    # forwarder (the wave-4 seam: a 3-line body that calls LayoutCtx's) BEFORE the real applier; the
+    # first match scoped the body to that forwarder, which writes no field, so every field the layout
+    # reads counted as unreachable (a whole-tree REGRESSION on every PR, 2026-11-09). The applier is
+    # the definition with the largest body; a forwarder is never where a CSS arm lives.
+    starts = [m.start() for m in re.finditer(re.escape(APPLIER_FN) + r"\s*[(<]", engine)]
+    if not starts:
         print(
             f"WARNING: could not find `{APPLIER_FN}` - reachability is falling "
             f"back to a WHOLE-FILE scan. Internal plumbing will count as "
@@ -81,17 +95,41 @@ def _applier_body(engine: str) -> tuple[str, bool]:
             file=sys.stderr,
         )
         return engine, True
-    j = engine.find("{", i)
+    return max((_brace_body(engine, i) for i in starts), key=len), False
+
+
+def _brace_body(text: str, i: int) -> str:
+    """The `{ ... }` block that opens at or after `i`, brace-matched."""
+    j = text.find("{", i)
     depth, k = 0, j
-    while k < len(engine):
-        if engine[k] == "{":
+    while k < len(text):
+        if text[k] == "{":
             depth += 1
-        elif engine[k] == "}":
+        elif text[k] == "}":
             depth -= 1
             if depth == 0:
                 break
         k += 1
-    return engine[j:k], False
+    return text[j:k]
+
+
+def _helper_bodies(applier: str, sources: dict) -> str:
+    """Bodies of the functions the applier calls WITH `style` as an argument.
+
+    A CSS arm often delegates (`animations::set_animation_names(style, value)`): the field is
+    assigned in the helper, not in the applier's own text, and is exactly as settable from CSS.
+    Only DIRECT callees, only those handed the style: a helper the applier never gives the style to
+    cannot write it, and recursing further would drift toward the whole-file scan this scoping
+    exists to avoid (a false REACHABLE is the expensive direction).
+    """
+    names = set(re.findall(r"\b([a-z_][a-z_0-9]*)\(\s*(?:&mut\s+)?(?:style|s)\b", applier))
+    names.discard("apply_style_property_impl")
+    out = []
+    for text in sources.values():
+        for name in names:
+            for m in re.finditer(r"\bfn " + re.escape(name) + r"\b\s*[(<]", text):
+                out.append(_brace_body(text, m.start()))
+    return "\n".join(out)
 
 
 def reachability() -> dict:
@@ -154,12 +192,29 @@ def reachability() -> dict:
     # `.is_visible()` are reads, and treating every receiver as a write would
     # mark fields writable that no arm can set - a FALSE REACHABLE, the
     # expensive direction.
-    MUTATORS = "push|clear|insert|extend|remove|pop|truncate|retain|append|push_str|set"
+    # `apply`/`reset` are the mask-image mutators (`style.mask.apply(..)`, `style.mask.reset()`).
+    MUTATORS = "push|clear|insert|extend|remove|pop|truncate|retain|append|push_str|set|apply|reset"
+    # What the applier delegates to is part of the applier: see `_helper_bodies`.
+    engine_dir = Path("crates/rustkit-engine/src")
+    sources = {p.name: p.read_text() for p in sorted(engine_dir.glob("*.rs"))
+               if not p.name.endswith("_tests.rs")}
+    scope = applier + "\n" + _helper_bodies(applier, sources)
+
+    def _writes(f: str) -> bool:
+        for recv in ("style", "s"):
+            r = r"\b" + recv + r"\." + f
+            if (re.search(r + r"\s*=(?!=)", scope)                          # assignment
+                    or re.search(r + r"\s*(?:[-+*/&|^]|<<|>>)=", scope)     # compound: &=, |=, +=, ...
+                    or re.search(r + r"\.(?:" + MUTATORS + r")\s*\(", scope)  # in-place mutator
+                    # tuple target: `(style.a, style.b) = ..` (either position)
+                    or re.search(r"\([^()=;]*" + r + r"\b[^()=;]*\)\s*=(?!=)", scope)):
+                return True
+        return False
+
+    engine_src = "\n".join(sources.values())
     written = [f for f in fields
-               if re.search(r"\bstyle\." + f + r"\s*=", applier)
-               or re.search(r"\bs\." + f + r"\s*=", applier)
-               or re.search(r"\bstyle\." + f + r"\.(?:" + MUTATORS + r")\s*\(", applier)
-               or re.search(r"\bs\." + f + r"\.(?:" + MUTATORS + r")\s*\(", applier)]
+               if _writes(f)
+               or (f in ENGINE_STATE and re.search(r"\.(?:" + f + r")\s*=(?!=)", engine_src))]
     unreachable = [f for f in read if f not in written]
 
     return {
