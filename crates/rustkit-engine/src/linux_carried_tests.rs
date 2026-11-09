@@ -3494,6 +3494,57 @@ mod x11_content_path {
         engine.render_view(view).expect("render_view must paint via the wgpu surface");
     }
 
+    /// X11 children of `parent`, by `xwininfo` (the test has no xlib of its own).
+    fn x11_children(parent: u64) -> usize {
+        let out = std::process::Command::new("xwininfo")
+            .args(["-id", &parent.to_string(), "-children"])
+            .output()
+            .expect("xwininfo");
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines()
+            .find_map(|l| {
+                let l = l.trim();
+                let n = [" children.", " children:", " child:", " child."]
+                    .iter()
+                    .find_map(|suffix| l.strip_suffix(suffix))?;
+                n.parse::<usize>().ok()
+            })
+            .expect("xwininfo prints 'N children' (with '.' or ':')")
+    }
+
+    /// CH2.E35 on Linux: a dropped `WindowSurface` takes its X11 host window with it. A closed
+    /// content-thread tab drops its surface; without teardown its window stayed in the parent.
+    #[test]
+    fn a_dropped_window_surface_leaves_no_x11_window_behind() {
+        let _gpu = gpu_serial();
+        if !have_display() {
+            eprintln!("SKIP: no DISPLAY");
+            return;
+        }
+        let engine = EngineBuilder::new().build().expect("engine");
+        let parent = engine
+            .viewhost()
+            .create_main_window(rustkit_viewhost::MainWindowConfig {
+                title: "e35 parent".to_string(),
+                width: 800,
+                height: 600,
+                resizable: true,
+                centered: true,
+            })
+            .expect("X11 main window");
+        let before = x11_children(parent);
+        for _ in 0..10 {
+            let surface = WindowSurface::attach_x11(
+                parent,
+                rustkit_viewhost::Bounds { x: 0, y: 0, width: 400, height: 300 },
+            )
+            .expect("attach_x11");
+            assert!(x11_children(parent) > before, "an attached surface adds a child window");
+            drop(surface);
+        }
+        assert_eq!(x11_children(parent), before, "10 dropped surfaces left windows in the parent");
+    }
+
     #[test]
     fn window_surface_attaches_and_presents_on_x11() {
         let _gpu = gpu_serial();
