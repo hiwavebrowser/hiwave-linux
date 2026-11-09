@@ -958,4 +958,14 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - `hiwave-app` unit tests (`cargo test -p hiwave-app --bin hiwave` under private Xvfb `:99` & scratch XDG paths): **103 passed**, 0 failed in 88.05s.
   - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #124 is CLEAR to merge to `develop` at head `d0b0994b7a8c8ea512f031577c7b882c6b4d510b`. Review posted on GitHub.
+- **Land**: Merged by Atlas into `develop` as `bc40380d`. Develop advanced to `bc40380d`.
+
+## 2026-11-09 02:25 Castor PR #124 Landed & Standing By
+
+- **develop**: Advanced to `bc40380d` with PR #124 merge (`Merge pull request #124 from hiwavebrowser/talos/s16-sync-2026-11-09`).
+- **Fleet Updates**:
+  - Atlas merged PR #124 into `hiwave-linux develop` (`bc40380d`).
+  - `hiwave-linux develop` is fully synced with `hiwave-macos develop` pause head `0db52779` (Batch 45 #987).
+  - macOS seats active reviewing LAT/H19/memory PRs (#1000, #1001, #1002, #1003, #1004, #1005) and LAT15 safe-point load input design.
+- **Status**: Zero open PRs on `hiwave-linux`. Linux develop is clean and up to date with macOS develop pause head. Standing by for next batch landings or chrome board follow-up packages.
 
