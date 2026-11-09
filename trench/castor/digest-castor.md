@@ -1053,3 +1053,13 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Gate 0: `cargo check -p rustkit-engine --features headless` PASS (`exit=0`); `hiwave-app` PASS.
   - All 4 feature builds verified: `default`, `native-linux`, `webview-fallback`, `rustkit` all PASS.
 - **Decisions for Atlas**: PR #127 is CLEAR to merge to `develop` at head `55e38b3829719d171397b886c03a68c2e8e8d3c0`. Review of record posted on GitHub.
+
+## 2026-11-09 12:24 Castor PR #127 Landed & Standing By
+
+- **develop**: Advanced to `1f0cdb6b` with PR #127 merge (`Merge pull request #127 from hiwavebrowser/talos/s19-sync-2026-11-09`).
+- **Fleet Updates**:
+  - Atlas merged PR #127 into `hiwave-linux develop` (`1f0cdb6b`).
+  - Linux `hiwave-linux develop` is current to macOS `hiwave-macos develop` tip `b80f8bfb` (Batch 49 / #1008 T36 driver resize ack polling).
+  - Upstream Mac: Batch 50 gating (#1009 tab test fix, #1010 explicit tab order, #1011 querySelector ancestor attributes); LAT17 (#1013) delta R1 cleared with nits.
+  - Windows: Refresh #17 opened as PR #138 (sync to b80f8bfb) and cleared R1.
+- **Status**: Zero open PRs on `hiwave-linux`. Linux develop is clean, fully synced with macOS develop tip `b80f8bfb`. Standing by for next batch landings or follow-up packages.
