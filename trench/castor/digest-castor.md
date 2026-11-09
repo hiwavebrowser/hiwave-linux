@@ -1063,3 +1063,22 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Upstream Mac: Batch 50 gating (#1009 tab test fix, #1010 explicit tab order, #1011 querySelector ancestor attributes); LAT17 (#1013) delta R1 cleared with nits.
   - Windows: Refresh #17 opened as PR #138 (sync to b80f8bfb) and cleared R1.
 - **Status**: Zero open PRs on `hiwave-linux`. Linux develop is clean, fully synced with macOS develop tip `b80f8bfb`. Standing by for next batch landings or follow-up packages.
+
+## 2026-11-09 16:05 Castor PR #128 Review (Stage S20 Sync)
+
+- **PR**: #128 (`talos/s20-sync-2026-11-09`, Stage S20: hiwave-macos Batch 50 Sync `b80f8bfb..6ac1b8b3`, #1009 M1b close-tab test fix, #1010 M1c shell tab order, #1011 E50 querySelector ancestor attributes).
+- **Head**: `f9c14ac2abf8ea678d14587c6b7ea119c3ae4c2e`.
+- **Base**: `develop` (`50ec93fa`).
+- **Scope & Substantive Audit**:
+  - Sync range: Upstream macOS `b80f8bfb..6ac1b8b3` (Batch 50: PRs #1009, #1010, #1011). 5 files changed, +540 / -43 (`crates/hiwave-app/src/close_tab_tests.rs`, `crates/hiwave-app/src/close_tab_tests/tab_order_tests.rs`, `crates/hiwave-shell/src/lib.rs`, `crates/rustkit-engine/src/ancestor_attribute_query_tests.rs`, `crates/rustkit-engine/src/lib.rs`).
+  - `rustkit-engine` and `hiwave-app` changes match macOS upstream byte-for-byte.
+  - `hiwave-shell`: Declared conflict in `tabs_with_decay` verified. Upstream `ordered_tabs()` adopted cleanly, eliminating formatting divergence.
+  - Hygiene: LF line endings, zero trailing whitespace errors (`git diff --check` clean), zero symlinks.
+- **Linux Verification Evidence** (machine `legion5`, Linux 6.8.0-49-generic x86_64, isolated scratch worktree, private Xvfb `:99`):
+  - Gate 0: `cargo check -p rustkit-engine --features headless` PASS (39.84s).
+  - Shell unit tests: `cargo test -p hiwave-shell` **9 passed / 0 failed in 0.00s**.
+  - Targeted engine tests: `cargo test -p rustkit-engine --features headless --lib ancestor_attribute_query` **3 passed / 0 failed / 1 ignored in 30.29s**.
+  - App unit tests: `cargo test -p hiwave-app --bin hiwave` **110 passed / 0 failed in 89.69s**.
+  - All 4 feature builds verified: `default`, `native-linux`, `webview-fallback`, `rustkit` all PASS.
+- **Decisions for Atlas**: PR #128 is **R1 CLEAR** to merge to `develop` at head `f9c14ac2abf8ea678d14587c6b7ea119c3ae4c2e`. Review of record posted on GitHub (issue comment 6751387007).
+
