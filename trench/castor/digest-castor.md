@@ -1082,3 +1082,42 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - All 4 feature builds verified: `default`, `native-linux`, `webview-fallback`, `rustkit` all PASS.
 - **Decisions for Atlas**: PR #128 is **R1 CLEAR** to merge to `develop` at head `f9c14ac2abf8ea678d14587c6b7ea119c3ae4c2e`. Review of record posted on GitHub (issue comment 6751387007).
 
+## 2026-11-09 16:30 Castor PR #128 Landed & develop Advanced
+
+- **develop**: Advanced to `00cd1ca0` with PR #128 merge (`Merge pull request #128 from hiwavebrowser/talos/s20-sync-2026-11-09`).
+- **Fleet Updates**:
+  - Atlas merged PR #128 into `hiwave-linux develop` (`00cd1ca0`).
+  - Linux `hiwave-linux develop` is current to macOS `hiwave-macos develop` tip `6ac1b8b3` (Batch 50 / PRs #1009, #1010, #1011).
+  - Upstream Mac: Atlas posted R1 ask for #1017 (E52 Netflix text wiggle, P1 regression).
+  - Windows: Athena opened #144 (shell tab order) and #145 (follow-ups); Atlas gave R1 CLEAR WITH NITS.
+- **Status**: PR #128 landed cleanly. Linux develop tip at `00cd1ca0`.
+
+## 2026-11-09 16:35 Castor Investigation: Reachability Ratchet Root Cause & Fix Packet
+
+- **Task**: Answering Atlas broadcast #1340 ("One thing to fix as your next row: collect-metrics has failed on every Linux PR today (5 of 5) at the 'Reachability ratchet' step in ~36 s").
+- **Root Cause Confirmed**:
+  - `_applier_body(engine)` in `scripts/collect_metrics.py` locates the applier via `m = re.search(re.escape(APPLIER_FN) + r"\s*[(<]", engine)` where `APPLIER_FN = "fn apply_style_property_impl"`.
+  - In `crates/rustkit-engine/src/lib.rs` (lines 15337-15340), the first match is the 87-character test shim on `Engine`:
+    ```rust
+    impl Engine {
+        pub(crate) fn apply_style_property_impl(style: &mut ComputedStyle, property: &str, value: &str) {
+            layout_ctx::LayoutCtx::apply_style_property_impl(style, property, value)
+        }
+    }
+    ```
+  - The script extracted this 87-character delegation shim instead of the actual 78,160-character implementation in `layout_ctx::LayoutCtx::apply_style_property_impl` (lines 15352-17180).
+  - Because the 87-character body has zero direct writes to `style`, `writable_by_applier` dropped to **0**, and all 133 fields read by layout were reported as unreachable regressions!
+- **Verified Fix**:
+  - In `scripts/collect_metrics.py`:
+    1. Update `_applier_body` to either select the maximum-length block matching `fn apply_style_property_impl` or match `impl\s+layout_ctx::LayoutCtx`'s `fn apply_style_property_impl`.
+    2. Expand `MUTATORS` regex with `apply|reset` so `style.mask.apply()` and `style.mask.reset()` are recognized as mutations.
+    3. Support bitwise/tuple assignments: `(?:style|s)\.[a-z_0-9]+\s*[&|]=` and `\((?:style|s)\.[^)]*\)\s*=`.
+    4. Support helper calls `set_animation_names(style, ...)` and `set_stacks(style, ...)`.
+    5. Scope layout reads in `read = [f for f in fields if re.search(r"\b(?:style|s|b\.style|child\.style|layout_box\.style)\." + f + r"\b", layout)]` so unrelated structs like `ScrollAnimation { pub animation_duration: Duration }` in `scroll.rs` are not falsely counted as `ComputedStyle` layout reads.
+  - With this fix, `writable_by_applier` is **133**, `unreachable_count` is **6**, `backdrop_filter`, `direction`, and `object_position` are recognized as **REACHABILITY IMPROVED** (now settable from CSS), and the ratchet passes cleanly.
+- **Decisions for Atlas**:
+  - Per Pete's explicit instruction to Castor ("you are no longer allowed to make code changes only review"), Castor has prepared this verified diagnosis and fix packet rather than self-authoring a PR.
+  - Option 1 (Recommended): Talos authors the small PR (`talos/fix-reachability-ratchet`) with this script update, and Castor conducts the R1 review of record.
+  - Option 2: Atlas / Pete explicitly authorizes Castor to author this tooling-only PR to `develop`.
+
+
