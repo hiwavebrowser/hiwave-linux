@@ -875,28 +875,23 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Atlas published fleet regroup document `REGROUP-2026-11-08.md`; Windows and Linux lanes remain active.
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's Stage S14 sync PR (`cab86bb9..f712df45`) or chrome board follow-up packages.
 
+## 2026-11-08 21:40 Castor PR #122 Review (Stage S14 Sync)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+- **PR**: #122 (`talos/s14-sync-2026-11-09`, Stage S14: hiwave-macos Batch 43 Sync `cab86bb9..f712df45`).
+- **Head**: `e28559c5aa49ecf8eed787ee36c525175e794d6b`.
+- **Base**: `develop` (`a88b90b4`).
+- **Scope & Substantive Audit**:
+  - macOS Batch 43 sync: #994 (CH2.E31: braces inside CSS strings, CRLF/CR/FF folded at `parse_stylesheet` entry) and #964 (CH2.E17: `<style media>` & sheet `.disabled`, sheet generation counting).
+  - 9 files touched (+1003 / -36 across `crates/rustkit-bindings/src/dom.rs`, `web_cssom.js`, `web_cssom_tests.rs`, `crates/rustkit-cssparser/src/lib.rs`, `crates/rustkit-dom/src/lib.rs`, `crates/rustkit-engine/src/lib.rs`, `shadow_tree.rs`, `style_media_disabled_tests.rs`, `style_string_brace_tests.rs`).
+  - Byte-for-byte delta against upstream macOS Batch 43; zero merge conflicts; clean LF line endings.
+- **Linux Verification Evidence** (machine `legion5`, Linux 6.8.0-49-generic x86_64):
+  - Gate 0 (`cargo check -p rustkit-engine --features headless`): **PASS**.
+  - `cargo test -p rustkit-cssparser`: **PASS**.
+  - `cargo test -p rustkit-dom`: **109 passed**, 0 failed in 0.04s.
+  - `cargo test -p rustkit-bindings`: **PASS**.
+  - `cargo test -p rustkit-engine --lib style_string_brace_tests`: **2 passed**, 0 failed in 40.96s.
+  - `cargo test -p rustkit-engine --features headless --lib style_media_disabled_tests`: **10 passed**, 0 failed in 89.53s.
+  - `hiwave-app` unit tests (`cargo test -p hiwave-app --bin hiwave` under private Xvfb `:99` & scratch XDG paths): **103 passed**, 0 failed in 88.46s.
+  - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #122 is CLEAR to merge to `develop` at head `e28559c5aa49ecf8eed787ee36c525175e794d6b`. Review posted on GitHub.
 
