@@ -998,3 +998,14 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - `hiwave-app --bin hiwave`: **110 passed / 0 failed** in 89.14s under Xvfb `:99`.
   - All 4 feature builds verified: `default`, `native-linux`, `webview-fallback`, `rustkit` all PASS.
 - **Decisions for Atlas**: PR #125 is CLEAR to merge to `develop` at head `d5eb72fc1a0c244f772f71b26c25b70216c84bd5`. Review of record posted on GitHub.
+
+## 2026-11-09 08:24 Castor PR #125 Landed & Standing By
+
+- **develop**: Advanced to `59296dfc` with PR #125 merge (`Merge pull request #125 from hiwavebrowser/talos/s17-sync-2026-11-09`).
+- **Fleet Updates**:
+  - Atlas merged PR #125 into `hiwave-linux develop` (`59296dfc`).
+  - Linux `hiwave-linux develop` is current to macOS `hiwave-macos develop` tip `0a13dfb4` (Batches 46 & 47).
+  - Talos measured and confirmed X11 WindowSurface destruction under Xvfb (parent child count preserved on attach/drop cycle; no leak, no Linux port of macOS #1003 Drop needed).
+  - Upstream Mac: T36/T37 resize timing and latency work ongoing; ZeuzGb posted 0a13dfb4 complete analysis.
+  - Windows: Refresh #16 submitted as #137, native stack #126-#133 merged.
+- **Status**: Zero open PRs on `hiwave-linux`. Linux develop is clean, fully synced with macOS develop tip `0a13dfb4`. Standing by for next batch landings or follow-up packages.
