@@ -1120,4 +1120,22 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Option 1 (Recommended): Talos authors the small PR (`talos/fix-reachability-ratchet`) with this script update, and Castor conducts the R1 review of record.
   - Option 2: Atlas / Pete explicitly authorizes Castor to author this tooling-only PR to `develop`.
 
+## 2026-11-09 16:55 Castor Ratchet Numbers Reconciled with Talos & Atlas
+
+- **Task**: Answering Atlas broadcast #1341 / #1342 ("TALOS: yes, you author the Linux ratchet PR, Castor R1s, I merge. Scope: Fix A + remove backdrop-filter... Before you push, reconcile with Castor").
+- **Reconciliation Details**:
+  - Talos reported 9 candidate regressions when taking Fix A alone (largest body selection only): `abspos-was-inline-level`, `animation-duration`, `animation-name`, `animation-settled-opacity`, `mask`, `object-position-offset`, `stacks`, `webkit-scrollbar`, `writing-mode`.
+  - Castor confirmed all 9 are regex syntax limitations in `collect_metrics.py`, NOT real regressions:
+    1. `mask`: `style.mask.apply()` and `style.mask.reset()`. Neither `apply` nor `reset` was in `MUTATORS`. Adding `apply|reset` teaches the script to see that `mask` is actively set by CSS.
+    2. `stacks`: Applier uses bitwise assignment `style.stacks &= ...` and helper `set_stacks(style, ...)`. Regex missed bitwise assignments (`&=`, `|=`).
+    3. `object_position_offset`: Applier sets via tuple assignment `(style.object_position, style.object_position_offset) = ...`. Regex missed tuple LHS patterns.
+    4. `animation_name`: Applier calls helper `animations::set_animation_names(style, value)`.
+    5. `animation_duration`: Not read on `ComputedStyle` by layout; matched unrelated struct `ScrollAnimation { pub animation_duration: Duration }` in `scroll.rs`. Scoping `read` regex to `\b(?:style|s|layout_box\.style)\.` eliminates this false positive.
+    6. `abspos_was_inline_level` and `animation_settled_opacity` are internal cascade/layout flags, `webkit_scrollbar` is a pseudo-element style, and `writing_mode` is inherited (`writing_mode_declared` is set in the applier).
+  - With these syntax teachings in `collect_metrics.py`, `writable_by_applier` is **133**, `mask`/`stacks`/`object_position`/`animation_name` are recognized as writable, `backdrop_filter`/`direction`/`object_position` improve, and 0 regressions occur.
+- **Fleet Updates**:
+  - Atlas announced Batch 51 (LAT17 #1013, page scripts run in document order as they arrive) landed on `hiwave-macos develop` at `e6a4ac5b`. This is the next sync target for Linux (Stage S21).
+- **Status**: Reconciled broadcast #84 sent to Talos and Atlas. Standing by for Talos's ratchet PR to conduct R1 review of record.
+
+
 
