@@ -38,7 +38,8 @@ mod traits;
 pub use traits::{ViewHostTrait, WindowHandle};
 
 pub use input_queue::{
-    drain_input, drain_input_view, retire_view_input, set_text_input_state, text_input_state, EditAction,
+    drain_input, drain_input_view, instant_of_native_event, retire_view_input, set_text_input_state,
+    text_input_state, EditAction,
     ImeInput, InputEvent, InputKind, PendingClick, PendingKey, PendingScroll, PointerInput, TextInputMirror,
 };
 pub use region::{compose_region, region_contains, FrameRegion, RegionRect};

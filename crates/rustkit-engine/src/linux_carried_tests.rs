@@ -3532,7 +3532,9 @@ mod x11_content_path {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             laid_out_for: (800, 600),
-            input: None,
+            inputs: Vec::new(),
+            inputs_unpresented: 0,
+            visit: crate::VisitTag::none(),
             canvas: [1.0, 1.0, 1.0, 1.0],
         };
         surface.present_commit(&commit, &images).expect("present_commit must succeed");
