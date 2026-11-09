@@ -69,6 +69,8 @@ objc = "0.2"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 
 [dev-dependencies]
+# Only to force a collection in navigation_release_tests (M2).
+boa_gc = "0.22"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
 
@@ -84,3 +86,8 @@ raw-window-handle = "0.6"
 name = "macos_live_click"
 harness = false
 
+
+# CH2.E35: makes an NSWindow (main thread only), so no test harness.
+[[test]]
+name = "macos_window_surface_drop"
+harness = false
