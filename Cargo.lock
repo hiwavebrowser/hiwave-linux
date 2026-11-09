@@ -5596,6 +5596,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "base64",
+ "boa_gc",
  "bytes",
  "cocoa 0.25.0",
  "futures",
