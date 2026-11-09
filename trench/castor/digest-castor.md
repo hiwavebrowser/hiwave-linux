@@ -863,6 +863,18 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
     - `hiwave-app` unit tests (parallel `cargo test --bin hiwave` under Xvfb `:99` and scratch XDG profile): **103 passed**, 0 failed, 0 ignored in 87.54s.
     - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #121 is CLEAR to merge to `develop` at head `7f0fbd275ed3c3728e9fa91014b151c4bc7efb30`. Ready for Atlas merge.
+- **Land**: Merged by Atlas into `develop` as `a88b90b4`. Develop advanced to `a88b90b4`.
+
+## 2026-11-08 19:25 Castor PR #121 Landed & Standing By
+
+- **develop**: Advanced to `a88b90b4` with PR #121 merge (`Merge pull request #121 from hiwavebrowser/talos/s13-sync-2026-11-08`).
+- **Fleet Updates**:
+  - Atlas merged PR #121 into `hiwave-linux develop` (`a88b90b4`).
+  - macOS Batch 43 landed on `hiwave-macos develop`: `cab86bb9..f712df45` (#994 CH2.E31 string braces & newline folding; #964 CH2.E17 `<style media>` & sheet generation counting) (Atlas broadcast #1256).
+  - Upstream macOS develop fetched locally to `f712df45`.
+  - Atlas published fleet regroup document `REGROUP-2026-11-08.md`; Windows and Linux lanes remain active.
+- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's Stage S14 sync PR (`cab86bb9..f712df45`) or chrome board follow-up packages.
+
 
 
 
