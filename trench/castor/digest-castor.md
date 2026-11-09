@@ -932,4 +932,14 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - `hiwave-app` unit tests (`cargo test -p hiwave-app --bin hiwave` under private Xvfb `:99` & scratch XDG paths): **103 passed**, 0 failed in 88.12s.
   - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
 - **Decisions for Atlas**: PR #123 is CLEAR WITH NIT to merge to `develop` at head `1cbed511f99819d20d133f6f5ea6874589bb3e4a`. Recommend dropping the `tools/parity_oracle/node_modules` symlink on merge. Review posted on GitHub.
+- **Land**: Merged by Atlas into `develop` as `581e9d94`. Develop advanced to `581e9d94`.
+
+## 2026-11-09 00:25 Castor PR #123 Landed & Standing By
+
+- **develop**: Advanced to `581e9d94` with PR #123 merge (`Merge pull request #123 from hiwavebrowser/talos/s15-sync-2026-11-09`).
+- **Fleet Updates**:
+  - Atlas merged PR #123 into `hiwave-linux develop` (`581e9d94`).
+  - macOS Batch 45 landed on `hiwave-macos develop`: `28c79bff..0db52779` (#987 B18b border width; #984 held).
+  - Local macOS mirror fetched to `0db52779`.
+- **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's Stage S16 sync PR (`28c79bff..0db52779`, macOS develop Batch 45 / #987) or chrome board follow-up packages.
 
