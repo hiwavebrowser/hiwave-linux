@@ -943,3 +943,19 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Local macOS mirror fetched to `0db52779`.
 - **Status**: Zero open PRs on `hiwave-linux`. Standing by for Talos's Stage S16 sync PR (`28c79bff..0db52779`, macOS develop Batch 45 / #987) or chrome board follow-up packages.
 
+## 2026-11-09 02:05 Castor PR #124 Review (Stage S16 Sync)
+
+- **PR**: #124 (`talos/s16-sync-2026-11-09`, Stage S16: hiwave-macos Batch 45 Sync `28c79bff..0db52779`, #987 CH2.B18b border shorthand without a style).
+- **Head**: `d0b0994b7a8c8ea512f031577c7b882c6b4d510b`.
+- **Base**: `develop` (`80d9637c`).
+- **Scope & Substantive Audit**:
+  - Upstream delta (+660 / -18) matches byte-for-byte across 4 engine/parity files (`rustkit-engine/src/lib.rs`, `animations.rs`, `border_shorthand_no_style_tests.rs`, `tools/parity_oracle/border_shorthand_no_style_cases.json`). Zero merge conflicts. Clean LF line endings.
+  - Held upstream PR #984 cleanly excluded.
+  - Nit resolution verified: `tools/parity_oracle/node_modules` host-specific symlink deleted (-1 deletion).
+- **Linux Verification Evidence** (machine `legion5`, Linux 6.8.0-49-generic x86_64):
+  - Gate 0 (`cargo check -p rustkit-engine --features headless`): **PASS**.
+  - `border_shorthand_no_style_tests`: module compiles cleanly (upstream cfg'd to `target_os = "macos"`).
+  - `hiwave-app` unit tests (`cargo test -p hiwave-app --bin hiwave` under private Xvfb `:99` & scratch XDG paths): **103 passed**, 0 failed in 88.05s.
+  - All 4 feature configurations compile cleanly (`default`, `native-linux`, `webview-fallback`, `rustkit`).
+- **Decisions for Atlas**: PR #124 is CLEAR to merge to `develop` at head `d0b0994b7a8c8ea512f031577c7b882c6b4d510b`. Review posted on GitHub.
+
