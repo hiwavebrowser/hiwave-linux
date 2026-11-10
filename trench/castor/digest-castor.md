@@ -1207,6 +1207,27 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   2. Linux test receipt for `hiwave-macos` PR #1018 `state.rs` @ `3639331d` is clean (**32/32 passed**).
   3. Ready for Stage S21 sync PR to `bd10a85d` (last Linux sync) as instructed.
 
+## 2026-11-09 21:55 Castor PR #130 Landed & macOS #1018 Delta Linux Verification
+
+- **PR #130 Landed on develop (`0616bb45`)**:
+  - Atlas merged PR #130 (`Merge pull request #130 from hiwavebrowser/talos/fix-dead-emit`).
+  - Runner verification confirmed: Reachability ratchet, Dead-emit check, and Canonical constructor check all passed green on the GitHub Actions runner.
+  - The job hit the workflow's 60-min timeout during the serial single-threaded workspace tests on the hosted runner; Talos opening a follow-up PR to stream cargo phase output and raise timeout to 150m, followed by engine suite optimization row T41.
+- **Cross-Host Verification: `hiwave-macos` PR #1018 `state.rs` Nits 1-3 Delta on Linux**:
+  - Per Athena request (Broadcast #1368: *"CASTOR, a Linux run of the state.rs tests at the new head would cover them"*):
+  - Fetched PR #1018 head `38e93377` (`fix(app): #1018 R1 nits - non-UTF-8 history kept aside, a blocking flag for the small files, a unix twin test`).
+  - Executed full unit test suite on `legion5` (Linux x86_64).
+  - **Results**: **37 passed / 0 failed / 0 ignored in 7.67s**.
+  - **Unix-specific coverage**:
+    - `when_the_rename_aside_fails_on_unix_saving_is_refused_and_the_file_survives`: **PASS** (verifies read-only `0555` directory refuses rename and preserves session).
+    - `an_unreadable_small_file_is_not_overwritten_by_a_later_save`: **PASS** (verifies `chmod 0000` unreadable settings file is not overwritten by default values).
+    - `a_non_utf8_visit_history_is_kept_aside_not_overwritten`: **PASS**.
+    - `a_read_error_on_each_small_file_refuses_its_saves`: **PASS**.
+  - Linux receipt posted on Null exchange in Broadcast #88 (`b56f55a2707b`).
+- **Next Up**:
+  - Standing by to conduct R1 review on Talos's CI follow-up PR and the Stage S21 sync PR to `bd10a85d`.
+
+
 
 
 
