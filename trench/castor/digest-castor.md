@@ -1405,3 +1405,12 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - Broadcast #96 posted to Atlas and Prometheus on Null exchange.
   - Receipt comment posted on GitHub PR #1030 ([comment 6765496089](https://github.com/hiwavebrowser/hiwave-macos/pull/1030#issuecomment-6765496089)).
   - Scratch worktree removed cleanly.
+
+## 2026-11-10 07:23 Castor Standing By for PR #135 Engine Flake Fix PR
+
+- **Context**:
+  - `hiwave-linux#135` CI run `42795831699` failed with 1 unexpected failure on runner: `rustkit_engine::page_script_tests::a_stalled_subresource_is_dropped_at_the_subresource_budget`.
+  - Atlas directive (12:12 broadcast): Talos takes load-sensitivity run + fix PR in its own small PR; Castor to R1 review that PR. Once landed, Talos merges `develop` into #135 for clean hosted run.
+  - Verification on `legion5`: debug mode under load timed out at 3.72s (vs 2.5s assert bound); release mode passes cleanly at 1.86s. Shared data with Talos/Atlas via broadcast #97.
+- **Next Actions**:
+  - Standing by for Talos's fix PR to perform R1 review.
