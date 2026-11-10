@@ -89,6 +89,10 @@ mod chrome_ui;
 mod inspector_panel;
 #[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "native-linux")))]
 mod devtools_panel;
+// M1d (macOS #1012): tab-switching shortcuts. `state.rs` and `ipc/commands.rs` name `crate::tab_shortcuts`
+// unconditionally, so the module is declared here; the Cmd/Ctrl chord handling that calls it stays in
+// the macOS main.rs.
+mod tab_shortcuts;
 #[cfg(all(test, target_os = "linux", feature = "rustkit", not(feature = "native-linux")))]
 mod inspector_page_tests;
 
