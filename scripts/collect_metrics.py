@@ -24,6 +24,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,15 +37,37 @@ RUNNING_RE = re.compile(r"Running .*?\(.*?[\\/]deps[\\/]([A-Za-z0-9_]+?)-[0-9a-f
 DOCTEST_RE = re.compile(r"^\s*Doc-tests (\S+)")
 
 
-def run(cmd: list[str]) -> tuple[int, str]:
-    # stderr is merged into stdout by the PIPE, not concatenated afterwards.
-    # cargo prints "Running <binary>" on stderr and "test result:" on stdout,
-    # so appending one to the other loses the interleaving that attributes a
-    # result block to the binary that produced it -- every crate then lands
-    # in a single bucket.
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, encoding="utf-8", errors="replace")
-    return proc.returncode, proc.stdout or ""
+# Lines worth showing live. The step used to print NOTHING between 'Run python ...' and its end, so a
+# timeout (the 60-minute cancel of 2026-11-10) was undiagnosable: no way to tell the build from the tests,
+# or which binary was running. The whole output is still captured for parsing; only these are echoed.
+PROGRESS_RE = re.compile(
+    r"^\s*(Running |Doc-tests |Finished |Compiling (?:rustkit|hiwave)|test result:|error(?:\[|:)|warning: unused)"
+    r"|\.\.\. FAILED|panicked at|has been running for over"
+)
+
+
+def run(cmd: list[str], label: str = "") -> tuple[int, str]:
+    """Run `cmd`, capture everything, and echo progress lines to stderr as they arrive.
+
+    stderr is merged into stdout by the PIPE, not concatenated afterwards.
+    cargo prints "Running <binary>" on stderr and "test result:" on stdout,
+    so appending one to the other loses the interleaving that attributes a
+    result block to the binary that produced it -- every crate then lands
+    in a single bucket.
+    """
+    started = time.monotonic()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace", bufsize=1)
+    lines: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        lines.append(line)
+        if PROGRESS_RE.search(line):
+            elapsed = time.monotonic() - started
+            print(f"[{label or cmd[1]} +{elapsed:7.0f}s] {line.rstrip()}", file=sys.stderr, flush=True)
+    code = proc.wait()
+    run.last_seconds = time.monotonic() - started  # type: ignore[attr-defined]
+    return code, "".join(lines)
 
 
 APPLIER_FN = "fn apply_style_property_impl"
@@ -354,7 +377,8 @@ def parse_tests(test_out: str) -> tuple[dict, dict, list[str]]:
 
 
 def collect(commit: str, branch: str) -> dict:
-    build_code, build_out = run(["cargo", "build", "--workspace"])
+    build_code, build_out = run(["cargo", "build", "--workspace"], "build")
+    build_seconds = round(run.last_seconds)  # type: ignore[attr-defined]
     build_warnings = len(re.findall(r"^warning:", build_out, re.M))
 
     # On a failed build, echo the tail to stderr so CI shows WHY. The metrics
@@ -375,7 +399,9 @@ def collect(commit: str, branch: str) -> dict:
     # on the wait, not on its assertions (5 tests, run 36804275308); serial
     # runs the whole engine suite in ~50s locally with no contention.
     test_code, test_out = run(["cargo", "test", "--workspace", "--no-fail-fast",
-                               "--", "--test-threads=1"])
+                               "--", "--test-threads=1"], "test")
+    test_seconds = round(run.last_seconds)  # type: ignore[attr-defined]
+    print(f"PHASES: build {build_seconds}s, test {test_seconds}s", file=sys.stderr, flush=True)
 
     # Echo failing-test context to stderr so CI names WHICH tests failed and
     # why, instead of only a count. Mirrors the build-failure surfacing above.
@@ -405,6 +431,7 @@ def collect(commit: str, branch: str) -> dict:
             "ok": build_code == 0,
             "exit_code": build_code,
             "warnings": build_warnings,
+            "seconds": build_seconds,
         },
         "tests": {
             "ok": test_code == 0,
@@ -413,6 +440,7 @@ def collect(commit: str, branch: str) -> dict:
             "failed": totals["failed"],
             "ignored": totals["ignored"],
             "total": totals["passed"] + totals["failed"],
+            "seconds": test_seconds,
             **classify_failures(failed_names),
             # A non-zero exit that names no failing test is a crash or a timeout, not a pass.
             "unexplained_exit": test_code != 0 and not failed_names,
