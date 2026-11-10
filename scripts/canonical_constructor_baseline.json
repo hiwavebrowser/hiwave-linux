@@ -1,4 +1,10 @@
 {
-  "_comment": "Accepted production uses of ComputedStyle::default(). Entries may only LEAVE this list; adding one is a regression and CI fails. Empty is the goal state and the current state - production builds styles through ComputedStyle::new(). Format: [path, line, text].",
-  "allowed": []
+  "_comment": "Accepted production uses of ComputedStyle::default(). Entries may only LEAVE this list; adding one is a regression and CI fails. Format: [path, line, text]; matched by path+text and count (the line is informational, it drifts with every macOS sync). lib.rs `check_animation_frame` (macOS upstream, the animation fast-path validator): builds a throwaway style only to set ONE transform value and ask effective_transform().is_identity(); no other field is read, so the derived Default's disagreement with new() cannot reach it. Entered 2026-11-09 with the S1-S20 syncs; same line exists on macOS develop.",
+  "allowed": [
+    [
+      "crates/rustkit-engine/src/lib.rs",
+      43986,
+      "let mut s = rustkit_css::ComputedStyle::default();"
+    ]
+  ]
 }

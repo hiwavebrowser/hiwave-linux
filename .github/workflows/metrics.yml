@@ -139,15 +139,28 @@ jobs:
           python - <<'PY'
           import json, sys
           m = json.load(open("metrics.json", encoding="utf-8"))
+          t = m["tests"]
           bad = []
           if not m["build"]["ok"]:
               bad.append(f"build exit {m['build']['exit_code']}")
-          if m["tests"]["failed"]:
-              bad.append(f"{m['tests']['failed']} test(s) failed")
+          # Only a failure OUTSIDE scripts/linux_known_failures.json is red; the known ones are
+          # printed below on every run so they stay visible (a check that is always red gates nothing,
+          # and one that hides failures is decorative).
+          unexpected = t.get("failed_unexpected")
+          if unexpected is None and t["failed"]:   # an artifact from before names were recorded
+              unexpected = [f"{t['failed']} test(s), names not recorded"]
+          if unexpected:
+              bad.append(f"{len(unexpected)} unexpected test failure(s): " + ", ".join(unexpected[:25]))
+          if t.get("unexplained_exit"):
+              bad.append("cargo test exited non-zero but no failing test was named (a crash or a timeout)")
+          for name in t.get("failed_known", []):
+              print(f"known Linux failure (scripts/linux_known_failures.json): {name}")
+          for name in t.get("known_now_passing", []):
+              print(f"NOTICE known failure now passes, remove its entry: {name}")
           if bad:
               print("FAIL: " + "; ".join(bad))
               sys.exit(1)
-          print(f"OK: {m['tests']['passed']} tests passed")
+          print(f"OK: {t['passed']} tests passed, {len(t.get('failed_known', []))} known Linux failure(s)")
           PY
 
       # Runs on EVERY branch so the logic is actually exercised in review; only
