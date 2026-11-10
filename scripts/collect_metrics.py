@@ -293,6 +293,66 @@ def check_reachability_regression(current: dict) -> tuple[bool, str]:
     return (not regressed), " | ".join(msg) or "reachability unchanged"
 
 
+KNOWN_FAILURES = Path(__file__).with_name("linux_known_failures.json")
+FAILED_RE = re.compile(r"^test (\S+) \.\.\. FAILED\s*$")
+
+
+def classify_failures(failed_names: list[str], known_path: Path = KNOWN_FAILURES) -> dict:
+    """Split failing tests into the ones this tree is KNOWN to fail and the ones it is not.
+
+    Linux carries tests whose expectations are Chrome-on-macOS font metrics (one FreeType run face, no
+    fallback-face line union, runner fonts that are not the reference machine's). Counting them as
+    failures turned the job red on every PR, and a check that is always red gates nothing; deleting or
+    `#[ignore]`-ing them would hide a real signal. They are listed, with a reason each, in
+    scripts/linux_known_failures.json and reported on every run; ONLY a failure outside that list
+    fails the job. A known failure that now passes is reported (remove its entry) but is not red: the
+    hosted runner's fonts differ from a developer machine's, so the same test can flip between them.
+    """
+    known: dict[str, str] = {}
+    if known_path.exists():
+        known = {e["test"]: e.get("reason", "") for e in json.loads(known_path.read_text(encoding="utf-8"))["known"]}
+    seen = set(failed_names)
+    return {
+        "failed_unexpected": sorted(n for n in seen if n not in known),
+        "failed_known": sorted(n for n in seen if n in known),
+        "known_now_passing": sorted(k for k in known if k not in seen),
+    }
+
+
+def parse_tests(test_out: str) -> tuple[dict, dict, list[str]]:
+    """Per-binary results, totals, and the names of the failing tests (`binary::test_path`)."""
+    # Attribute each "test result:" block to the binary that produced it.
+    current = None
+    per_crate: dict[str, dict[str, int]] = {}
+    totals = {"passed": 0, "failed": 0, "ignored": 0}
+    failed_names: list[str] = []
+    for line in test_out.splitlines():
+        fm = FAILED_RE.match(line)
+        if fm:
+            failed_names.append(f"{current or 'unattributed'}::{fm.group(1)}")
+            continue
+        m = RUNNING_RE.search(line)
+        if m:
+            current = m.group(1)
+            continue
+        m = DOCTEST_RE.match(line)
+        if m:
+            current = m.group(1) + " (doc)"
+            continue
+        m = RESULT_RE.search(line)
+        if m:
+            _ok, p, f, i = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            key = current or "unattributed"
+            bucket = per_crate.setdefault(key, {"passed": 0, "failed": 0, "ignored": 0})
+            bucket["passed"] += p
+            bucket["failed"] += f
+            bucket["ignored"] += i
+            totals["passed"] += p
+            totals["failed"] += f
+            totals["ignored"] += i
+    return per_crate, totals, failed_names
+
+
 def collect(commit: str, branch: str) -> dict:
     build_code, build_out = run(["cargo", "build", "--workspace"])
     build_warnings = len(re.findall(r"^warning:", build_out, re.M))
@@ -329,30 +389,7 @@ def collect(commit: str, branch: str) -> dict:
             print("\n=== FAILING TESTS ===\n" + "\n".join(fail_lines[:80]),
                   file=sys.stderr)
 
-    # Attribute each "test result:" block to the binary that produced it.
-    current = None
-    per_crate: dict[str, dict[str, int]] = {}
-    totals = {"passed": 0, "failed": 0, "ignored": 0}
-    for line in test_out.splitlines():
-        m = RUNNING_RE.search(line)
-        if m:
-            current = m.group(1)
-            continue
-        m = DOCTEST_RE.match(line)
-        if m:
-            current = m.group(1) + " (doc)"
-            continue
-        m = RESULT_RE.search(line)
-        if m:
-            _ok, p, f, i = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
-            key = current or "unattributed"
-            bucket = per_crate.setdefault(key, {"passed": 0, "failed": 0, "ignored": 0})
-            bucket["passed"] += p
-            bucket["failed"] += f
-            bucket["ignored"] += i
-            totals["passed"] += p
-            totals["failed"] += f
-            totals["ignored"] += i
+    per_crate, totals, failed_names = parse_tests(test_out)
 
     # A crate with zero tests is worth surfacing: it is the shape of the
     # rustkit-text gap (compiled green, ran nothing, looked fine).
@@ -376,6 +413,9 @@ def collect(commit: str, branch: str) -> dict:
             "failed": totals["failed"],
             "ignored": totals["ignored"],
             "total": totals["passed"] + totals["failed"],
+            **classify_failures(failed_names),
+            # A non-zero exit that names no failing test is a crash or a timeout, not a pass.
+            "unexplained_exit": test_code != 0 and not failed_names,
         },
         "per_crate": dict(sorted(per_crate.items())),
         "crates_with_no_tests": empty,
@@ -399,7 +439,8 @@ def to_markdown(m: dict) -> str:
         "|--------|-------|",
         f"| Build | {'PASS' if b['ok'] else 'FAIL'} ({b['warnings']} warnings) |",
         f"| Tests passed | **{t['passed']}** |",
-        f"| Tests failed | {t['failed']} |",
+        f"| Tests failed | {t['failed']} ({len(t.get('failed_known', []))} known on Linux, "
+        f"{len(t.get('failed_unexpected', []))} unexpected) |",
         f"| Tests ignored | {t['ignored']} |",
         f"| Commit | `{m['commit'][:8]}` |",
         f"| Branch | {m['branch']} |",

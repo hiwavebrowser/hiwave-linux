@@ -1,0 +1,21 @@
+{
+  "_comment": "Tests this Linux tree is KNOWN to fail, each with the reason. collect-metrics reports them every run and fails only on a failure NOT listed here (or on a test run that exits non-zero naming no failing test). A listed test that passes is reported as 'known now passing' (remove its entry), never red: the hosted runner's fonts differ from a developer machine's, so these can flip between them. Names are `binary::test::path`. Entries may only LEAVE this list; add one only with a root cause, never to make a run green.",
+  "known": [
+    {
+      "test": "rustkit_layout::tests::test_an_emoji_label_lifts_a_styled_buttons_line",
+      "reason": "macOS #997: expects Blink to unite the emoji's fallback face into a button's line (32 -> 39 px). Linux measures one FreeType run face (GlyphFace::Primary) and has no fallback-face line union."
+    },
+    {
+      "test": "rustkit_layout::tests::test_negative_half_leading_inline_keeps_the_line_baseline",
+      "reason": "macOS #997: pins the 32px bold `-apple-system` strut seat at 28; the family resolves to a different face and ascent on Linux (27)."
+    },
+    {
+      "test": "rustkit_engine::text_control_select_tests::a_click_places_the_caret_at_the_click_point",
+      "reason": "The test sets Menlo 20px and expects a 10px advance; Menlo does not exist on Linux and the fallback face's advance differs."
+    },
+    {
+      "test": "rustkit_renderer::layer_cost_tests::a_frame_past_the_glyph_atlas_matches_the_submit_per_pass_path",
+      "reason": "macOS #992: the test fills the glyph atlas with CJK ideographs (U+4E00..) and asserts the atlas reset at least once. The hosted runner installs only fonts-dejavu-core and fonts-liberation, which have no ideographs, so no glyph ink is produced and the atlas never fills ('resets 0'). Passes where a CJK font is installed (a developer machine with Noto CJK). Fix options: install fonts-noto-cjk in the workflow, or make the test skip loudly without a CJK face."
+    }
+  ]
+}
