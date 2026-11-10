@@ -12,6 +12,10 @@
     {
       "test": "rustkit_engine::text_control_select_tests::a_click_places_the_caret_at_the_click_point",
       "reason": "The test sets Menlo 20px and expects a 10px advance; Menlo does not exist on Linux and the fallback face's advance differs."
+    },
+    {
+      "test": "rustkit_renderer::layer_cost_tests::a_frame_past_the_glyph_atlas_matches_the_submit_per_pass_path",
+      "reason": "macOS #992: the test fills the glyph atlas with CJK ideographs (U+4E00..) and asserts the atlas reset at least once. The hosted runner installs only fonts-dejavu-core and fonts-liberation, which have no ideographs, so no glyph ink is produced and the atlas never fills ('resets 0'). Passes where a CJK font is installed (a developer machine with Noto CJK). Fix options: install fonts-noto-cjk in the workflow, or make the test skip loudly without a CJK face."
     }
   ]
 }
