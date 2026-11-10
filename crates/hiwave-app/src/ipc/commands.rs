@@ -289,6 +289,14 @@ pub fn handle_message(state: &Arc<Mutex<AppState>>, message: IpcMessage) -> IpcR
     }
 }
 
+/// Autofill hardening: credentials are delivered only for a user-requested fill on the page's own origin.
+/// Until that path exists, a request that comes from a content page gets nothing: it is logged and dropped,
+/// the vault is not read, and nothing is sent back to the page.
+pub(crate) fn content_page_autofill(_state: &Arc<Mutex<AppState>>, domain: &str) -> Option<String> {
+    info!("Autofill request from a content page for {}: not served", crate::page_url_for_log(domain));
+    None
+}
+
 fn handle_get_credentials_for_autofill(state: &Arc<Mutex<AppState>>, domain: &str) -> IpcResponse {
     let state = state.lock().unwrap();
 
@@ -2018,5 +2026,44 @@ fn handle_reset_analytics_data(state: &Arc<Mutex<AppState>>) -> IpcResponse {
             }))
         }
         Err(e) => IpcResponse::error(format!("Failed to archive analytics data: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod autofill_hardening_tests {
+    use super::*;
+
+    /// Autofill hardening: credentials are delivered only for a user-requested fill on the page's own origin.
+    /// A content page's request returns nothing, even with an unlocked vault that holds a login for the
+    /// domain it names.
+    #[test]
+    fn a_content_page_autofill_request_returns_no_credentials() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = crate::state::AppConfig {
+            data_dir: dir.path().to_path_buf(),
+            download_dir: dir.path().join("downloads"),
+            ..Default::default()
+        };
+        let state = Arc::new(Mutex::new(AppState::new(config).expect("app state")));
+        {
+            let mut s = state.lock().unwrap();
+            s.vault.unlock("a master password for the test").expect("unlock");
+            s.vault
+                .save_credential(&Url::parse("https://example.test/").unwrap(), "someone", "pw-for-the-test")
+                .expect("save");
+            // The vault really does hold it, so "nothing" below is the request path's doing.
+            assert_eq!(s.vault.get_credentials(&Url::parse("https://example.test/").unwrap()).unwrap().len(), 1);
+        }
+        for domain in ["example.test", "https://example.test/login", "other.test", ""] {
+            assert_eq!(content_page_autofill(&state, domain), None, "request for {domain:?}");
+        }
+    }
+
+    /// The page-side helper does not listen for credentials posted to the window.
+    #[test]
+    fn the_autofill_helper_has_no_window_message_listener() {
+        let js = include_str!("../ui/autofill.js");
+        assert!(!js.contains("addEventListener('message'") && !js.contains("addEventListener(\"message\""));
+        assert!(!js.contains("hiwave_autofill_credentials"));
     }
 }

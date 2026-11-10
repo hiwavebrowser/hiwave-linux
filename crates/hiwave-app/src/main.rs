@@ -1796,27 +1796,9 @@ fn main() {
                         let _ = content_proxy_ipc.send_event(UserEvent::TabAudioStateChanged { playing: *playing });
                     }
                     IpcMessage::GetCredentialsForAutofill { ref domain } => {
-                        info!("Getting credentials for autofill: {}", domain);
-                        let response = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        info!("Autofill response: {:?}", response);
-                        match response {
-                            ipc::IpcResponse::Success { data } => {
-                                let json = serde_json::to_string(&data).unwrap_or_else(|_| "[]".to_string());
-                                info!("Sending {} credentials to page", json.len());
-                                let _ = content_proxy_ipc.send_event(UserEvent::SendAutofillCredentials {
-                                    credentials_json: json,
-                                });
-                            }
-                            ipc::IpcResponse::Error { ref message } => {
-                                warn!("Autofill error: {}", message);
-                                // Show error alert on content page
-                                let script = format!(
-                                    "alert('[HiWave Autofill] {}');",
-                                    message.replace('\'', "\\'")
-                                );
-                                let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
-                            }
-                        }
+                        // Autofill hardening: credentials are delivered only for a user-requested fill on the
+                        // page's own origin. A content page's request gets nothing.
+                        let _ = ipc::commands::content_page_autofill(&content_state_ipc, domain);
                     }
                     // Handle focus mode from content (keyboard shortcuts)
                     IpcMessage::ExitFocusMode => {
@@ -4612,14 +4594,9 @@ fn main() {
                             "if(window.hiwaveAutofill) { hiwaveAutofill.trigger(); }"
                         );
                     }
-                    UserEvent::SendAutofillCredentials { ref credentials_json } => {
-                        info!("Sending autofill credentials to page");
-                        // Send credentials to the page via window.postMessage
-                        let script = format!(
-                            "window.postMessage({{ type: 'hiwave_autofill_credentials', credentials: {} }}, '*');",
-                            credentials_json
-                        );
-                        content_for_events.evaluate_script(&script);
+                    UserEvent::SendAutofillCredentials { credentials_json: _ } => {
+                        // Autofill hardening: nothing is delivered into a content page.
+                        warn!("Autofill delivery to a content page is disabled");
                     }
                 }
             }
