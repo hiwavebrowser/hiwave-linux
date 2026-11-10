@@ -16,6 +16,14 @@
     {
       "test": "rustkit_renderer::layer_cost_tests::a_frame_past_the_glyph_atlas_matches_the_submit_per_pass_path",
       "reason": "macOS #992: the test fills the glyph atlas with CJK ideographs (U+4E00..) and asserts the atlas reset at least once. The hosted runner installs only fonts-dejavu-core and fonts-liberation, which have no ideographs, so no glyph ink is produced and the atlas never fills ('resets 0'). Passes where a CJK font is installed (a developer machine with Noto CJK). Fix options: install fonts-noto-cjk in the workflow, or make the test skip loudly without a CJK face."
+    },
+    {
+      "test": "rustkit_engine::paint_only_web_font_tests::static_text_keeps_its_web_font_across_paint_only_frames_when_another_view_paints",
+      "reason": "macOS #1017 (E52): the test reads the shaped face from DisplayCommand::Text.run (`r.face.postscript_name`), a shaped-run record that only the macOS CoreText path produces; Linux text commands carry `run: None`, so the face reads as empty. Measured, not assumed: with only that face-name assertion skipped, the test passes on Linux, including its pixel checks (the static line's pixels unchanged across paint-only frames after another view paints; no relayout), so the E52 behaviour itself holds here."
+    },
+    {
+      "test": "rustkit_engine::paint_only_web_font_tests::an_element_scroll_keeps_the_web_font_when_another_view_painted",
+      "reason": "macOS #1017 (E52): the test reads the shaped face from DisplayCommand::Text.run (`r.face.postscript_name`), a shaped-run record that only the macOS CoreText path produces; Linux text commands carry `run: None`, so the face reads as empty. Measured, not assumed: with only that face-name assertion skipped, the test passes on Linux, including its pixel checks (the static line's pixels unchanged across paint-only frames after another view paints; no relayout), so the E52 behaviour itself holds here."
     }
   ]
 }
