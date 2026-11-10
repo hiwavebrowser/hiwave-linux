@@ -290,6 +290,13 @@ pub fn handle_message(state: &Arc<Mutex<AppState>>, message: IpcMessage) -> IpcR
     }
 }
 
+/// A content page's analytics request (read, reset or export) gets nothing: it is logged without any value the
+/// page supplied, the analytics store is neither read nor changed, and nothing is sent back to the page.
+pub(crate) fn content_page_analytics(_state: &Arc<Mutex<AppState>>) -> Option<String> {
+    info!("Analytics request from a content page: not served");
+    None
+}
+
 /// Autofill hardening: credentials are delivered only for a user-requested fill on the page's own origin.
 /// Until that path exists, a request that comes from a content page gets nothing: it is logged and dropped,
 /// the vault is not read, and nothing is sent back to the page.
@@ -1993,6 +2000,48 @@ fn handle_reset_analytics_data(state: &Arc<Mutex<AppState>>) -> IpcResponse {
             }))
         }
         Err(e) => IpcResponse::error(format!("Failed to archive analytics data: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod analytics_hardening_tests {
+    use super::*;
+
+    fn state_with_a_visit() -> (tempfile::TempDir, Arc<Mutex<AppState>>) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = crate::state::AppConfig {
+            data_dir: dir.path().to_path_buf(),
+            download_dir: dir.path().join("downloads"),
+            ..Default::default()
+        };
+        let state = Arc::new(Mutex::new(AppState::new(config).expect("app state")));
+        state.lock().unwrap().analytics.track_page_visit("example.test", None).expect("visit");
+        (dir, state)
+    }
+
+    /// A content page's analytics request returns nothing and changes nothing: the visit recorded for the
+    /// user is still there after it.
+    #[test]
+    fn a_content_page_analytics_request_returns_nothing_and_changes_nothing() {
+        let (_dir, state) = state_with_a_visit();
+        assert_eq!(content_page_analytics(&state), None);
+        let top = state.lock().unwrap().analytics.get_top_domains(10).expect("top domains");
+        assert!(top.iter().any(|d| d.domain == "example.test"), "the recorded visit is untouched: {top:?}");
+    }
+
+    /// The content IPC handler's analytics arm does not hand the message to the dispatcher and does not send
+    /// a response into the page (a source pin: the arm is in `main()`'s closure, which a unit test cannot call).
+    #[test]
+    fn the_content_ipc_analytics_arm_serves_and_sends_nothing() {
+        let main = include_str!("../main.rs");
+        let start = main.find("SEC3 content analytics arm").expect("the arm is marked");
+        let end = start + main[start..].find("IpcMessage::OpenExternal").expect("the next arm");
+        let arm = &main[start..end];
+        assert!(arm.contains("content_page_analytics"), "{arm}");
+        assert!(
+            !arm.contains("handle_message") && !arm.contains("EvaluateContentScript") && !arm.contains("hiwave-response"),
+            "{arm}"
+        );
     }
 }
 
