@@ -1261,10 +1261,50 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   1. Both PR #132 (`3e6127e8`) and Stage S21 PR #131 (`ebb477d5`) are **R1 CLEAR** to land on `develop`.
   2. Final Linux sync complete; ready for fleet pivot to macOS baseline assistance (T41/CH2.E51).
 
+## 2026-11-10 01:08 Castor PR #133 (Autofill Hardening) R1 CLEAR & macOS #1033 Linux Verification
 
+- **Current State**:
+  - `hiwave-linux develop`: `3c9773c4` (Stage S21 sync landed).
+  - Standing 30-minute cron loop active.
 
+- **Tasks Completed**:
 
+1. **`hiwave-macos` PR #1033 Compile Check on Linux (SEC1b `#[cfg(not(target_os = "macos"))]`)**:
+   - Evaluated head `bbf5366e` in isolated scratch worktree.
+   - Audited new call sites in `crates/hiwave-app/src/main.rs`:
+     - `ipc::inspector_payload::dom_tree(tree)` (L3438)
+     - `ipc::inspector_payload::element_styles(styles)` (L3446, L3454)
+     - `ipc::inspector_payload::console_entry(entry)` (L3471)
+   - Checked type matching against `match &msg` pattern references (`&Value`). All call sites resolved and compiled cleanly with zero errors.
+   - Tested all 7 unit tests in `crates/hiwave-app/src/ipc/inspector_payload.rs`: 7 passed / 0 failed in 0.00s.
+   - Posted detailed verification receipt on `hiwave-macos` PR #1033 (issue comment 6760249760). Scratch worktree removed cleanly.
 
+2. **`hiwave-linux` PR #133 R1 Review (Autofill Hardening)**:
+   - **Head**: `da476bdbee3005edcd1af7f59ada9a6eb7959ef3` by Talos.
+   - **Approved Scope**: autofill hardening: credentials are delivered only for a user-requested fill on the page's own origin.
+   - **Audit Findings**:
+     - `crates/hiwave-app/src/ipc/commands.rs`: Adds `content_page_autofill` returning `None` and logging without vault access; adds unit tests `a_content_page_autofill_request_returns_no_credentials` and `the_autofill_helper_has_no_window_message_listener`.
+     - `crates/hiwave-app/src/main.rs`: Routes `GetCredentialsForAutofill` to `content_page_autofill`; disables credential delivery in `UserEvent::SendAutofillCredentials`.
+     - `crates/hiwave-app/src/ui/autofill.js`: Drops `window.addEventListener("message", ...)` listener for `hiwave_autofill_credentials`.
+   - **Linux Verification Evidence (host `legion5`)**:
+     - `collect_metrics.py --check-reachability`: pass (reachability unchanged).
+     - `dead_emit_check.py`: pass (30 variants, 0 dead).
+     - `canonical_constructor_check.py`: pass (1 occurrence, baselined).
+     - Pytest: 38/38 passed in 5.11s.
+     - Gate 0 (`cargo check -p rustkit-engine --features headless`): pass in 40.23s.
+     - Feature builds (`cargo check -p hiwave-app`):
+       - `default`: pass in 50.78s
+       - `--no-default-features --features native-linux`: pass
+       - `--no-default-features --features webview-fallback`: pass
+       - `--no-default-features --features rustkit`: pass
+     - Test suites (`--test-threads=1`):
+       - `hiwave-app` unit tests: 120 passed / 0 failed (168.47s), including both new autofill hardening tests.
+       - Integration tests: 27 passed / 0 failed (8.95s).
+       - Main thread stack test: 1 passed (0.07s).
+     - Cursor Automation receipt: green (1m9s).
+     - Hosted CI: `Linux Metrics/collect-metrics` in progress (`42763...`).
+   - **Verdict**: **R1 CLEAR**. Posted on GitHub PR #133 (issue comment 6760398379). Scratch worktree removed cleanly.
 
-
-
+- **Decisions for Atlas**:
+  1. `hiwave-macos` #1033 non-macOS compile check is verified green on Linux.
+  2. `hiwave-linux` PR #133 is **R1 CLEAR** to land on `develop` upon green hosted CI run completion.
