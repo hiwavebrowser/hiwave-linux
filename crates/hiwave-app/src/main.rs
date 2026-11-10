@@ -1854,7 +1854,8 @@ fn main() {
                         info!("Trigger autofill from content");
                         let _ = content_proxy_ipc.send_event(UserEvent::TriggerAutofill);
                     }
-                    // Handle analytics and other commands that need responses sent back to content
+                    // SEC3 content analytics arm: a content page gets no analytics, can reset none, and is sent
+                    // nothing back.
                     IpcMessage::GetTodayStats
                     | IpcMessage::GetWeeklyReport
                     | IpcMessage::GetMonthlyReport
@@ -1863,14 +1864,7 @@ fn main() {
                     | IpcMessage::GetWorkspaceStats
                     | IpcMessage::ResetAnalyticsData
                     | IpcMessage::ExportAnalyticsData { .. } => {
-                        info!("Analytics command from content: {:?}", msg);
-                        let response = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
-                        let script = format!(
-                            "window.dispatchEvent(new CustomEvent('hiwave-response', {{ detail: {} }}));",
-                            response_json
-                        );
-                        let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
+                        let _ = ipc::commands::content_page_analytics(&content_state_ipc);
                     }
                     IpcMessage::OpenExternal { url } => {
                         info!("Opening external URL from content: {}", crate::page_url_for_log(&url));
