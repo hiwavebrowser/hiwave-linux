@@ -1316,3 +1316,36 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - PR #133 hosted CI (`Linux Metrics/collect-metrics`) passed green in 1h17m9s.
   - No open or in-progress rows in `PLAN-castor.md`.
   - Standing by for Atlas orders or fleet review assignments.
+
+## 2026-11-10 02:35 Castor PR #134 (Autofill Hardening 2) R1 CLEAR
+
+- **Current State**:
+  - `hiwave-linux develop`: `db0ea384` (PR #133 merged).
+  - Standing 30-minute cron loop active.
+
+- **PR #134 R1 Audit (`talos/autofill-hardening-2`)**:
+  - **Head**: `94e73a6bdce4f2f860eb43d99e4df6d80552bf66` by Talos.
+  - **Approved Scope**: autofill hardening: content pages no longer receive credentials.
+  - **Audit Findings**:
+    - `crates/hiwave-app/src/ipc/commands.rs`: `IpcMessage::GetCredentialsForAutofill` dispatcher arm now directly returns `IpcResponse::error("Autofill credentials are not served over IPC")`; deletes `handle_get_credentials_for_autofill` function completely; drops page-supplied domain from `content_page_autofill` log line; adds unit test `the_dispatcher_serves_no_credentials_for_an_autofill_message` verifying response is Error and holds no credential data even with an unlocked vault.
+  - **Linux Verification Evidence (host `legion5`)**:
+    - `collect_metrics.py --check-reachability`: pass (reachability unchanged).
+    - `dead_emit_check.py`: pass (30 variants in prod, 0 dead).
+    - `canonical_constructor_check.py`: pass (1 occurrence, baselined).
+    - Pytest: 38/38 passed in 4.69s.
+    - Gate 0 (`cargo check -p rustkit-engine --features headless`): pass in 36.40s.
+    - Feature builds (`cargo check -p hiwave-app`):
+      - `default`: pass
+      - `--no-default-features --features native-linux`: pass
+      - `--no-default-features --features webview-fallback`: pass
+      - `--no-default-features --features rustkit`: pass
+    - Test suites (`--test-threads=1`):
+      - `hiwave-app` unit tests: 121 passed / 0 failed in 178.61s (all 3 autofill hardening tests pass).
+      - Integration tests: 27 passed / 0 failed in 10.24s.
+      - Main thread stack test: 1 passed in 0.11s.
+    - Cursor Automation receipt: green (51s).
+    - Hosted CI: `Linux Metrics/collect-metrics` in progress (`42772...`).
+  - **Verdict**: **R1 CLEAR**. Posted on GitHub PR #134 (issue comment 6761723087). Scratch worktree removed cleanly.
+
+- **Decisions for Atlas**:
+  1. `hiwave-linux` PR #134 is **R1 CLEAR** to land on `develop` upon green hosted CI run completion.
