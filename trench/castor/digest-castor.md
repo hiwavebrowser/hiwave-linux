@@ -1175,6 +1175,39 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
      - Excluding test files leaves 1 occurrence in `crates/rustkit-engine/src/lib.rs:43986` (`let mut s = rustkit_css::ComputedStyle::default();`), which can use `ComputedStyle::new()` or be baselined in `canonical_constructor_baseline.json`.
 - **Status**: Complete diagnosis shared with Talos and Atlas in broadcast #86. Standing by for Talos's bundled PR to conduct R1 review.
 
+## 2026-11-09 21:02 Castor PR #130 R1 Audit & macOS #1018 Linux Verification
+
+- **PR #130 (`talos/fix-dead-emit`, End-to-End CI Collect-Metrics Fix)**:
+  - **Head**: `c77e15f318cdfdef2b3ccf880ddc154654ee15fc`
+  - **Base**: `develop` (`96dc0c02990652b7479895b12ad1e1d84b90b860`)
+  - **Audited Diff**: 8 files, +315 / -31 lines across `.github/workflows/metrics.yml`, `scripts/canonical_constructor_baseline.json`, `scripts/canonical_constructor_check.py`, `scripts/collect_metrics.py`, `scripts/dead_emit_check.py`, `scripts/linux_known_failures.json`, `scripts/tests/test_ci_source_checks_scoping.py`, `scripts/tests/test_known_failures.py`.
+  - **Audit Findings**:
+    - `dead_emit_check.py`: Correctly exempts destructuring match patterns (`=>`, `|`, `if let`, `matches!(...)`). Eliminates false flagging of `tint_mask_commands` recoloring arms. 30 variants constructed in production, 0 dead.
+    - `canonical_constructor_check.py`: `test_files()` properly detects `#[cfg(test)] mod` external declarations, `*_tests.rs`, and `#![cfg(test)]` modules. 1 legitimate production occurrence in `rustkit-engine/src/lib.rs:43986` (`check_animation_frame`) baselined by path, text pattern, and count.
+    - `collect_metrics.py` & `linux_known_failures.json`: Partitions failures into known platform differences (macOS #997 font-metric pins, Menlo advance, CJK runner font availability) vs unexpected failures. Workflow enforce step fails only on unexpected failures or non-zero exits without named failing tests.
+    - Hygiene: clean LF line endings, 0 trailing whitespace errors (`git diff --check` clean), no symlinks.
+  - **Linux Verification Evidence** (scratch worktree on `legion5`, Linux 6.8.0-49-generic):
+    - `python3 scripts/collect_metrics.py --check-reachability`: **PASS** (`reachability unchanged`, exit 0).
+    - `python3 scripts/dead_emit_check.py`: **PASS** (`0 variant(s) constructed only from dead code, all baselined; 0 new`, exit 0).
+    - `python3 scripts/canonical_constructor_check.py`: **PASS** (`1 occurrence(s), all baselined; 0 new`, exit 0).
+    - `pytest scripts/tests`: **16/16 passed in 0.50s** (`test_ci_source_checks_scoping.py` 7, `test_known_failures.py` 5, `test_reachability_scoping.py` 4).
+    - Workflow Enforce script logic: **PASS** (synthetic tests pass exit 0 on known-only; exit 1 on unexpected or unexplained exit).
+    - Gate 0 (`cargo check -p rustkit-engine --features headless`): **PASS** in 38.83s.
+  - **Verdict**: **R1 CLEAR**. Posted on GitHub (issue comment 6756826400).
+
+- **Cross-Host Verification: `hiwave-macos` PR #1018 `state.rs` on Linux**:
+  - Per Atlas request (Broadcast #1364 item 5: *"a Linux run of the state.rs tests on #1018 would help"*):
+  - Fetched PR #1018 (`athena/m4-atomic-session-save` @ `3639331d`).
+  - Executed tests via portable test harness on `legion5` (Ubuntu Linux x86_64).
+  - **Results**: **32 passed / 0 failed / 0 ignored in 5.79s** (all 7 `state::tests`, all 7 `import` tests, all 12 `state::workspace_state_file_tests`, all 6 `state::other_state_files_tests`). The 33rd test reported on Windows is `#[cfg(windows)]`.
+  - Confirmed: atomic write + temp+rename, unparsable backup retention, read error save blocking, and stale temp sweep behave identically and pass cleanly on Linux.
+
+- **Decisions for Atlas**:
+  1. PR #130 is **R1 CLEAR** to merge to `develop` at `c77e15f3`.
+  2. Linux test receipt for `hiwave-macos` PR #1018 `state.rs` @ `3639331d` is clean (**32/32 passed**).
+  3. Ready for Stage S21 sync PR to `bd10a85d` (last Linux sync) as instructed.
+
+
 
 
 
