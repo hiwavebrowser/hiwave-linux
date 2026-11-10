@@ -270,8 +270,9 @@ pub fn handle_message(state: &Arc<Mutex<AppState>>, message: IpcMessage) -> IpcR
             // This is handled in main.rs via UserEvent
             IpcResponse::success(serde_json::json!({ "action": "trigger_autofill" }))
         }
-        IpcMessage::GetCredentialsForAutofill { ref domain } => {
-            handle_get_credentials_for_autofill(state, domain)
+        // Autofill hardening: no handler decrypts and returns credentials for a message that arrives over IPC.
+        IpcMessage::GetCredentialsForAutofill { .. } => {
+            IpcResponse::error("Autofill credentials are not served over IPC")
         }
 
         // UI shortcuts (handled via main.rs UserEvents)
@@ -292,43 +293,9 @@ pub fn handle_message(state: &Arc<Mutex<AppState>>, message: IpcMessage) -> IpcR
 /// Autofill hardening: credentials are delivered only for a user-requested fill on the page's own origin.
 /// Until that path exists, a request that comes from a content page gets nothing: it is logged and dropped,
 /// the vault is not read, and nothing is sent back to the page.
-pub(crate) fn content_page_autofill(_state: &Arc<Mutex<AppState>>, domain: &str) -> Option<String> {
-    info!("Autofill request from a content page for {}: not served", crate::page_url_for_log(domain));
+pub(crate) fn content_page_autofill(_state: &Arc<Mutex<AppState>>, _domain: &str) -> Option<String> {
+    info!("Autofill request from a content page: not served");
     None
-}
-
-fn handle_get_credentials_for_autofill(state: &Arc<Mutex<AppState>>, domain: &str) -> IpcResponse {
-    let state = state.lock().unwrap();
-
-    if !state.vault.is_unlocked() {
-        return IpcResponse::error("Vault is locked");
-    }
-
-    // Create a URL from the domain to use the vault's get_credentials
-    let url_string = if domain.starts_with("http://") || domain.starts_with("https://") {
-        domain.to_string()
-    } else {
-        format!("https://{}", domain)
-    };
-
-    match Url::parse(&url_string) {
-        Ok(url) => match state.vault.get_credentials(&url) {
-            Ok(credentials) => {
-                let autofill_creds: Vec<super::AutofillCredential> = credentials
-                    .iter()
-                    .map(|c| super::AutofillCredential {
-                        id: c.id,
-                        domain: c.url.clone(),
-                        username: c.username.clone(),
-                        password: c.password.clone(),
-                    })
-                    .collect();
-                IpcResponse::success(autofill_creds)
-            }
-            Err(e) => IpcResponse::error(format!("Failed to get credentials: {}", e)),
-        },
-        Err(e) => IpcResponse::error(format!("Invalid domain: {}", e)),
-    }
 }
 
 // Navigation handlers
@@ -2057,6 +2024,30 @@ mod autofill_hardening_tests {
         for domain in ["example.test", "https://example.test/login", "other.test", ""] {
             assert_eq!(content_page_autofill(&state, domain), None, "request for {domain:?}");
         }
+    }
+
+    /// The shared dispatcher does not decrypt credentials for an autofill message either, so a path that
+    /// forwards every message to it (and logs the response) has nothing to return.
+    #[test]
+    fn the_dispatcher_serves_no_credentials_for_an_autofill_message() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = crate::state::AppConfig {
+            data_dir: dir.path().to_path_buf(),
+            download_dir: dir.path().join("downloads"),
+            ..Default::default()
+        };
+        let state = Arc::new(Mutex::new(AppState::new(config).expect("app state")));
+        {
+            let mut s = state.lock().unwrap();
+            s.vault.unlock("a master password for the test").expect("unlock");
+            s.vault
+                .save_credential(&Url::parse("https://example.test/").unwrap(), "someone", "pw-for-the-test")
+                .expect("save");
+        }
+        let response = handle_message(&state, IpcMessage::GetCredentialsForAutofill { domain: "example.test".into() });
+        let shown = format!("{response:?}");
+        assert!(matches!(response, IpcResponse::Error { .. }), "{shown}");
+        assert!(!shown.contains("pw-for-the-test") && !shown.contains("someone"), "{shown}");
     }
 
     /// The page-side helper does not listen for credentials posted to the window.
