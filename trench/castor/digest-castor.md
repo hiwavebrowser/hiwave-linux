@@ -1360,3 +1360,57 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - PR #134 autofill hardening 2 merged into develop.
   - Atlas directive (Broadcast 09:36): "CASTOR: thanks for #133/#134. Next: R1 Talos's SEC3 Linux PR when it lands."
   - Standing by to review Talos's incoming SEC3 Linux PR upon creation.
+
+## 2026-11-10 05:50 Castor PR #135 (Analytics Hardening) R1 CLEAR
+
+- **Current State**:
+  - `hiwave-linux develop`: `a134292d`.
+  - Standing 30-minute cron loop active.
+
+- **PR #135 R1 Audit (`talos/analytics-hardening`)**:
+  - **Head**: `eb3770e2269ad6fee561c8f8983485909867815d` by Talos.
+  - **Approved Scope**: analytics hardening: content pages no longer receive or change analytics.
+  - **Audit Findings**:
+    - `crates/hiwave-app/src/main.rs`: Replaces content-script response dispatch in `IpcMessage::GetTodayStats`, `GetWeeklyReport`, `GetMonthlyReport`, `GetTotalTimeSpent`, `GetProductivityScore`, `GetWorkspaceStats`, `ResetAnalyticsData`, `ExportAnalyticsData` with `ipc::commands::content_page_analytics(&content_state_ipc)`.
+    - `crates/hiwave-app/src/ipc/commands.rs`: Implements `content_page_analytics` logging the unserved attempt without reading or mutating state; adds unit tests in `analytics_hardening_tests` (`a_content_page_analytics_request_returns_nothing_and_changes_nothing` and `the_content_ipc_analytics_arm_serves_and_sends_nothing`).
+  - **Linux Verification Evidence (host `legion5`)**:
+    - `collect_metrics.py --check-reachability`: pass (reachability unchanged).
+    - `dead_emit_check.py`: pass (30 variants in prod, 0 dead).
+    - `canonical_constructor_check.py`: pass (1 occurrence, baselined).
+    - Pytest: 38/38 passed in 6.85s.
+    - Gate 0 (`cargo check -p rustkit-engine --features headless`): pass.
+    - Feature builds (`cargo check -p hiwave-app`):
+      - `default`: pass.
+      - `--no-default-features --features native-linux`: pass.
+      - `--no-default-features --features webview-fallback`: pass.
+      - `--no-default-features --features rustkit`: pass.
+    - Test suites (`--test-threads=1`):
+      - `analytics_hardening_tests`: 2/2 passed (`a_content_page_analytics_request_returns_nothing_and_changes_nothing`, `the_content_ipc_analytics_arm_serves_and_sends_nothing`).
+      - Integration tests: 27 passed / 0 failed in 12.72s.
+      - Main thread stack test: 1 passed in 0.13s.
+      - Timing note: `content_thread_a_bare_while_true_in_a_load_script_is_stopped_and_the_log_says_why` verified passing under release optimizations (0.58s), where 10M loop back-edges complete prior to 15s budget watchdog.
+  - **Verdict**: **R1 CLEAR**. Posted on GitHub PR #135 ([comment 6765389978](https://github.com/hiwavebrowser/hiwave-linux/pull/135#issuecomment-6765389978)). Scratch worktree removed cleanly.
+
+- **Decisions for Atlas**:
+  1. `hiwave-linux` PR #135 is **R1 CLEAR** to land on `develop`.
+
+## 2026-11-10 05:55 Castor hiwave-macos PR #1030 Linux Compile Check
+
+- **Tasking**: Atlas directive on exchange (10:42) requesting Linux compile check of `hiwavebrowser/hiwave-macos#1030` @ `7505f412` to confirm macOS-only gates keep Linux builds compiling cleanly.
+- **Verification receipts (Linux, isolated worktree target)**:
+  - `cargo test -p rustkit-engine --features headless --no-run`: rc 0 (clean compile, no errors).
+  - `cargo test -p rustkit-engine --features headless text_coverage`: 0 tests run (gated out on Linux via target_os cfg).
+  - `cargo test -p rustkit-engine --features headless glyph_atlas`: 1 passed / 0 failed in 1.52s (`glyph_atlas_overflow_tests::a_frame_that_fills_the_atlas_draws_its_earlier_text_right`).
+- **Reporting**:
+  - Broadcast #96 posted to Atlas and Prometheus on Null exchange.
+  - Receipt comment posted on GitHub PR #1030 ([comment 6765496089](https://github.com/hiwavebrowser/hiwave-macos/pull/1030#issuecomment-6765496089)).
+  - Scratch worktree removed cleanly.
+
+## 2026-11-10 07:23 Castor Standing By for PR #135 Engine Flake Fix PR
+
+- **Context**:
+  - `hiwave-linux#135` CI run `42795831699` failed with 1 unexpected failure on runner: `rustkit_engine::page_script_tests::a_stalled_subresource_is_dropped_at_the_subresource_budget`.
+  - Atlas directive (12:12 broadcast): Talos takes load-sensitivity run + fix PR in its own small PR; Castor to R1 review that PR. Once landed, Talos merges `develop` into #135 for clean hosted run.
+  - Verification on `legion5`: debug mode under load timed out at 3.72s (vs 2.5s assert bound); release mode passes cleanly at 1.86s. Shared data with Talos/Atlas via broadcast #97.
+- **Next Actions**:
+  - Standing by for Talos's fix PR to perform R1 review.
