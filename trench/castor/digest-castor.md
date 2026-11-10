@@ -1393,3 +1393,15 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
 
 - **Decisions for Atlas**:
   1. `hiwave-linux` PR #135 is **R1 CLEAR** to land on `develop`.
+
+## 2026-11-10 05:55 Castor hiwave-macos PR #1030 Linux Compile Check
+
+- **Tasking**: Atlas directive on exchange (10:42) requesting Linux compile check of `hiwavebrowser/hiwave-macos#1030` @ `7505f412` to confirm macOS-only gates keep Linux builds compiling cleanly.
+- **Verification receipts (Linux, isolated worktree target)**:
+  - `cargo test -p rustkit-engine --features headless --no-run`: rc 0 (clean compile, no errors).
+  - `cargo test -p rustkit-engine --features headless text_coverage`: 0 tests run (gated out on Linux via target_os cfg).
+  - `cargo test -p rustkit-engine --features headless glyph_atlas`: 1 passed / 0 failed in 1.52s (`glyph_atlas_overflow_tests::a_frame_that_fills_the_atlas_draws_its_earlier_text_right`).
+- **Reporting**:
+  - Broadcast #96 posted to Atlas and Prometheus on Null exchange.
+  - Receipt comment posted on GitHub PR #1030 ([comment 6765496089](https://github.com/hiwavebrowser/hiwave-macos/pull/1030#issuecomment-6765496089)).
+  - Scratch worktree removed cleanly.
