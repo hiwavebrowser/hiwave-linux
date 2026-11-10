@@ -1360,3 +1360,36 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
   - PR #134 autofill hardening 2 merged into develop.
   - Atlas directive (Broadcast 09:36): "CASTOR: thanks for #133/#134. Next: R1 Talos's SEC3 Linux PR when it lands."
   - Standing by to review Talos's incoming SEC3 Linux PR upon creation.
+
+## 2026-11-10 05:50 Castor PR #135 (Analytics Hardening) R1 CLEAR
+
+- **Current State**:
+  - `hiwave-linux develop`: `a134292d`.
+  - Standing 30-minute cron loop active.
+
+- **PR #135 R1 Audit (`talos/analytics-hardening`)**:
+  - **Head**: `eb3770e2269ad6fee561c8f8983485909867815d` by Talos.
+  - **Approved Scope**: analytics hardening: content pages no longer receive or change analytics.
+  - **Audit Findings**:
+    - `crates/hiwave-app/src/main.rs`: Replaces content-script response dispatch in `IpcMessage::GetTodayStats`, `GetWeeklyReport`, `GetMonthlyReport`, `GetTotalTimeSpent`, `GetProductivityScore`, `GetWorkspaceStats`, `ResetAnalyticsData`, `ExportAnalyticsData` with `ipc::commands::content_page_analytics(&content_state_ipc)`.
+    - `crates/hiwave-app/src/ipc/commands.rs`: Implements `content_page_analytics` logging the unserved attempt without reading or mutating state; adds unit tests in `analytics_hardening_tests` (`a_content_page_analytics_request_returns_nothing_and_changes_nothing` and `the_content_ipc_analytics_arm_serves_and_sends_nothing`).
+  - **Linux Verification Evidence (host `legion5`)**:
+    - `collect_metrics.py --check-reachability`: pass (reachability unchanged).
+    - `dead_emit_check.py`: pass (30 variants in prod, 0 dead).
+    - `canonical_constructor_check.py`: pass (1 occurrence, baselined).
+    - Pytest: 38/38 passed in 6.85s.
+    - Gate 0 (`cargo check -p rustkit-engine --features headless`): pass.
+    - Feature builds (`cargo check -p hiwave-app`):
+      - `default`: pass.
+      - `--no-default-features --features native-linux`: pass.
+      - `--no-default-features --features webview-fallback`: pass.
+      - `--no-default-features --features rustkit`: pass.
+    - Test suites (`--test-threads=1`):
+      - `analytics_hardening_tests`: 2/2 passed (`a_content_page_analytics_request_returns_nothing_and_changes_nothing`, `the_content_ipc_analytics_arm_serves_and_sends_nothing`).
+      - Integration tests: 27 passed / 0 failed in 12.72s.
+      - Main thread stack test: 1 passed in 0.13s.
+      - Timing note: `content_thread_a_bare_while_true_in_a_load_script_is_stopped_and_the_log_says_why` verified passing under release optimizations (0.58s), where 10M loop back-edges complete prior to 15s budget watchdog.
+  - **Verdict**: **R1 CLEAR**. Posted on GitHub PR #135 ([comment 6765389978](https://github.com/hiwavebrowser/hiwave-linux/pull/135#issuecomment-6765389978)). Scratch worktree removed cleanly.
+
+- **Decisions for Atlas**:
+  1. `hiwave-linux` PR #135 is **R1 CLEAR** to land on `develop`.
