@@ -1227,6 +1227,41 @@ Castor appends one section per session: `## <date> <HH:MM> Castor <package>` wit
 - **Next Up**:
   - Standing by to conduct R1 review on Talos's CI follow-up PR and the Stage S21 sync PR to `bd10a85d`.
 
+## 2026-11-09 22:35 Castor PR #132 & PR #131 (Stage S21 Sync) R1 Audits — CLEAR
+
+- **PR #132 (`talos/ci-progress-timeout`, CI Streaming & Timeout Extension)**:
+  - **Head**: `3e6127e856550d36c3061f9756cad2bf020172a4` (against `0616bb45`)
+  - **Audit Findings**:
+    - `scripts/collect_metrics.py`: `run()` streams progress lines live to stderr with timestamp elapsed prefixes (`[<label> +<seconds>s]`) while capturing complete stdout/stderr buffer for downstream failure classification.
+    - Diagnostic phase times: `collect()` outputs `PHASES: build Ns, test Ns` and writes `build.seconds` and `tests.seconds` into `metrics.json`.
+    - Workflow timeout: `timeout-minutes` increased to 150 in `.github/workflows/metrics.yml`.
+  - **Linux Verification Evidence**:
+    - Reachability, dead-emit, canonical constructor checks all green.
+    - Pytest: 19/19 passed in 0.53s (`test_collect_progress.py` 3/3 passed).
+    - Gate 0: `cargo check -p rustkit-engine --features headless` passed in 36.33s.
+  - **Verdict**: **R1 CLEAR**. Posted on GitHub (issue comment 6758094456).
+
+- **PR #131 (`talos/s21-sync-2026-11-10`, Stage S21: macOS Batches 51-52 Sync `6ac1b8b3..bd10a85d`)**:
+  - **Head**: `ebb477d5044b9f0c79ce198fd3b8de64d10957a6` (against `0616bb45`)
+  - **Upstream Scope**: Batch 51 (LAT17 #1013 script streaming order) + Batch 52 (M1d #1012 tab shortcuts + E52 #1017 font install order). 21 files, +2046 / -141 lines. Final Linux sync stage per Atlas instruction.
+  - **Audit Findings**:
+    - `hiwave-app/src/main.rs`: preserves Linux main-thread event loop, imports `mod tab_shortcuts;`.
+    - `hiwave-app/src/tab_shortcuts.rs`: binds to `crate::state::AppState`, gates optional `rustkit_viewhost` calls, takes `crate::chrome_ui::ChromeUi` on Linux. All 4 feature builds compile cleanly.
+    - `scripts/linux_known_failures.json`: baselines the 2 macOS #1017 tests asserting CoreText-only shaped-run face postscript name.
+  - **Linux Verification Evidence**:
+    - Gate 0: `cargo check -p rustkit-engine --features headless` passed in 36.22s.
+    - All 4 feature builds passed: `default`, `native-linux`, `webview-fallback`, `rustkit`.
+    - `hiwave-shell` tests: 9 passed in 0.00s.
+    - `hiwave-app --bin hiwave tab_shortcut` tests: 8 passed in 0.00s.
+    - `rustkit-engine --features headless script_stream`: 16 passed in 21.16s.
+    - Reachability, dead-emit, canonical constructor checks green; pytest 16/16 passed.
+  - **Verdict**: **R1 CLEAR**. Posted on GitHub (issue comment 6758218089).
+
+- **Decisions for Atlas**:
+  1. Both PR #132 (`3e6127e8`) and Stage S21 PR #131 (`ebb477d5`) are **R1 CLEAR** to land on `develop`.
+  2. Final Linux sync complete; ready for fleet pivot to macOS baseline assistance (T41/CH2.E51).
+
+
 
 
 
