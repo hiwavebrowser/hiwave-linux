@@ -21,7 +21,7 @@
   <a href="https://github.com/hiwavebrowser/hiwave-linux/actions/workflows/metrics.yml"><img src="https://github.com/hiwavebrowser/hiwave-linux/actions/workflows/metrics.yml/badge.svg?branch=master" alt="Linux CI" /></a>
   <img src="https://img.shields.io/badge/engine-RustKit_(original)-orange" alt="Engine: RustKit" />
   <img src="https://img.shields.io/badge/status-alpha-blueviolet" alt="Status: Alpha" />
-  <img src="https://img.shields.io/badge/license-MPL--2.0-blue" alt="License: MPL-2.0" />
+  <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
 </p>
 
 ---
@@ -304,7 +304,16 @@ cargo clippy --workspace
 
 ## License
 
-HiWave is licensed under the [Mozilla Public License 2.0](LICENSE).
+HiWave is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later). The source code is owned by Aleph Null LLC; HiWave is a subsidiary of Aleph Null LLC. See [NOTICE](NOTICE).
+
+**Earlier versions:** versions of HiWave published before the move to AGPL-3.0-or-later were released under the Mozilla Public License 2.0 and remain available under it.
+
+**Files under MPL-2.0:** these files contain code contributed under MPL-2.0 by an outside contributor (carried over from hiwave-macos) and stay under MPL-2.0 (text in [LICENSES/MPL-2.0.txt](LICENSES/MPL-2.0.txt)); each is marked `SPDX-License-Identifier: MPL-2.0`. MPL-2.0 files may form part of this AGPL-3.0-or-later larger work (MPL-2.0 section 3.3).
+- `crates/hiwave-app/src/main.rs`
+- `crates/hiwave-app/src/ipc/mod.rs`
+- `crates/hiwave-app/src/ipc/commands.rs`
+- `crates/hiwave-app/src/ui/inspector.html`
+- `crates/hiwave-app/src/ui/inspector_inject.js`
 
 ---
 
