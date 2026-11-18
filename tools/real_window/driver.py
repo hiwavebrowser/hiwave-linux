@@ -9,6 +9,12 @@ colours are in the window.
 
     python3 tools/real_window/driver.py --app <path to hiwave> [--out DIR]
                                         [--checks h1,h4] [--list]
+                                        [--record [--record-label NAME]]
+
+--record screen-records the whole run with `screencapture -v` into
+~/Library/Logs/hiwave/recordings/ (outside the checkout), stops it when the
+run ends, fails or is killed, and asserts the .mov plays and is as long as
+the run. It needs the Screen Recording grant; without it, NOT RUN.
 
 Each assertion ends as PASS, FAIL or NOT RUN. NOT RUN names what the seat
 lacks (a grant, or an unlocked screen); it is never counted as a pass.
@@ -35,6 +41,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -50,6 +57,37 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # The RustKit chrome is the app's default on macOS (CH3.A5a); a check that
 # covers the WebKit chrome (the escape hatch) launches with this.
 WEBKIT_CHROME = {"HIWAVE_RUSTKIT_CHROME": "0"}
+
+# --record writes here by default: outside every checkout, so a recording is
+# never committed (the repo is public) and a fresh worktree does not lose it.
+RECORD_DIR = pathlib.Path.home() / "Library" / "Logs" / "hiwave" / "recordings"
+
+
+def record_dir_problem(path):
+    """Why `path` may not hold recordings, or None. Recordings stay outside the checkout."""
+    p = pathlib.Path(path).expanduser().resolve()
+    repo = HERE.parents[1].resolve()
+    if p == repo or repo in p.parents:
+        return "%s is inside the checkout %s; recordings stay outside it" % (p, repo)
+    return None
+
+
+def install_stop_signals():
+    """SIGTERM and SIGHUP end the run the way an exception does, so the
+    `finally` blocks stop the app and finalise a recording. Every run, not
+    only `--record`."""
+    def stop(signum, _frame):
+        raise SystemExit(128 + signum)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
+
+
+def ignore_stop_signals():
+    """A second SIGTERM or SIGHUP during cleanup must not abandon it and
+    leave `screencapture` running."""
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_IGN)
+
 
 RED, GREEN, BLUE = (255, 0, 0), (0, 255, 0), (0, 0, 255)
 MAGENTA, CYAN = (255, 0, 255), (0, 255, 255)
@@ -172,7 +210,12 @@ class App:
         # logs IPC bodies whole, which the checks read (#907 R1 nits 1, 2).
         # A RustKit panel's IPC is never logged whole (#910 R1).
         # A check may turn the hooks off (a6_url_log reads the default log).
-        env = dict(os.environ, HOME=str(self.profile), HIWAVE_TEST_HOOKS="1")
+        # HIWAVE_TEST_SIDEBAR=open: the checks were written against a window
+        # whose sidebar is open (their clicks and crops sit right of its
+        # 220 px: a2, e4's tab, a4/b11's Settings button), so it is pinned
+        # here rather than read from the profile's settings.json. Measuring
+        # launchers (tools/stress/run.py, tools/latency) pass `closed`.
+        env = dict(os.environ, HOME=str(self.profile), HIWAVE_TEST_HOOKS="1", HIWAVE_TEST_SIDEBAR="open")
         env.update(self.env)
         self.log = open(self.log_path, "wb")
         self.proc = subprocess.Popen([str(self.binary)], env=env, stdout=self.log,
@@ -322,6 +365,9 @@ class Driver:
         self.results = []  # (check, assertion, status, detail)
         self.app = None
         self.template = None
+        self.record_dir = pathlib.Path(args.record_dir).expanduser() if getattr(args, "record", False) else None
+        self.record_label = getattr(args, "record_label", None)
+        self.record_max_s = getattr(args, "record_max_s", 7200.0)
 
     def why_not(self, grant):
         reasons = []
@@ -3156,8 +3202,18 @@ class Driver:
                     not switched and 'menu event id="select_tab_2"' not in log and bool(heard),
                     "activate_tab %s, page %s" % (switched or "none", heard or "heard nothing"))
 
+    CHORD_TO_MENU = re.compile(
+        r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z\b[^\n]*Cmd chord went to the menu[^\n]*\bsince_press_ms=(\d+)", re.M)
+    FOCUS_URL_EVENT = re.compile(
+        r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z\b[^\n]*menu event id=\"focus_url\"", re.M)
+
+    @staticmethod
+    def log_epoch(stamp):
+        import datetime
+        return datetime.datetime.fromisoformat(stamp[:26]).replace(tzinfo=datetime.timezone.utc).timestamp()
+
     def m1d_cmd_l_while_loading(self):
-        """Handtest 11-09: Cmd+L, the first press of the app's life, with focus in a page that is still loading (an image the server holds 8 s; then a page whose thread is busy) reaches the menu and focuses the address bar."""
+        """M1e (Handtest 11-09): Cmd+L with focus in a page still loading (an image the server holds 8 s; then a page whose thread is busy) takes the address bar within 250 ms of the press, once; Escape then stops the load."""
         c = "m1d_cmd_l_while_loading"
         env = {"RUST_LOG": "info,rustkit_viewhost=debug"}
         for query, what in (("slowimg", "an image still loading"), ("busy", "the page's thread busy")):
@@ -3170,26 +3226,180 @@ class Driver:
             code, win = self.hw("window", pid)
             # A click into #a: the content view takes the keyboard at once;
             # the page may hear the click only when its thread is free.
-            focus_mark = self.fixture.mark()
             self.hw("click", pid, win["w"] * 0.7, win["h"] * 0.35)
             time.sleep(0.4)
+            # The server holds the image 8 s from its request: still held
+            # with a second to spare. ("Navigation finished" is no guide:
+            # the chrome's own load logs it too.)
+            held = [t for (t, p) in self.fixture.requests[self.since:] if "/slowimg/" in p]
+            age = (time.time() - self.fixture.t0 - held[0]) if held else None
+            loading = age is not None and age < 7.0
+            if query == "slowimg" and not self.expect(c, "%s: the image is still held when Cmd+L is pressed" % what, loading,
+                                                      "requested %s s ago" % (round(age, 1) if age is not None else "never")):
+                self.close_page()
+                continue
             log_from, t = len(self.app.log_text()), time.time()
             self.hw("key", pid, 37, "cmd")
-            took = self.app.wait_log(r'menu event id="focus_url"', 15, log_from)
+            took = self.app.wait_log(r'menu event id="focus_url"', 3, log_from)
             log = self.app.log_text()[log_from:]
-            sent = "Cmd chord to the page first" in log
-            answer = re.search(r"went to the menu[^\n]*", log)
-            loading = len(self.fixture.seen("/slowimg/", self.since)) > 0 and \
-                not re.search(r"Navigation finished", self.app.log_text())
-            focused = self.fixture.seen("beacon?e3-a-focus", focus_mark)
-            self.expect(c, "%s: the first Cmd+L reached the menu" % what, bool(took),
-                        "after %.1f s; to the page first: %s; answer: %s; still loading: %s; page heard the click: %s" % (
-                            time.time() - t, sent, answer.group(0) if answer else "none", loading, bool(focused)))
-            # Not a gate (yet): with the slow image the page's thread is
-            # held by the load and the chord waits for it (reported 11-09,
-            # to be filed). INFO, so the check stays green for M1d.
-            self.note(c, "%s: how long the chord waited for the page" % what, "INFO",
-                      "%.1f s" % (time.time() - t))
+            chord = self.CHORD_TO_MENU.search(log)
+            focus = self.FOCUS_URL_EVENT.search(log)
+            # From the press (the key event's own timestamp, logged by the
+            # view as since_press_ms when the chord went to the menu) to
+            # the menu's focus_url.
+            ms = None
+            if chord and focus:
+                pressed = self.log_epoch(chord.group(1)) - int(chord.group(2)) / 1000.0
+                ms = round((self.log_epoch(focus.group(1)) - pressed) * 1000, 1)
+            self.expect(c, "%s: Cmd+L took the address bar within 250 ms of the press" % what,
+                        bool(took) and ms is not None and ms < 250,
+                        "%s ms from the press (driver wall clock %.0f ms); %s" % (
+                            ms, (time.time() - t) * 1000, chord.group(0)[-160:] if chord else "no chord-to-menu line"))
+            if query == "slowimg":
+                # The address bar has the keyboard: Escape there is the
+                # chrome's stop. The chrome's Escape closes an open sidebar
+                # first (chrome.html's keydown, older than M1e), so a
+                # second Escape is the stop then; the note says which.
+                stop_from = len(self.app.log_text())
+                self.hw("key", pid, 53)
+                stopped = self.app.wait_log(r"Stopping load", 1.5, stop_from)
+                presses = 1
+                if not stopped and re.search(r'"cmd":"set_sidebar_width"', self.app.log_text()[stop_from:]):
+                    self.note(c, "%s: the first Escape closed the sidebar" % what, "INFO")
+                    self.hw("key", pid, 53)
+                    presses = 2
+                    stopped = self.app.wait_log(r"Stopping load", 3, stop_from)
+                time.sleep(0.5)
+                after = self.app.log_text()[stop_from:]
+                self.expect(c, "%s: Escape then stopped the load" % what,
+                            bool(stopped) and "Stop: nothing loading" not in after,
+                            "%d Escape; stop: %s; %s" % (presses, bool(stopped),
+                                                         "nothing loading" if "Stop: nothing loading" in after else "a load was cancelled"))
+            # The page's late answer (its thread freed by the stop or between
+            # busy spells) is dropped: the menu ran once.
+            self.app.wait_log(r"late answer for a Cmd chord dropped", 4, log_from)
+            time.sleep(0.3)
+            log = self.app.log_text()[log_from:]
+            runs = len(re.findall(r'menu event id="focus_url"', log))
+            self.expect(c, "%s: one Cmd+L, one focus_url (the late answer did not run it again)" % what, runs == 1,
+                        "%d focus_url; late answer %s" % (runs, "dropped" if "late answer for a Cmd chord dropped" in log else "not seen"))
+            # Both runs write the check's one log: keep each.
+            (self.out / ("%s.%s.app.log" % (c, query))).write_text(self.app.log_text())
+            self.close_page()
+
+    def m1e_page_keeps_cmd_l(self):
+        """M1e: a page that cancels Cmd+L's keydown in time keeps it, as in Chromium (IDC_FOCUS_LOCATION is not in kReservedCommandIds): the address bar does not take it and the page hears it."""
+        c = "m1e_page_keeps_cmd_l"
+        started = self.e3_start(c, page="m1d_keys.html?preventl")
+        if not started:
+            return
+        pid, w, h = started
+        self.fixture.wait("beacon?m1d-t0-ready", 5, self.since)
+        if not self.e3_focus(c, pid, w, h):
+            return
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.hw("key", pid, 37, "cmd")  # Cmd+L
+        time.sleep(1.5)
+        log = self.app.log_text()[log_from:]
+        heard = self.m1d_beacons(mark, "beacon?m1d-t0-keydown-l")
+        self.expect(c, "Cmd+L in a page that cancels it: no focus_url, the page heard it",
+                    'menu event id="focus_url"' not in log and bool(heard),
+                    "menu %s, page %s" % ("took it" if 'menu event id="focus_url"' in log else "did not take it",
+                                          heard or "heard nothing"))
+
+    def m1f_escape_stops_with_sidebar(self):
+        """M1f: with the sidebar open and a page still loading (an image the server holds 8 s), one Escape in the address bar stops the load and leaves the sidebar open; typed text is reverted first."""
+        c = "m1f_escape_stops_with_sidebar"
+        # The sidebar opened explicitly by the chrome's own toggle once it
+        # boots (#1022 R1 nit 6), not left to the seed profile's default.
+        env = {"HIWAVE_RUSTKIT_CHROME_EVAL": "sidebarOpen = false; sidebar.classList.add('collapsed'); toggleSidebar();"}
+        if not self.open_page(c, "m1d_keys.html?slowimg", env=env):
+            return
+        if not self.can_input:
+            return self.not_run(c, "Escape", self.why_not("Accessibility"))
+        self.fixture.wait("beacon?m1d-t0-ready", 10, self.since)
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        widths = re.findall(r'"cmd":"set_sidebar_width","width":(\d+)', self.app.log_text())
+        self.expect(c, "the sidebar is open (opened by the chrome's toggle)", bool(widths) and int(widths[-1]) > 0,
+                    "last set_sidebar_width: %s" % (widths[-1] if widths else "none"))
+        loading = not re.search(r"Navigation finished[^\n]*m1d_keys", self.app.log_text())
+        # The address bar, right of the sidebar and the nav buttons (as
+        # a2_chrome_typed_url clicks it).
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, int(win["w"] * 0.55), 100)
+        clicked = self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)
+        self.expect(c, "the click reached the address bar", bool(clicked))
+        time.sleep(0.4)
+        # Typed text first: Escape reverts it and does not stop the load.
+        self.hw("type", pid, "zz")
+        time.sleep(0.3)
+        esc_from = len(self.app.log_text())
+        self.hw("key", pid, 53)
+        time.sleep(0.6)
+        after = self.app.log_text()[esc_from:]
+        self.expect(c, "Escape over typed text reverted it: no stop, sidebar untouched",
+                    "Stopping load" not in after and "set_sidebar_width" not in after,
+                    "stop: %s; sidebar posts: %d" % ("Stopping load" in after, after.count("set_sidebar_width")))
+        # Nothing typed now: one Escape stops the load; the sidebar stays.
+        esc_from = len(self.app.log_text())
+        self.hw("key", pid, 53)
+        stopped = self.app.wait_log(r"Stopping load", 1.5, esc_from)
+        time.sleep(0.5)
+        after = self.app.log_text()[esc_from:]
+        self.expect(c, "one Escape stopped the load",
+                    bool(stopped) and "Stop: nothing loading" not in after,
+                    "page was loading at the start: %s; stop: %s; %s" % (
+                        loading, bool(stopped), "nothing loading" if "Stop: nothing loading" in after else "a load was cancelled"))
+        self.expect(c, "the sidebar stayed open", "set_sidebar_width" not in after,
+                    "sidebar posts after Escape: %d" % after.count("set_sidebar_width"))
+        self.close_page()
+
+    def m1g_cmd_l_slow_listener(self):
+        """M1g (#1023 R1 item 5): a page whose Cmd+L keydown listener runs 300 ms, then one whose listener runs 2 s (neither cancels): Cmd+L reaches the address bar once, after the listener; the time from the press is reported."""
+        c = "m1g_cmd_l_slow_listener"
+        env = {"RUST_LOG": "info,rustkit_viewhost=debug"}
+        for ms_listen in (300, 2000):
+            what = "a %d ms listener" % ms_listen
+            if not self.open_page(c, "m1d_keys.html?slowl=%d" % ms_listen, env=env):
+                return
+            if not self.can_input:
+                return self.not_run(c, "Cmd+L", self.why_not("Accessibility"))
+            self.fixture.wait("beacon?m1d-t0-ready", 10, self.since)
+            pid = self.app.proc.pid
+            code, win = self.hw("window", pid)
+            self.hw("click", pid, win["w"] * 0.7, win["h"] * 0.35)
+            time.sleep(0.6)
+            mark = self.fixture.mark()
+            log_from, t = len(self.app.log_text()), time.time()
+            self.hw("key", pid, 37, "cmd")
+            took = self.app.wait_log(r'menu event id="focus_url"', ms_listen / 1000.0 + 5, log_from)
+            wall = (time.time() - t) * 1000
+            time.sleep(0.8)
+            log = self.app.log_text()[log_from:]
+            chord = self.CHORD_TO_MENU.search(log)
+            focus = self.FOCUS_URL_EVENT.search(log)
+            ms = None
+            if chord and focus:
+                pressed = self.log_epoch(chord.group(1)) - int(chord.group(2)) / 1000.0
+                ms = round((self.log_epoch(focus.group(1)) - pressed) * 1000, 1)
+            heard = len(self.fixture.seen("beacon?m1g-slowl-heard", mark)) > 0
+            done = len(self.fixture.seen("beacon?m1g-slowl-done", mark)) > 0
+            why = re.search(r'why="([^"]*)"', chord.group(0)) if chord else None
+            self.expect(c, "%s: the page heard Cmd+L" % what, heard)
+            self.expect(c, "%s: the listener finished" % what, done)
+            self.expect(c, "%s: Cmd+L took the address bar after the listener, from the page's answer" % what,
+                        bool(took) and ms is not None and ms >= ms_listen and why is not None
+                        and why.group(1) == "the page did not claim it",
+                        "%s ms from the press (driver wall clock %.0f ms); why: %s" % (
+                            ms, wall, why.group(1) if why else "no chord-to-menu line"))
+            runs = len(re.findall(r'menu event id="focus_url"', log))
+            self.expect(c, "%s: one focus_url" % what, runs == 1, "%d focus_url" % runs)
+            # The page answered: nothing was given up (#1023 delta HOLD).
+            self.expect(c, "%s: no chord was given up" % what, "never answered" not in log,
+                        "a give-up line appeared" if "never answered" in log else "none")
+            self.note(c, "%s: press to address bar" % what, "INFO", "%s ms" % ms)
+            (self.out / ("%s.%d.app.log" % (c, ms_listen))).write_text(self.app.log_text())
             self.close_page()
 
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
@@ -3205,28 +3415,123 @@ class Driver:
               "b11_settings_save",
               "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url",
               "m1_cmd_w_repeat", "m1_cmd_w_after_clicks", "m1d_tab_shortcuts",
-              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading"]
+              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading", "m1e_page_keeps_cmd_l", "m1f_escape_stops_with_sidebar",
+              "m1g_cmd_l_slow_listener"]
+
+    # ── T26: --record, one screen recording of the whole run ───────────────
+
+    SCREENCAPTURE = "/usr/sbin/screencapture"
+
+    def recording_name(self, names):
+        """<time>-<label>-<check set>.mov: 'all', the checks (up to three), or '<n>checks-<hash>'."""
+        if set(names) == set(self.CHECKS):
+            checks = "all"
+        elif len(names) <= 3:
+            checks = "+".join(names)
+        else:
+            checks = "%dchecks-%s" % (len(names), hashlib.sha256(",".join(names).encode()).hexdigest()[:6])
+        label = re.sub(r"[^A-Za-z0-9._-]+", "-", self.record_label or "").strip("-")[:40]
+        return "-".join(p for p in (time.strftime("%Y%m%d-%H%M%S"), label, checks) if p) + ".mov"
+
+    def start_recording(self, names):
+        c = "record"
+        if not self.can_capture:
+            self.not_run(c, "screen-record the run", self.why_not("Screen Recording"))
+            return None
+        problem = record_dir_problem(self.record_dir)
+        if problem:
+            self.note(c, "screen-record the run", "FAIL", problem)
+            return None
+        self.record_dir.mkdir(parents=True, exist_ok=True)
+        path = self.record_dir / self.recording_name(names)
+        # -v records until a character arrives on stdin (or SIGINT); -C shows
+        # the pointer and -k the clicks; -x no sound.
+        proc = subprocess.Popen([self.SCREENCAPTURE, "-v", "-x", "-C", "-k", str(path)],
+                                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        rec = {"path": path, "proc": proc, "start": time.monotonic(), "lock": threading.Lock()}
+        time.sleep(0.5)
+        if proc.poll() is not None:
+            err = proc.stderr.read().decode(errors="replace").strip()[-200:]
+            self.note(c, "screen-record the run", "FAIL", "screencapture exited at start, rc %s: %s"
+                      % (proc.returncode, err))
+            return None
+        # A wedged run does not record for ever.
+        rec["timer"] = threading.Timer(self.record_max_s, self.end_recording, (rec, "the --record-max-s cap"))
+        rec["timer"].daemon = True
+        rec["timer"].start()
+        print("record   %s" % path, flush=True)
+        return rec
+
+    def end_recording(self, rec, why):
+        """Stop screencapture once (idempotent): the stop character, then SIGINT, then kill."""
+        with rec["lock"]:
+            if "ended" in rec:
+                return
+            rec["ended"], rec["why"] = time.monotonic(), why
+            proc = rec["proc"]
+            try:
+                proc.stdin.write(b"\n")
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+            for step in (lambda: None, lambda: proc.send_signal(signal.SIGINT), proc.kill):
+                try:
+                    step()
+                    proc.wait(timeout=30)
+                    break
+                except (subprocess.TimeoutExpired, OSError):
+                    continue
+            rec["rc"] = proc.returncode
+
+    def stop_recording(self, rec):
+        c = "record"
+        rec["timer"].cancel()
+        self.end_recording(rec, "the run ended")
+        path, ran = rec["path"], rec["ended"] - rec["start"]
+        self.expect(c, "the recording covers the whole run", rec["why"] == "the run ended", rec["why"])
+        self.expect(c, "screencapture stopped cleanly", rec["rc"] == 0, "rc %s" % rec["rc"])
+        if not self.expect(c, "the .mov was written", path.is_file() and path.stat().st_size > 0, str(path)):
+            return {"path": str(path), "run_s": round(ran, 1)}
+        code, movie = self.hw("movie", str(path))
+        self.expect(c, "the .mov plays and has a video track",
+                    bool(movie.get("playable")) and movie.get("video_tracks", 0) >= 1, json.dumps(movie))
+        secs = movie.get("seconds", -1)
+        self.expect(c, "the recording's length matches the run's",
+                    secs >= 0 and abs(secs - ran) <= max(5.0, 0.1 * ran),
+                    "recording %.1f s, run %.1f s" % (secs, ran))
+        print("record   %s (%.1f s)" % (path, secs), flush=True)
+        return {"path": str(path), "run_s": round(ran, 1), "movie": movie, "stopped_by": rec["why"]}
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
         print("app      %s\nsha256   %s\nseat     %s" % (self.binary, sha, json.dumps(self.pre, sort_keys=True)))
-        for name in names:
-            check = getattr(self, name)
-            print("%s: %s" % (name, check.__doc__.strip()), flush=True)
-            try:
-                check()
-            except HidUnsafe as e:
-                self.results.append((name, "HID input", "NOT RUN", "stopped: %s" % e))
-                print("  STOP (HID safety): %s" % e, flush=True)
-                self.close_page()
-                break
-            finally:
-                self.close_page()
+        rec = self.start_recording(names) if getattr(self, "record_dir", None) is not None else None
+        recording = None
+        try:
+            for name in names:
+                check = getattr(self, name)
+                print("%s: %s" % (name, check.__doc__.strip()), flush=True)
+                try:
+                    check()
+                except HidUnsafe as e:
+                    self.results.append((name, "HID input", "NOT RUN", "stopped: %s" % e))
+                    print("  STOP (HID safety): %s" % e, flush=True)
+                    self.close_page()
+                    break
+                finally:
+                    self.close_page()
+        finally:
+            # A second SIGTERM during the 30 s waits below used to raise
+            # again and leave screencapture running.
+            ignore_stop_signals()
+            if rec is not None:
+                recording = self.stop_recording(rec)
         tally = {s: sum(1 for r in self.results if r[2] == s) for s in ("PASS", "FAIL", "NOT RUN")}
         summary = {
             "app": str(self.binary), "sha256": sha, "seat": self.pre, "tally": tally,
             "assertions": [dict(check=r[0], name=r[1], status=r[2], detail=r[3]) for r in self.results],
             "requests": self.fixture.requests,
+            "recording": recording,
         }
         (self.out / "result.json").write_text(json.dumps(summary, indent=1))
         print("PASS %(PASS)d  FAIL %(FAIL)d  NOT RUN %(NOT RUN)d" % tally, "->", self.out / "result.json")
@@ -3240,6 +3545,11 @@ def main():
     ap.add_argument("--checks", default=",".join(Driver.CHECKS))
     ap.add_argument("--hwdrive", help="a prebuilt hwdrive (default: compile hwdrive.swift into --out)")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--record", action="store_true",
+                    help="screen-record the whole run (needs the Screen Recording grant)")
+    ap.add_argument("--record-dir", default=str(RECORD_DIR), help="where --record writes (outside the checkout)")
+    ap.add_argument("--record-label", help="names the recording, e.g. the batch: <time>-<label>-<checks>.mov")
+    ap.add_argument("--record-max-s", type=float, default=7200.0, help="stop recording after this long")
     args = ap.parse_args()
     if args.list:
         for name in Driver.CHECKS:
@@ -3253,10 +3563,15 @@ def main():
     if unknown:
         print("unknown checks: %s" % unknown, file=sys.stderr)
         return 2
+    if args.record and record_dir_problem(args.record_dir):
+        print("--record-dir: %s" % record_dir_problem(args.record_dir), file=sys.stderr)
+        return 2
+    install_stop_signals()
     driver = Driver(args)
     try:
         return driver.run(names)
     finally:
+        ignore_stop_signals()
         driver.close_page()
 
 

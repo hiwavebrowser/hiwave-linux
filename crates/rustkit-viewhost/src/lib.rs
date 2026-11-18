@@ -21,6 +21,7 @@
 // Platform-specific modules
 pub mod linux;
 
+pub mod chord_wait;
 pub mod input_queue;
 pub mod x11_input;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -37,11 +38,34 @@ pub use cursor::x11_cursor_shape;
 mod traits;
 pub use traits::{ViewHostTrait, WindowHandle};
 
+#[cfg(target_os = "macos")]
+pub use macos::MacOSViewHost;
+#[cfg(target_os = "macos")]
+pub use macos::{
+    begin_key_equivalent, claim_key_equivalent, drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, finish_key_equivalent, is_reserved_chord,
+    set_view_cursor,
+    set_view_tooltip,
+};
+/// No view holds Cmd chords for a menu here: a chord's default is the
+/// page's (see the macOS `claim_key_equivalent`).
+#[cfg(not(target_os = "macos"))]
+pub fn claim_key_equivalent(_token: u64) -> bool {
+    true
+}
+/// No view holds Cmd chords for a menu here: the page hears every chord
+/// (see the macOS `begin_key_equivalent`).
+#[cfg(not(target_os = "macos"))]
+pub fn begin_key_equivalent(_token: u64) -> bool {
+    true
+}
+#[cfg(target_os = "macos")]
+pub use macos::{raise_raw_view_above, raise_raw_view_to_front, set_raw_view_region, set_raw_view_transparent};
 pub use input_queue::{
     drain_input, drain_input_view, instant_of_native_event, retire_view_input, set_text_input_state,
     text_input_state, EditAction,
     ImeInput, InputEvent, InputKind, PendingClick, PendingKey, PendingScroll, PointerInput, TextInputMirror,
 };
+pub use chord_wait::CHORD_ANSWER_TIMEOUT;
 pub use region::{compose_region, region_contains, FrameRegion, RegionRect};
 
 // Screenshot capture
@@ -54,7 +78,7 @@ use tracing::{debug, error, info, trace};
 
 #[cfg(windows)]
 use rustkit_core::{
-    FocusEvent, FocusEventType, InputEvent, KeyCode, KeyEvent, KeyEventType, KeyboardState,
+    FocusEvent, FocusEventType, InputEvent as CoreInputEvent, KeyCode, KeyEvent, KeyEventType, KeyboardState,
     Modifiers, MouseButton, MouseEvent, MouseEventType, MouseState, Point,
 };
 
@@ -183,7 +207,7 @@ pub enum ViewEvent {
     Destroyed { view_id: ViewId },
     /// Input event from the view (Windows only).
     #[cfg(windows)]
-    Input { view_id: ViewId, event: InputEvent },
+    Input { view_id: ViewId, event: CoreInputEvent },
 }
 
 /// Callback for view events.
@@ -1291,7 +1315,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1335,7 +1359,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1364,7 +1388,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1397,7 +1421,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1415,7 +1439,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1438,7 +1462,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Key(event),
+                        event: CoreInputEvent::Key(event),
                     });
                 }
             }
@@ -1459,7 +1483,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Key(event),
+                        event: CoreInputEvent::Key(event),
                     });
                 }
             }
@@ -1477,7 +1501,7 @@ impl ViewHost {
 
                         emit(ViewEvent::Input {
                             view_id,
-                            event: InputEvent::Key(event),
+                            event: CoreInputEvent::Key(event),
                         });
                     }
                 }
@@ -1497,7 +1521,7 @@ impl ViewHost {
                     emit(ViewEvent::Focused { view_id });
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Focus(event),
+                        event: CoreInputEvent::Focus(event),
                     });
                 }
             }
@@ -1515,7 +1539,7 @@ impl ViewHost {
                     emit(ViewEvent::Blurred { view_id });
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Focus(event),
+                        event: CoreInputEvent::Focus(event),
                     });
                 }
             }

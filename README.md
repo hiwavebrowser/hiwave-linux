@@ -306,6 +306,12 @@ cargo clippy --workspace
 
 HiWave is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later). The source code is owned by Aleph Null LLC; HiWave is a subsidiary of Aleph Null LLC. See [NOTICE](NOTICE).
 
+This means:
+- ✅ Free to use, modify, and distribute
+- ✅ Source code is open
+- ⚠️ If you distribute HiWave, or a modified version, you must make the complete corresponding source available under AGPL-3.0-or-later
+- ⚠️ If you run a modified version for users over a network, you must offer them its source (AGPL section 13)
+
 This covers the RustKit engine (`crates/rustkit-*`) as well as the app.
 
 **Earlier versions:** versions of HiWave published before the move to AGPL-3.0-or-later were released under the Mozilla Public License 2.0 and remain available under it; in those versions the RustKit engine crates declared the MIT licence and remain available under MIT.
@@ -314,12 +320,17 @@ This covers the RustKit engine (`crates/rustkit-*`) as well as the app.
 - `crates/hiwave-app/src/main.rs`
 - `crates/hiwave-app/src/ipc/mod.rs`
 - `crates/hiwave-app/src/ipc/commands.rs`
+- `crates/hiwave-app/src/ui/context_menu.js`
 - `crates/hiwave-app/src/ui/inspector.html`
 - `crates/hiwave-app/src/ui/inspector_inject.js`
 - `crates/rustkit-text/src/lib.rs`
 - `crates/rustkit-text/src/linux.rs`
 
-**Kept on their upstream licence:** the CLDR `en` patterns in `crates/rustkit-bindings/src/web_intl.js` (Unicode License v3) and the Ahem test font in `crates/rustkit-text/tests/fixtures/` (web-platform-tests, tests only). See NOTICE.
+**Kept on their upstream licence:** the Unicode CLDR data in `crates/rustkit-bindings/src/likely_subtags.txt` and the CLDR tables in `crates/rustkit-bindings/src/web_intl.js` (Unicode License v3), and the Ahem test font in `crates/rustkit-text/tests/fixtures/` (web-platform-tests, tests only). See NOTICE and THIRD_PARTY_NOTICES.md.
+
+For commercial licensing options, see COMMERCIAL-LICENSE.md.
+
+**Third-party notices:** the app also contains third-party works (Rust crates, the vendored Boa engine, Chart.js, Unicode CLDR data) under their own licences. Their copyright notices and licence texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 

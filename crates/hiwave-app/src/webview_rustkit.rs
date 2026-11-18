@@ -82,8 +82,11 @@ pub struct RustKitView {
     /// Navigation the window has asked for. Older events are dropped.
     accepted_nav: Cell<u64>,
     /// A navigation the page decided on, harvested from events:
-    /// url, replace, and whether the user activated it.
-    script_nav: RefCell<Option<(String, bool, bool)>>,
+    /// url, replace, whether the user activated it, and the document's
+    /// navigation id. `take_script_navigation` drops a copy whose id is
+    /// older than [`Self::accepted_nav`]: harvest pulls the event out of
+    /// the queue, so [`stale`] never sees it again.
+    script_nav: RefCell<Option<(String, bool, bool, u64)>>,
     /// Newest commit whose navigation is still the one on screen.
     latest_commit: RefCell<Option<FrameCommit>>,
     /// The view's region when it is stacked over another view (CH3.A3b,
@@ -109,7 +112,7 @@ pub struct RustKitView {
     app_owned: Cell<bool>,
     /// Current zoom level.
     zoom_level: RefCell<f64>,
-    /// Visibility state.
+    /// What the page was last told about being shown ([`Self::set_page_visible`]).
     visible: RefCell<bool>,
     /// Loading state.
     loading: RefCell<bool>,
@@ -220,8 +223,45 @@ const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
 /// remove it: the script still runs on the window's thread.
 const LIVE_TURN_BUDGET_MS: u64 = 5_000;
 
+/// The stress harness's variable for a longer budget (tools/stress/run.py,
+/// which starts the app with it for a suite run and records it in the run's
+/// `engine_flags`). Chrome has no such stop, and a benchmark's long
+/// end-of-test computation dies at 5 s; a run that wants to see what comes
+/// after it raises the budget, and its score says so.
+///
+/// It is honoured only together with the console log switch
+/// ([`STRESS_MARKER_ENV`], which the harness always starts the app with and
+/// a normal launch does not have), and only as a whole number of
+/// milliseconds from 1 to five minutes. Otherwise the budget is
+/// [`LIVE_TURN_BUDGET_MS`]: one stray variable changes nothing, and an app
+/// started normally is unchanged.
+const STRESS_TURN_BUDGET_ENV: &str = "HIWAVE_STRESS_TURN_BUDGET_MS";
+const STRESS_TURN_BUDGET_MAX_MS: u64 = 300_000;
+/// The harness's own marker on every app it starts: the console and
+/// request log it reads the run from (`NET_LOG_ENV` in run.py).
+const STRESS_MARKER_ENV: &str = "HIWAVE_CONSOLE_LOG";
+
+/// The live turn's budget: `raw` is the budget variable's value and
+/// `marker` the console log switch's, each if set.
+fn live_turn_budget_ms(raw: Option<&str>, marker: Option<&str>) -> u64 {
+    if !marker.is_some_and(|marker| !marker.is_empty() && marker != "0") {
+        return LIVE_TURN_BUDGET_MS;
+    }
+    raw.filter(|raw| !raw.is_empty() && raw.len() <= 8 && raw.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ms| (1..=STRESS_TURN_BUDGET_MAX_MS).contains(ms))
+        .unwrap_or(LIVE_TURN_BUDGET_MS)
+}
+
 /// The engine builder for content views, before the shield is attached.
 fn content_engine_builder() -> EngineBuilder {
+    let turn_budget = live_turn_budget_ms(
+        std::env::var(STRESS_TURN_BUDGET_ENV).ok().as_deref(),
+        std::env::var(STRESS_MARKER_ENV).ok().as_deref(),
+    );
+    if turn_budget != LIVE_TURN_BUDGET_MS {
+        warn!(budget_ms = turn_budget, default_ms = LIVE_TURN_BUDGET_MS, "Live turn budget raised for a stress run");
+    }
     // Browser-plausible UA. "HiWave/1.0 RustKit/1.0" alone got us
     // instantly rate-limited as a scraper even by Wikimedia (HTTP 429 on
     // every thumbnail, 2026-08-05 live session) — servers gate on the
@@ -236,7 +276,7 @@ fn content_engine_builder() -> EngineBuilder {
         // the window's thread, and ebay.com's module graph held it for
         // minutes (Pete had to kill the app, 2026-10-08).
         .interrupt_scripts_at_budget(true)
-        .live_turn_budget_ms(LIVE_TURN_BUDGET_MS)
+        .live_turn_budget_ms(turn_budget)
         // The event loop loads what a page's script asks for
         // (`take_script_navigation`), so a page that has asked to leave is
         // not kept waiting for images its scripts added.
@@ -831,6 +871,28 @@ impl RustKitView {
         }
     }
 
+    /// Tell the page whether it is shown (`PageCmd::SetVisible`): false while the window is
+    /// minimised or hidden, true when it shows again. The page starts out shown, and the command
+    /// goes only when the answer changes. Returns whether it went.
+    pub fn set_page_visible(&self, visible: bool) -> bool {
+        if *self.visible.borrow() == visible || !self.is_open() {
+            return false;
+        }
+        *self.visible.borrow_mut() = visible;
+        if let Some(thread) = &self.content {
+            thread.enqueue(PageCmd::SetVisible { visible });
+        } else {
+            self.submit(PageCmd::SetVisible { visible });
+        }
+        true
+    }
+
+    /// What [`Self::set_page_visible`] last told the page (true until it is called). Tests only.
+    #[cfg(test)]
+    pub fn page_visible(&self) -> bool {
+        *self.visible.borrow()
+    }
+
     /// Whether [`Self::set_app_owned`] made this an app-owned view.
     pub fn is_app_owned(&self) -> bool {
         self.app_owned.get()
@@ -857,9 +919,15 @@ impl RustKitView {
     pub fn take_script_navigation(&self) -> Option<(String, bool)> {
         if self.content.is_some() {
             self.harvest();
-            let taken = self.script_nav.borrow_mut().take()?;
-            self.replace_next.set(taken.1);
-            return Some((taken.0, taken.2));
+            let (url, replace, from_user, nav_id) = self.script_nav.borrow_mut().take()?;
+            // The event loop harvests before it takes (`process_events`,
+            // `render`). A URL-bar load or New Tab can start in between and
+            // only then is this copy older than the navigation on screen.
+            if stale_nav(self.accepted_nav.get(), nav_id) {
+                return None;
+            }
+            self.replace_next.set(replace);
+            return Some((url, from_user));
         }
         let (url, replace) =
             self.ask(|reply| PageCmd::Input(PageInput::TakeNavigation { reply }))??;
@@ -1005,9 +1073,12 @@ impl RustKitView {
 
     /// A wheel over a point of the content view: the box under it may take it.
     /// Like `scroll_by` on the page thread: true, and the commit shows it.
-    pub fn scroll_at(&self, x: f32, y: f32, delta_x: f32, delta_y: f32) -> bool {
+    /// `gesture`: a step of a gesture (a trackpad's scroll), which stays on
+    /// what the gesture began on; a wheel on its own does not. `began`: the
+    /// platform says a gesture begins here (a new scroll sequence).
+    pub fn scroll_at(&self, x: f32, y: f32, delta_x: f32, delta_y: f32, gesture: bool, began: bool) -> bool {
         if self.content.is_some() {
-            self.submit(PageCmd::Input(PageInput::ScrollAt { x, y, dx: delta_x, dy: delta_y }));
+            self.submit(PageCmd::Input(PageInput::ScrollAt { x, y, dx: delta_x, dy: delta_y, gesture, began }));
             return true;
         }
         self.scroll_by(delta_x, delta_y)
@@ -1020,7 +1091,10 @@ impl RustKitView {
             let _rx = thread.load_html(html);
             // Events the old page sent before this (a script navigation just
             // before New Tab) are stale from here, as after `navigate`.
+            // Drop one harvest already copied out of the queue; `stale`
+            // only filters what is still queued.
             self.accepted_nav.set(thread.last_nav_id());
+            let _ = self.script_nav.borrow_mut().take();
             // The new document has nothing focused until it says otherwise.
             self.page_focused.set(false);
             self.page_text_focused.set(false);
@@ -1180,6 +1254,9 @@ impl RustKitView {
             // Signal cancel and the interrupt before the command is queued.
             let nav_id = thread.navigate(parsed);
             self.accepted_nav.set(nav_id);
+            // Same as New Tab: a script navigation already harvested from
+            // the page being replaced must not be taken on the next turn.
+            let _ = self.script_nav.borrow_mut().take();
             self.page_focused.set(false);
             self.page_text_focused.set(false);
             *self.loading.borrow_mut() = true;
@@ -1488,9 +1565,9 @@ impl RustKitView {
                     url,
                     replace,
                     from_user,
-                    ..
+                    nav_id,
                 } => {
-                    *self.script_nav.borrow_mut() = Some((url, replace, from_user));
+                    *self.script_nav.borrow_mut() = Some((url, replace, from_user, nav_id));
                 }
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
                 PageEvent::TextFocused(text) => self.page_text_focused.set(text),
@@ -1724,6 +1801,12 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         | PageEvent::Unresponsive
         | PageEvent::Closed => 0,
     };
+    stale_nav(accepted, nav_id)
+}
+
+/// A navigation id of 0 is not tied to a document (focus, cursor). Any
+/// other id older than the one the window has accepted is a late result.
+fn stale_nav(accepted: u64, nav_id: u64) -> bool {
     nav_id != 0 && nav_id < accepted
 }
 
@@ -1834,6 +1917,26 @@ mod tests {
         assert_eq!(rustkit_engine::EngineConfig::default().script_budget_ms, 5_000);
     }
 
+    /// The stress harness's variable raises the budget only beside the harness's marker (the
+    /// console log switch), and only up to five minutes; anything else leaves 5 s.
+    #[test]
+    fn the_live_turn_budget_is_five_seconds_unless_a_stress_run_set_it() {
+        assert_eq!(live_turn_budget_ms(None, None), 5_000);
+        assert_eq!(live_turn_budget_ms(None, Some("1")), 5_000);
+        // The variable alone, as a stray one in a user's environment would be: unchanged.
+        for marker in [None, Some(""), Some("0")] {
+            assert_eq!(live_turn_budget_ms(Some("60000"), marker), 5_000, "{marker:?}");
+        }
+        // With the marker: raised.
+        assert_eq!(live_turn_budget_ms(Some("60000"), Some("1")), 60_000);
+        assert_eq!(live_turn_budget_ms(Some("60000"), Some("/tmp/console.jsonl")), 60_000);
+        assert_eq!(live_turn_budget_ms(Some("1"), Some("1")), 1);
+        assert_eq!(live_turn_budget_ms(Some("300000"), Some("1")), 300_000);
+        for unchanged in ["", "0", "300001", "3600000", "-5", "60s", " 60000", "6e4", "999999999"] {
+            assert_eq!(live_turn_budget_ms(Some(unchanged), Some("1")), 5_000, "{unchanged:?}");
+        }
+    }
+
     #[test]
     fn content_views_get_a_budget_for_script_after_the_load() {
         let _turn = crate::engine_test_turn();
@@ -1888,6 +1991,21 @@ mod tests {
 
     fn view() -> RustKitView {
         RustKitView::headless(Bounds::new(0, 0, 400, 300))
+    }
+
+    /// The page is told when it stops being shown and when it shows again, once per change, on
+    /// both kinds of view (the page thread and the flag-off inline page), and it keeps running.
+    #[test]
+    fn the_page_is_told_when_it_is_hidden_and_shown_once_per_change() {
+        for (kind, view) in [("inline", view()), ("content thread", RustKitView::headless_content(Bounds::new(0, 0, 400, 300)))] {
+            assert!(view.page_visible(), "{kind}: a page starts out shown");
+            assert!(!view.set_page_visible(true), "{kind}: shown again is no change");
+            assert!(view.set_page_visible(false), "{kind}: hiding is sent");
+            assert!(!view.page_visible(), "{kind}");
+            assert!(!view.set_page_visible(false), "{kind}: hidden twice is sent once");
+            assert!(view.set_page_visible(true), "{kind}: showing is sent");
+            assert!(view.page_visible(), "{kind}");
+        }
     }
 
     /// #739 / Pete's item 4: the window took no click while a page loaded,
@@ -2186,6 +2304,8 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// The event loop asks for a turn twice per wake (before and after the
     /// input it drains), so a page whose interval spins ran two turns back
     /// to back and the window took no event between them.
+    /// The 200 ms hold spins in `spin()` calls: Boa's loop limit (row JS1) counts per call frame, so a bare loop's length depended on Boa's speed.
+    /// The hold is `< 202`: Date.now() has 1 ms granularity, so the hold needs a margin above the 200 ms bound.
     #[test]
     fn a_slow_live_turn_is_not_followed_at_once_by_another() {
         let _turn = crate::engine_test_turn();
@@ -2194,7 +2314,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         view.wry_load_url(&url).unwrap();
         while view.step_load() {}
         view.execute_script_sync(
-            "window.n = 0; setInterval(function () { window.n++; var t = Date.now(); while (Date.now() - t < 200) {} }, 100);",
+            "function spin(){var x=0;for(var i=0;i<20000;i++){x+=i;}return x;} window.n = 0; setInterval(function () { window.n++; var t = Date.now(); while (Date.now() - t < 202) { spin(); } }, 100);",
         );
         std::thread::sleep(Duration::from_millis(105));
         let first = Instant::now();
@@ -2218,6 +2338,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// #727 Atlas hold, item 3: a click that comes after a live turn the
     /// watchdog stopped (cnn's Agree landed in a 5.03 s turn) reaches its
     /// listener.
+    /// The spin calls `spin()`: Boa's loop limit (row JS1) counts per call frame, so the turn budget, not the iteration cap, stops it.
     #[test]
     fn a_click_after_a_stopped_live_turn_reaches_its_listener() {
         let _turn = crate::engine_test_turn();
@@ -2229,8 +2350,8 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         view.wry_load_url(&url).unwrap();
         while view.step_load() {}
         view.execute_script_sync(
-            "window.clicks = 0; document.addEventListener('click', function () { window.clicks++; });\
-             setTimeout(function () { while (true) {} }, 1);",
+            "function spin(){var x=0;for(var i=0;i<20000;i++){x+=i;}return x;} window.clicks = 0; document.addEventListener('click', function () { window.clicks++; });\
+             setTimeout(function () { while (true) { spin(); } }, 1);",
         );
         std::thread::sleep(Duration::from_millis(5));
         let turn = Instant::now();
@@ -2605,10 +2726,11 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// M4 acceptance: with a page script spinning, a click is taken by the
     /// window within 100 ms, and the page hears it once the spin is
     /// stopped: queued, never dropped.
+    /// The spin calls `spin()`: Boa's loop limit (row JS1) counts per call frame, so the turn budget, not the iteration cap, stops it.
     fn a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped(view: RustKitView) {
         let (base, _log) = logging_server(SPIN_PAGE);
         load_and_settle(&view, &base);
-        let _ = read(&view, "setTimeout(function () { while (true) {} }, 30); 'armed'");
+        let _ = read(&view, "function spin(){var x=0;for(var i=0;i<20000;i++){x+=i;}return x;} setTimeout(function () { while (true) { spin(); } }, 30); 'armed'");
         let at = Instant::now() + Duration::from_millis(250);
         let late = wake_until(&view, at);
         view.mouse_down_at_point(10.0, 10.0);
@@ -2765,6 +2887,74 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// `MainEventsCleared` harvests in `process_events` and `render`, then
+    /// takes on the next wake. A URL-bar load or New Tab in that gap used
+    /// to leave the copy in `script_nav`, and the next take followed the
+    /// page the user had just left.
+    fn harvest_script_navigation(view: &RustKitView, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            view.process_events();
+            let buffered = view.script_nav.borrow().clone();
+            if let Some((url, _, _, _)) = buffered.as_ref() {
+                assert!(url.contains(needle), "harvested {url}, wanted {needle}");
+                return;
+            }
+            assert!(Instant::now() < deadline, "the page never asked to navigate");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn content_thread_a_harvested_script_navigation_is_taken_while_that_page_is_current() {
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p>old</p></body>");
+        load_and_settle(&view, &base);
+        let _ = read(&view, &format!("location.href = '{base}elsewhere'; 'sent'"));
+        harvest_script_navigation(&view, "elsewhere");
+        let taken = view.take_script_navigation();
+        assert!(
+            taken.as_ref().is_some_and(|(url, from_user)| url.contains("elsewhere") && !*from_user),
+            "the page's own navigation was dropped: {taken:?}"
+        );
+    }
+
+    #[test]
+    fn content_thread_a_harvested_script_navigation_does_not_override_new_tab() {
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p>old</p></body>");
+        load_and_settle(&view, &base);
+        let _ = read(&view, &format!("location.href = '{base}elsewhere'; 'sent'"));
+        harvest_script_navigation(&view, "elsewhere");
+        view.load_html_internal("<body><p>new tab</p></body>").unwrap();
+        assert!(
+            view.take_script_navigation().is_none(),
+            "a script navigation harvested before New Tab pulled the new tab away"
+        );
+    }
+
+    #[test]
+    fn content_thread_a_harvested_script_navigation_does_not_override_a_url_bar_load() {
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p>old</p></body>");
+        load_and_settle(&view, &base);
+        let _ = read(&view, &format!("location.href = '{base}elsewhere'; 'sent'"));
+        harvest_script_navigation(&view, "elsewhere");
+        view.load_url_blocking(&format!("{base}typed"));
+        let taken = view.take_script_navigation();
+        assert!(
+            taken.is_none(),
+            "a script navigation harvested before the URL bar overrode it: {taken:?}"
+        );
+    }
+
+    #[test]
+    fn a_buffered_navigation_is_stale_once_a_newer_id_is_accepted() {
+        assert!(!stale_nav(4, 4), "the document on screen is still current");
+        assert!(!stale_nav(4, 0), "an id of 0 is not a document");
+        assert!(stale_nav(4, 3), "an older document's request is stale");
     }
 
     fn content_view() -> RustKitView {
@@ -2951,16 +3141,17 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
         assert_eq!(read(&view, "String(typeof window.spun)"), r#"String("number")"#);
     }
 
-    /// Stage 1: a bare `while (true) {}`. In the app it never reaches the
-    /// 15 s budget: the loop-iteration limit (10M back-edges) ends it first,
-    /// and until H19 nothing in the log said so (the load just took longer).
+    /// Stage 1: a bare `while (true) {}`. The 10M loop-iteration count that
+    /// used to end it first is gone (JS1: the limit is now a 1G backstop), so
+    /// the load-script budget (about 15 s) ends it, and the log says so
+    /// (until H19 nothing in the log said why the load just took longer).
     #[test]
     fn content_thread_a_bare_while_true_in_a_load_script_is_stopped_and_the_log_says_why() {
         let (view, took, log) = load_spin(PURE_SPIN_PAGE);
         assert!(took < Duration::from_secs(25), "the load took {took:?}");
         let why: Vec<&str> = log
             .lines()
-            .filter(|line| line.contains("Script stopped at the loop-iteration limit"))
+            .filter(|line| line.contains("Script stopped at the script budget"))
             .collect();
         assert_eq!(why.len(), 1, "no line says why the script ended:\n{log}");
         assert!(why[0].contains("source=inline#1"), "{}", why[0]);
