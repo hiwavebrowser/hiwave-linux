@@ -5,8 +5,8 @@
   python3 scripts/third_party_notices.py --check    # exit 1 if the file is out of date
   (add --offline to pass --offline to cargo)
 
-The crate list is `cargo tree -p hiwave-app -e normal` (default features) for both macOS
-targets, HiWave's own crates left out. Licence expressions and repository URLs are each
+The crate list is `cargo tree -p hiwave-app -e normal` (default features) for the Linux
+target, HiWave's own crates left out. Licence expressions and repository URLs are each
 crate's `Cargo.toml` fields. Copyright lines and licence texts are read from the crates'
 published sources, which `cargo fetch` puts under ~/.cargo/registry. Texts that no crate in
 the tree carries are in scripts/third_party_notices_data/.
@@ -27,7 +27,8 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DATA = pathlib.Path(__file__).resolve().parent / "third_party_notices_data"
 OUT = REPO / "THIRD_PARTY_NOTICES.md"
-TARGETS = ("aarch64-apple-darwin", "x86_64-apple-darwin")
+# Linux: the binary hiwave-linux ships (upstream lists its two macOS targets).
+TARGETS = ("x86_64-unknown-linux-gnu",)
 OFFLINE = ["--offline"] if "--offline" in sys.argv else []
 
 # Where a crate offers a choice (`A OR B`), the first of these it offers is used.
@@ -55,6 +56,12 @@ NESTED = {
     ("tracing-core", "src/spin/LICENSE"): ("carry", "tracing-core's copy of the spin crate's `Once`."),
     ("security-framework", "THIRD_PARTY"): ("carry", "Covers documentation comments adapted from Apple's Security framework headers, under the Apple Public Source License 2.0. Documentation only: no Apple code is compiled into the binary."),
     ("libsqlite3-sys", "sqlcipher/LICENSE"): ("skip", "SQLCipher is built only with the `sqlcipher` features, which HiWave does not enable"),
+    # Linux-only crates (the hiwave-linux binary):
+    ("freetype-rs", "examples/assets/LICENSE"): ("skip", "fonts used by the crate's examples, which are not compiled into the binary"),
+    ("freetype-sys", "freetype2/LICENSE.TXT"): ("carry", "FreeType's own licence for its bundled source, which freetype-sys builds when no system FreeType is found; the FreeType License asks for credit."),
+    ("petgraph", "assets/images/LICENSE.md"): ("skip", "a documentation image, not compiled into the binary"),
+    ("rustybuzz", "scripts/ms-use/COPYING"): ("carry", "Microsoft's Universal Shaping Engine data, from which rustybuzz's compiled-in USE tables are generated."),
+    ("wayland-protocols", "protocols/COPYING"): ("carry", "the Wayland protocol definitions, compiled into the crate's generated code."),
 }
 NESTED_NAME = re.compile(r"^(licen[sc]e|copying|notice|third[_-]?party|patents)", re.I)
 SOURCE_EXT = {".rs", ".c", ".h", ".cc", ".cpp", ".py", ".js", ".go", ".S", ".s", ".pl", ".toml", ".json", ".html"}
@@ -303,7 +310,8 @@ UNI_CR = re.search(r"^Copyright © .*Unicode, Inc\.$", UNI_PARTS[0], re.M).group
 UNI = UNI_PARTS[0].replace(
     UNI_CR, "[the copyright line of each component: the crate list above, and section 2 for the CLDR data]")
 ICU_TRAILER = UNI_PARTS[1].strip()
-CDLA = read(crate_dir("webpki-roots") / "LICENSE")
+# Linux: webpki-roots is not in the Linux binary, and no other crate there is CDLA-licensed.
+CDLA = read(crate_dir("webpki-roots") / "LICENSE") if any(n == "webpki-roots" for (n, _) in rows) else ""
 CC0 = read(DATA / "CC0-1.0.txt")
 V8_BSD = read(DATA / "v8-LICENSE.v8")
 PSF = read(DATA / "v8-third_party-builtins-LICENSE")
@@ -341,7 +349,7 @@ w("require to travel with the binary. It must ship with every build that users")
 w("download.")
 w("")
 w("It describes one build: `cargo build -p hiwave-app` with default features, for")
-w("`aarch64-apple-darwin` and `x86_64-apple-darwin`. How it is regenerated and")
+w("`x86_64-unknown-linux-gnu`. How it is regenerated and")
 w("checked is in section 7 and in `docs/GATES.md`.")
 w("")
 w("## Contents")
@@ -357,8 +365,16 @@ w("")
 w("No component of the shipped binary is under a GPL, LGPL, AGPL or SSPL licence,")
 w("and none is without a licence. Licences here that are not simple permissive ones:")
 w("MPL-2.0 (section 1), the Python Software Foundation licence stack on code")
-w("ported from V8 (section 3), and the Apple Public Source License 2.0 on")
-w("documentation comments in one crate (security-framework, section 5).")
+if any(n == "security-framework" for (n, _) in rows):
+    w("ported from V8 (section 3), and the Apple Public Source License 2.0 on")
+    w("documentation comments in one crate (security-framework, section 5).")
+else:
+    w("ported from V8 (section 3).")
+w("")
+# Linux: the system libraries the binary loads at run time.
+w("On Linux the binary also loads the system's GTK 3, WebKitGTK and their")
+w("dependencies (LGPL-2.1-or-later and others) as shared libraries. The")
+w("operating system's packages install them; HiWave does not ship them.")
 w("")
 w("## 1. Licences with source or file-level obligations")
 w("")
@@ -527,7 +543,7 @@ w("")
 w("## 4. Rust crates in the dependency closure of the `hiwave` binary")
 w("")
 w("Every crate `cargo tree -p hiwave-app -e normal` reports for")
-w("`aarch64-apple-darwin` and `x86_64-apple-darwin`, HiWave's own crates left out.")
+w("`x86_64-unknown-linux-gnu`, HiWave's own crates left out.")
 w(f"{total - n_proc} of them are compiled and linked into the binary. The other {n_proc} are")
 w("procedural macros (marked in their entries): they run at build time and are")
 w("not linked, but the code they generate is, so they are listed too.")
@@ -572,7 +588,8 @@ w("- **dpi**: Apache-2.0 for the crate (text in section 4) and MIT for the code 
 w("  takes from libm; its `LICENSE-LIBM-MIT` follows in full.")
 w("- **unicode-ident**: used under MIT for its code and Unicode-3.0 for the Unicode")
 w("  Character Database tables it embeds; both texts are in section 4.")
-w("- **aws-lc-rs**, **aws-lc-sys** and **ring**: their licence files follow in full,")
+_full_named = [f"**{n}**" for n in ("aws-lc-rs", "aws-lc-sys", "ring") if any(m == n for (m, _) in rows)]
+w(f"- {', '.join(_full_named[:-1])} and {_full_named[-1]}: their licence files follow in full,")
 w("  because they attribute individual parts (AWS-LC, BoringSSL, OpenSSL, SSLeay,")
 w("  fiat-crypto and others) that a summary would lose.")
 w("")
@@ -589,6 +606,8 @@ w("- **V8's licences**, for the code ported into the vendored Boa (section 3).")
 w("")
 blocks = []
 for name, files in FULL.items():
+    if not any(n == name for (n, _) in rows):  # Linux: e.g. ring is not in the Linux binary
+        continue
     for f in files:
         blocks.append((name, version_of(name), f, ""))
 blocks += carried
@@ -653,15 +672,15 @@ w("python3 scripts/third_party_notices.py")
 w("python3 scripts/third_party_notices.py --check")
 w("```")
 w("")
-w("The crate list is the output of this, for both targets, with the lines whose")
+w("The crate list is the output of this, for that target, with the lines whose")
 w("path is under `crates/` (HiWave's own) removed:")
 w("")
 w("```bash")
 w("cargo tree -p hiwave-app -e normal --prefix none --format '{p}|{l}|{r}' --target <target> --locked")
 w("```")
 w("")
-w("It is valid for `-p hiwave-app` with default features on the two macOS")
-w("targets. `-e normal` leaves out build- and dev-dependencies, which are not")
+w("It is valid for `-p hiwave-app` with default features on that Linux")
+w("target. `-e normal` leaves out build- and dev-dependencies, which are not")
 w("linked. A build with other features, of another package, or of the whole")
 w("workspace at once (which unifies features across members) can link more.")
 w("")

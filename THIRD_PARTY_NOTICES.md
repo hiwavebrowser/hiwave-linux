@@ -10,7 +10,7 @@ require to travel with the binary. It must ship with every build that users
 download.
 
 It describes one build: `cargo build -p hiwave-app` with default features, for
-`aarch64-apple-darwin` and `x86_64-apple-darwin`. How it is regenerated and
+`x86_64-unknown-linux-gnu`. How it is regenerated and
 checked is in section 7 and in `docs/GATES.md`.
 
 ## Contents
@@ -18,7 +18,7 @@ checked is in section 7 and in `docs/GATES.md`.
 1. Licences with source or file-level obligations (MPL-2.0)
 2. Works that are not Cargo crates (Chart.js, Unicode CLDR data, SQLite, the Rust standard library)
 3. Vendored and modified source (`third_party/`: Boa, with code ported from V8 and atoi_simd)
-4. Rust crates in the dependency closure of the `hiwave` binary (385 crates), by licence, with each licence text once
+4. Rust crates in the dependency closure of the `hiwave` binary (465 crates), by licence, with each licence text once
 5. Crates under more than one licence at once, and licence files reproduced in full
 6. What is in the repository but does not ship
 7. How this file was made, and what was not verified
@@ -26,14 +26,17 @@ checked is in section 7 and in `docs/GATES.md`.
 No component of the shipped binary is under a GPL, LGPL, AGPL or SSPL licence,
 and none is without a licence. Licences here that are not simple permissive ones:
 MPL-2.0 (section 1), the Python Software Foundation licence stack on code
-ported from V8 (section 3), and the Apple Public Source License 2.0 on
-documentation comments in one crate (security-framework, section 5).
+ported from V8 (section 3).
+
+On Linux the binary also loads the system's GTK 3, WebKitGTK and their
+dependencies (LGPL-2.1-or-later and others) as shared libraries. The
+operating system's packages install them; HiWave does not ship them.
 
 ## 1. Licences with source or file-level obligations
 
 ### MPL-2.0 (file-level copyleft)
 
-- **adblock 0.12.0** (declared `MPL-2.0`). No copyright line in the published crate; Cargo.toml authors: Anton Lazarev, Andrius Aucinas. <https://github.com/brave/adblock-rust/>
+- **adblock 0.9.8** (declared `MPL-2.0`). No copyright line in the published crate; Cargo.toml authors: Anton Lazarev, Andrius Aucinas. <https://github.com/brave/adblock-rust/>
 - **option-ext 0.2.0** (declared `MPL-2.0`). No copyright line in the published crate; Cargo.toml authors: Simon Ochsenreither. <https://github.com/soc/option-ext.git>
 - **Public Suffix List**, compiled into the `psl 2.1.175` crate (`src/list.rs`,
   generated from the list). The list is maintained by Mozilla and its
@@ -48,7 +51,7 @@ What MPL-2.0 requires of us for these:
 
 - **Tell recipients where the source is** (section 3.2(a)). The two crates are
   used exactly as published on crates.io; their source is at the URLs above and
-  at `https://crates.io/crates/adblock/0.12.0` and
+  at `https://crates.io/crates/adblock/0.9.8` and
   `https://crates.io/crates/option-ext/0.2.0`. The Public Suffix List is
   used as the `psl` crate compiled it; the list's source form is at the
   publicsuffix.org URL above and the compiled form at `https://crates.io/crates/psl/2.1.175`.
@@ -196,8 +199,8 @@ in section 4.
 ## 4. Rust crates in the dependency closure of the `hiwave` binary
 
 Every crate `cargo tree -p hiwave-app -e normal` reports for
-`aarch64-apple-darwin` and `x86_64-apple-darwin`, HiWave's own crates left out.
-360 of them are compiled and linked into the binary. The other 25 are
+`x86_64-unknown-linux-gnu`, HiWave's own crates left out.
+429 of them are compiled and linked into the binary. The other 36 are
 procedural macros (marked in their entries): they run at build time and are
 not linked, but the code they generate is, so they are listed too.
 
@@ -208,7 +211,7 @@ copied from the licence files inside each published crate; where a crate ships
 none, the entry says so and gives the `authors` field of its `Cargo.toml`
 instead.
 
-### MIT License (`MIT`): 334 crates
+### MIT License (`MIT`): 416 crates
 
 - **addr 0.15.6** (declared `MIT/Apache-2.0`). Copyright (c) 2016 Rushmore Mushambi. <https://github.com/addr-rs/addr>
 - **addr2line 0.25.1** (declared `Apache-2.0 OR MIT`). Copyright (c) 2016-2018 The gimli Developers. <https://github.com/gimli-rs/addr2line>
@@ -221,9 +224,24 @@ instead.
 - **aligned-vec 0.6.4** (declared `MIT`). Copyright (c) 2022 sarah. <https://github.com/sarah-ek/aligned-vec/>
 - **allocator-api2 0.2.21** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Zakarum. <https://github.com/zakarumych/allocator-api2>
 - **anyhow 1.0.100** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/anyhow>
+- **arboard 3.7.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2022 The Arboard contributors. <https://github.com/1Password/arboard>
 - **argon2 0.5.3** (declared `MIT OR Apache-2.0`). Copyright (c) 2021-2024 The RustCrypto Project Developers. <https://github.com/RustCrypto/password-hashes/tree/master/argon2>
 - **arrayvec 0.7.8** (declared `MIT OR Apache-2.0`). Copyright (c) Ulrik Sverdrup "bluss" 2015-2023. <https://github.com/bluss/arrayvec>
+- **ash 0.38.0+1.3.281** (declared `MIT OR Apache-2.0`). Copyright 2016 Maik Klein; Copyright (c) 2016 ASH. <https://github.com/ash-rs/ash>
+- **ashpd 0.11.0** (declared `MIT`). Copyright (c) 2020 Bilal Elmoussaoui. <https://github.com/bilelmoussaoui/ashpd>
+- **async-broadcast 0.7.2** (declared `MIT OR Apache-2.0`). Copyright 2020 Yoshua Wuyts; Copyright (c) 2020 Yoshua Wuyts. <https://github.com/smol-rs/async-broadcast>
 - **async-channel 2.5.0** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina. <https://github.com/smol-rs/async-channel>
+- **async-executor 1.13.3** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina, John Nunley. <https://github.com/smol-rs/async-executor>
+- **async-fs 2.2.0** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina. <https://github.com/smol-rs/async-fs>
+- **async-io 2.6.0** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina. <https://github.com/smol-rs/async-io>
+- **async-lock 3.4.2** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina. <https://github.com/smol-rs/async-lock>
+- **async-net 2.0.0** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina. <https://github.com/smol-rs/async-net>
+- **async-process 2.5.0** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina. <https://github.com/smol-rs/async-process>
+- **async-signal 0.2.13** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: John Nunley. <https://github.com/smol-rs/async-signal>
+- **async-task 4.7.1** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina. <https://github.com/smol-rs/async-task>
+- **async-trait 0.1.89** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/async-trait> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **atk 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk3-rs>
+- **atk-sys 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk3-rs>
 - **atomic-waker 1.1.2** (declared `Apache-2.0 OR MIT`). Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors. <https://github.com/smol-rs/atomic-waker>
 - **backtrace 0.3.76** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 Alex Crichton. <https://github.com/rust-lang/backtrace-rs>
 - **base64 0.22.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 Alice Maz. <https://github.com/marshallpierce/rust-base64>
@@ -233,9 +251,8 @@ instead.
 - **bitflags 1.3.2** (declared `MIT/Apache-2.0`). Copyright (c) 2014 The Rust Project Developers. <https://github.com/bitflags/bitflags>
 - **bitflags 2.13.2** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 The Rust Project Developers. <https://github.com/bitflags/bitflags>
 - **blake2 0.10.6** (declared `MIT OR Apache-2.0`). Copyright (c) 2015-2016 The blake2-rfc Developers, Cesar Barros; Copyright (c) 2017 Artyom Pavlov. <https://github.com/RustCrypto/hashes>
-- **block 0.1.6** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Steven Sheldon. <http://github.com/SSheldon/rust-block>
 - **block-buffer 0.10.4** (declared `MIT OR Apache-2.0`). Copyright (c) 2018-2019 The RustCrypto Project Developers. <https://github.com/RustCrypto/utils>
-- **block2 0.6.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Mads Marquart. <https://github.com/madsmtm/objc2>
+- **blocking 1.6.2** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina. <https://github.com/smol-rs/blocking>
 - **boa_ast 0.22.0** (declared `Unlicense OR MIT`). Copyright (c) 2019 Jason Williams (from `LICENSE-MIT` in boa-dev/boa at 337a3668; the published crate carries no licence file). <https://github.com/boa-dev/boa> [vendored in `third_party/boa_ast` and modified by HiWave, see section 3]
 - **boa_engine 0.22.0** (declared `Unlicense OR MIT`). Copyright (c) 2019 Jason Williams (from `LICENSE-MIT` in boa-dev/boa at 337a3668; the published crate carries no licence file). <https://github.com/boa-dev/boa> [vendored in `third_party/boa_engine` and modified by HiWave, see section 3]
 - **boa_gc 0.22.0** (declared `Unlicense OR MIT`). Copyright (c) 2019 Jason Williams (from `LICENSE-MIT` in boa-dev/boa at 337a3668; the published crate carries no licence file). <https://github.com/boa-dev/boa>
@@ -243,35 +260,27 @@ instead.
 - **boa_macros 0.22.0** (declared `Unlicense OR MIT`). Copyright (c) 2019 Jason Williams (from `LICENSE-MIT` in boa-dev/boa at 337a3668; the published crate carries no licence file). <https://github.com/boa-dev/boa> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **boa_parser 0.22.0** (declared `Unlicense OR MIT`). Copyright (c) 2019 Jason Williams (from `LICENSE-MIT` in boa-dev/boa at 337a3668; the published crate carries no licence file). <https://github.com/boa-dev/boa> [vendored in `third_party/boa_parser` and modified by HiWave, see section 3]
 - **boa_string 0.22.0** (declared `Unlicense OR MIT`). Copyright (c) 2019 Jason Williams (from `LICENSE-MIT` in boa-dev/boa at 337a3668; the published crate carries no licence file). <https://github.com/boa-dev/boa>
+- **brotli-decompressor 5.0.3** (declared `BSD-3-Clause/MIT`). Copyright (c) 2016 Dropbox, Inc. <https://github.com/dropbox/rust-brotli-decompressor>
 - **brotli-decompressor 6.1.0** (declared `BSD-3-Clause/MIT`). Copyright (c) 2016 Dropbox, Inc. <https://github.com/dropbox/rust-brotli-decompressor>
 - **bytemuck 1.25.2** (declared `Zlib OR Apache-2.0 OR MIT`). Copyright (c) 2019 Daniel "Lokathor" Gee. <https://github.com/Lokathor/bytemuck>
 - **bytemuck_derive 1.10.2** (declared `Zlib OR Apache-2.0 OR MIT`). Copyright (c) 2019 Daniel "Lokathor" Gee. <https://github.com/Lokathor/bytemuck> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **byteorder 1.5.0** (declared `Unlicense OR MIT`). Copyright (c) 2015 Andrew Gallant. <https://github.com/BurntSushi/byteorder>
 - **byteorder-lite 0.1.0** (declared `Unlicense OR MIT`). Copyright (c) 2015 Andrew Gallant. <https://github.com/image-rs/byteorder-lite>
 - **bytes 1.11.0** (declared `MIT`). Copyright (c) 2018 Carl Lerche. <https://github.com/tokio-rs/bytes>
+- **cairo-rs 0.18.5** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
+- **cairo-sys-rs 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
 - **cfg-if 1.0.4** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 Alex Crichton. <https://github.com/rust-lang/cfg-if>
 - **chacha20 0.10.2** (declared `MIT OR Apache-2.0`). Copyright (c) 2019-2026 The RustCrypto Project Developers. <https://github.com/RustCrypto/stream-ciphers>
 - **chrono 0.4.42** (declared `MIT OR Apache-2.0`). Copyright (c) 2014, Kang Seonghoon. <https://github.com/chronotope/chrono>
 - **cipher 0.4.4** (declared `MIT OR Apache-2.0`). Copyright (c) 2016-2020 RustCrypto Developers. <https://github.com/RustCrypto/traits>
-- **cocoa 0.25.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
-- **cocoa 0.26.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
-- **cocoa-foundation 0.1.2** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
-- **cocoa-foundation 0.2.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
 - **color_quant 1.1.0** (declared `MIT`). Copyright (c) 2016 PistonDevelopers. <https://github.com/image-rs/color_quant.git>
 - **concurrent-queue 2.5.0** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina, Taiki Endo, John Nunley. <https://github.com/smol-rs/concurrent-queue>
+- **const-cstr 0.3.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 The `multipart` Crate Developers. <https://github.com/cybergeek94/const-cstr>
 - **cookie 0.18.1** (declared `MIT OR Apache-2.0`). Copyright 2017 Sergio Benitez; Copyright 2014 Alex Chricton; Copyright (c) 2017 Sergio Benitez; Copyright (c) 2014 Alex Crichton. <https://github.com/SergioBenitez/cookie-rs>
-- **core-foundation 0.10.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
-- **core-foundation 0.9.4** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
-- **core-foundation-sys 0.8.7** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
-- **core-graphics 0.23.2** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
-- **core-graphics 0.24.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
-- **core-graphics-types 0.1.3** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
-- **core-graphics-types 0.2.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
-- **core-text 20.1.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2012-2013 Mozilla Foundation. <https://github.com/servo/core-foundation-rs>
 - **core_maths 0.1.1** (declared `MIT`). Copyright (c) 2024 Robert Bastian. <https://github.com/robertbastian/core_maths>
 - **cow-utils 0.1.3** (declared `MIT`). Copyright (c) 2020 Ingvar Stepanyan. <https://github.com/RReverser/cow-utils-rs>
 - **cpufeatures 0.2.17** (declared `MIT OR Apache-2.0`). Copyright (c) 2020-2025 The RustCrypto Project Developers. <https://github.com/RustCrypto/utils>
-- **cpufeatures 0.3.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2020-2026 The RustCrypto Project Developers. <https://github.com/RustCrypto/utils> [x86_64 builds only]
+- **cpufeatures 0.3.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2020-2026 The RustCrypto Project Developers. <https://github.com/RustCrypto/utils>
 - **crc32fast 1.5.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors. <https://github.com/srijs/rust-crc32fast>
 - **crossbeam-channel 0.5.15** (declared `MIT OR Apache-2.0`). Copyright (c) 2019 The Crossbeam Project Developers; Copyright (c) 2009 The Go Authors. All rights reserved. <https://github.com/crossbeam-rs/crossbeam>
 - **crossbeam-deque 0.8.6** (declared `MIT OR Apache-2.0`). Copyright (c) 2019 The Crossbeam Project Developers. <https://github.com/crossbeam-rs/crossbeam>
@@ -284,16 +293,22 @@ instead.
 - **digest 0.10.7** (declared `MIT OR Apache-2.0`). Copyright (c) 2017 Artyom Pavlov. <https://github.com/RustCrypto/traits>
 - **dirs 5.0.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2018-2019 dirs-rs contributors. <https://github.com/soc/dirs-rs>
 - **dirs-sys 0.4.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2018-2019 dirs-rs contributors. <https://github.com/dirs-dev/dirs-sys-rs>
-- **dispatch 0.2.0** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Steven Sheldon. <http://github.com/SSheldon/rust-dispatch>
-- **dispatch2 0.3.0** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Mads Marquart, Mary. <https://github.com/madsmtm/objc2>
 - **displaydoc 0.2.5** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Jane Lusby. <https://github.com/yaahc/displaydoc> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **dlib 0.5.2** (declared `MIT`). Copyright (c) 2015 Victor Berger. <https://github.com/elinorbgr/dlib>
+- **dlopen2 0.7.0** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Szymon Wieloch, Ahmed Masud, OpenByte. <https://github.com/OpenByteDev/dlopen2>
+- **dlopen2_derive 0.4.3** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Szymon Wieloch, OpenByte. <https://github.com/OpenByteDev/dlopen2> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **document-features 0.2.12** (declared `MIT OR Apache-2.0`). Copyright (c) 2020 Olivier Goffart <ogoffart@sixtyfps.io>. <https://github.com/slint-ui/document-features> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **downcast-rs 1.2.1** (declared `MIT/Apache-2.0`). Copyright (c) 2020 Ashish Myles and contributors. <https://github.com/marcianx/downcast-rs>
 - **dynify 0.1.2** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Loi Chyan. <https://github.com/loichyan/dynify>
 - **dynify-macros 0.1.2** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Loi Chyan. <https://github.com/loichyan/dynify> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **either 1.15.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2015. <https://github.com/rayon-rs/either>
+- **endi 1.1.1** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Zeeshan Ali Khan. <https://github.com/zeenix/endi>
+- **enumflags2 0.7.12** (declared `MIT OR Apache-2.0`). Copyright 2017-2023 Maik Klein, Maja Kądziołka; Copyright (c) 2017-2023 Maik Klein, Maja Kądziołka. <https://github.com/meithecatte/enumflags2>
+- **enumflags2_derive 0.7.12** (declared `MIT OR Apache-2.0`). Copyright [2017] [Maik Klein]; Copyright (c) 2017 Maik Klein. <https://github.com/meithecatte/enumflags2> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **equator 0.4.2** (declared `MIT`). Copyright (c) 2023 sarah. <https://github.com/sarah-ek/equator/>
 - **equator-macro 0.4.2** (declared `MIT`). Copyright (c) 2023 sarah. <https://github.com/sarah-ek/equator/> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **equivalent 1.0.2** (declared `Apache-2.0 OR MIT`). Copyright (c) 2016--2023. <https://github.com/indexmap-rs/equivalent>
+- **errno 0.3.14** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 Chris Wong. <https://github.com/lambda-fairy/rust-errno>
 - **event-listener 5.4.1** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina, John Nunley. <https://github.com/smol-rs/event-listener>
 - **event-listener-strategy 0.5.4** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: John Nunley. <https://github.com/smol-rs/event-listener-strategy>
 - **fallible-iterator 0.3.0** (declared `MIT/Apache-2.0`). Copyright (c) 2015 The rust-openssl-verify Developers. <https://github.com/sfackler/rust-fallible-iterator>
@@ -301,14 +316,15 @@ instead.
 - **fast-float2 0.2.4** (declared `MIT OR Apache-2.0`). Copyright 2021 Ivan Smirnov. <https://github.com/Alexhuszagh/fast-float-rust>
 - **fastrand 2.3.0** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina. <https://github.com/smol-rs/fastrand>
 - **fdeflate 0.3.7** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: The image-rs Developers. <https://github.com/image-rs/fdeflate>
+- **field-offset 0.3.6** (declared `MIT OR Apache-2.0`). Copyright (c) 2016-2021 Diggory Blake, and other contributors. <https://github.com/Diggsey/rust-field-offset>
 - **fixedbitset 0.5.7** (declared `MIT OR Apache-2.0`). Copyright (c) 2015-2017. <https://github.com/petgraph/fixedbitset>
 - **flate2 1.1.5** (declared `MIT OR Apache-2.0`). Copyright (c) 2014-2025 Alex Crichton. <https://github.com/rust-lang/flate2-rs>
 - **float16 0.1.7** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Kathryn Long, Alex Huszagh. <https://github.com/Alexhuszagh/float16>
 - **fnv 1.0.7** (declared `Apache-2.0 / MIT`). Copyright (c) 2017 Contributors. <https://github.com/servo/rust-fnv>
-- **foreign-types 0.5.0** (declared `MIT/Apache-2.0`). Copyright (c) 2017 The foreign-types Developers. <https://github.com/sfackler/foreign-types>
-- **foreign-types-macros 0.2.3** (declared `MIT/Apache-2.0`). Copyright (c) 2017 The foreign-types Developers. <https://github.com/sfackler/foreign-types> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
-- **foreign-types-shared 0.3.1** (declared `MIT/Apache-2.0`). Copyright (c) 2017 The foreign-types Developers. <https://github.com/sfackler/foreign-types>
+- **fontconfig 0.6.0** (declared `MIT`). Copyright 2019 YesLogic Pty. Ltd; Copyright 2016 Manuel Reinhardt; Copyright 2014 Austin Bonander; Copyright 2013 The Servo Project Developers. <https://github.com/yeslogic/fontconfig-rs>
 - **form_urlencoded 1.2.2** (declared `MIT OR Apache-2.0`). Copyright (c) 2013-2016 The rust-url developers. <https://github.com/servo/rust-url>
+- **freetype-rs 0.35.0** (declared `MIT`). Copyright (c) 2014 PistonDevelopers. <https://github.com/PistonDevelopers/freetype-rs.git>
+- **freetype-sys 0.20.1** (declared `MIT`). Copyright (c) 2014 PistonDevelopers. <https://github.com/PistonDevelopers/freetype-sys.git> [a further licence file inside the crate is reproduced in section 5]
 - **futures 0.3.31** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors. <https://github.com/rust-lang/futures-rs>
 - **futures-channel 0.3.31** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors. <https://github.com/rust-lang/futures-rs>
 - **futures-concurrency 7.7.1** (declared `MIT OR Apache-2.0`). Copyright 2020 Yoshua Wuyts; Copyright (c) 2020 Yoshua Wuyts. <https://github.com/yoshuawuyts/futures-concurrency>
@@ -321,26 +337,45 @@ instead.
 - **futures-task 0.3.31** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors. <https://github.com/rust-lang/futures-rs>
 - **futures-util 0.3.31** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors. <https://github.com/rust-lang/futures-rs>
 - **fuzzy-matcher 0.3.7** (declared `MIT`). Copyright (c) 2019 Jinzhou Zhang. <https://github.com/lotabout/fuzzy-matcher>
+- **gdk 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk3-rs>
+- **gdk-pixbuf 0.18.5** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
+- **gdk-pixbuf-sys 0.18.0** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
+- **gdk-sys 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk3-rs>
+- **gdkwayland-sys 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk3-rs>
+- **gdkx11 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk3-rs>
+- **gdkx11-sys 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk3-rs>
 - **generic-array 0.14.7** (declared `MIT`). Copyright (c) 2015 Bartłomiej Kamiński. <https://github.com/fizyk20/generic-array.git>
 - **getrandom 0.2.16** (declared `MIT OR Apache-2.0`). Copyright (c) 2018-2024 The rust-random Project Developers; Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-random/getrandom>
+- **getrandom 0.3.4** (declared `MIT OR Apache-2.0`). Copyright (c) 2018-2025 The rust-random Project Developers; Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-random/getrandom>
 - **getrandom 0.4.3** (declared `MIT OR Apache-2.0`). Copyright (c) 2018-2026 The rust-random Project Developers; Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-random/getrandom>
 - **ghash 0.5.1** (declared `Apache-2.0 OR MIT`). Copyright (c) 2019 RustCrypto Developers. <https://github.com/RustCrypto/universal-hashes>
 - **gif 0.13.3** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 nwin. <https://github.com/image-rs/image-gif>
 - **gimli 0.32.3** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 The Rust Project Developers. <https://github.com/gimli-rs/gimli>
+- **gio 0.18.4** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
+- **gio-sys 0.18.1** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
+- **glib 0.18.5** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
+- **glib-macros 0.18.5** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **glib-sys 0.18.1** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
+- **glow 0.14.2** (declared `MIT OR Apache-2.0 OR Zlib`). No copyright line in the published crate; Cargo.toml authors: Joshua Groves, Dzmitry Malyshau. <https://github.com/grovesNL/glow>
+- **glow 0.16.0** (declared `MIT OR Apache-2.0 OR Zlib`). No copyright line in the published crate; Cargo.toml authors: Joshua Groves, Dzmitry Malyshau. <https://github.com/grovesNL/glow>
+- **gobject-sys 0.18.0** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
+- **gpu-alloc 0.6.0** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Zakarum. <https://github.com/zakarumych/gpu-alloc>
+- **gpu-alloc-types 0.3.0** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Zakarum. <https://github.com/zakarumych/gpu-alloc>
+- **gpu-descriptor 0.3.2** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Zakarum. <https://github.com/zakarumych/gpu-descriptor>
+- **gpu-descriptor-types 0.2.0** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Zakarum. <https://github.com/zakarumych/gpu-descriptor>
+- **gtk 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk3-rs>
+- **gtk-sys 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk3-rs>
+- **gtk3-macros 0.18.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk3-rs> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **h2 0.4.12** (declared `MIT`). Copyright (c) 2017 h2 authors. <https://github.com/hyperium/h2>
 - **hashbrown 0.14.5** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 Amanieu d'Antras. <https://github.com/rust-lang/hashbrown>
 - **hashbrown 0.15.5** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 Amanieu d'Antras. <https://github.com/rust-lang/hashbrown>
 - **hashbrown 0.17.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 Amanieu d'Antras. <https://github.com/rust-lang/hashbrown>
 - **hashlink 0.9.1** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: kyren. <https://github.com/kyren/hashlink>
+- **heck 0.4.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 The Rust Project Developers. <https://github.com/withoutboats/heck>
 - **heck 0.5.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 The Rust Project Developers. <https://github.com/withoutboats/heck>
+- **hex 0.4.3** (declared `MIT OR Apache-2.0`). Copyright (c) 2013-2014 The Rust Project Developers; Copyright (c) 2015-2020 The rust-hex Developers. <https://github.com/KokaKiwi/rust-hex>
 - **http 1.4.0** (declared `MIT OR Apache-2.0`). Copyright 2017 http-rs authors; Copyright (c) 2017 http-rs authors. <https://github.com/hyperium/http>
-- **http-body 1.0.1** (declared `MIT`). Copyright (c) 2019-2024 Sean McArthur & Hyper Contributors. <https://github.com/hyperium/http-body>
-- **http-body-util 0.1.3** (declared `MIT`). Copyright (c) 2019-2025 Sean McArthur & Hyper Contributors. <https://github.com/hyperium/http-body>
-- **httparse 1.10.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2015-2025 Sean McArthur. <https://github.com/seanmonstar/httparse>
 - **httpdate 1.0.3** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 Pyfisch. <https://github.com/pyfisch/httpdate>
-- **hyper 1.8.1** (declared `MIT`). Copyright (c) 2014-2025 Sean McArthur. <https://github.com/hyperium/hyper>
-- **hyper-rustls 0.27.7** (declared `Apache-2.0 OR ISC OR MIT`). Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>; Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>. <https://github.com/rustls/hyper-rustls>
-- **hyper-util 0.1.19** (declared `MIT`). Copyright (c) 2023-2025 Sean McArthur. <https://github.com/hyperium/hyper-util>
 - **iana-time-zone 0.1.64** (declared `MIT OR Apache-2.0`). Copyright 2020 Andrew Straw; Copyright (c) 2020 Andrew D. Straw. <https://github.com/strawlab/iana-time-zone>
 - **idna 1.1.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2013-2025 The rust-url developers. <https://github.com/servo/rust-url/>
 - **idna_adapter 1.2.1** (declared `Apache-2.0 OR MIT`). Copyright (c) The rust-url developers. <https://github.com/hsivonen/idna_adapter>
@@ -348,26 +383,29 @@ instead.
 - **indexmap 2.14.2** (declared `Apache-2.0 OR MIT`). Copyright (c) 2016--2017. <https://github.com/indexmap-rs/indexmap>
 - **inout 0.1.4** (declared `MIT OR Apache-2.0`). Copyright (c) 2022 The RustCrypto Project Developers; Copyright (c) 2022 Artyom Pavlov. <https://github.com/RustCrypto/utils>
 - **intrusive-collections 0.10.3** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 Amanieu d'Antras. <https://github.com/Amanieu/intrusive-rs>
-- **ipnet 2.11.0** (declared `MIT OR Apache-2.0`). Copyright 2017 Juniper Networks, Inc. <https://github.com/krisprice/ipnet>
-- **iri-string 0.7.10** (declared `MIT OR Apache-2.0`). Copyright 2019-2024 YOSHIOKA Takuma. <https://github.com/lo48576/iri-string>
 - **itertools 0.13.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2015. <https://github.com/rust-itertools/itertools>
 - **itertools 0.15.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2015. <https://github.com/rust-itertools/itertools>
 - **itoa 1.0.18** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/itoa>
+- **javascriptcore-rs 1.1.2** (declared `MIT`). Copyright (c) 2013-2021, The Gtk-rs Project Developers; Copyright (c) 2021, Tauri Programme within The Commons Conservancy. <https://github.com/tauri-apps/javascriptcore-rs>
+- **javascriptcore-rs-sys 1.1.1** (declared `MIT`). Copyright (c) 2013-2017, The Gtk-rs Project Developers. <https://github.com/tauri-apps/javascriptcore-rs>
 - **jpeg-decoder 0.3.2** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 The jpeg-decoder Developers. <https://github.com/image-rs/jpeg-decoder>
 - **keyboard-types 0.7.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2017 Pyfisch. <https://github.com/pyfisch/keyboard-types>
+- **khronos-egl 6.0.0** (declared `MIT/Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Timothée Haudebourg, Sean Kerr. <https://github.com/timothee-haudebourg/khronos-egl>
 - **lazy_static 1.5.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2010 The Rust Project Developers. <https://github.com/rust-lang-nursery/lazy-static.rs>
 - **libc 0.2.179** (declared `MIT OR Apache-2.0`). Copyright (c) 2014-2020 The Rust Project Developers. <https://github.com/rust-lang/libc>
 - **libm 0.2.16** (declared `MIT`). Copyright (c) 2018 Jorge Aparicio, and the other holders named in its licence files, which are reproduced in full in section 5. <https://github.com/rust-lang/compiler-builtins>
 - **libsqlite3-sys 0.30.1** (declared `MIT`). Copyright (c) 2014-2021 The rusqlite developers. <https://github.com/rusqlite/rusqlite> [the binding; it compiles in SQLite itself, see section 2]
+- **libxdo 0.6.0** (declared `MIT`). Copyright (c) 2015 Mika Attila. <https://github.com/crumblingstatue/rust-libxdo>
+- **libxdo-sys 0.11.0** (declared `MIT`). Copyright (c) 2015 Mika Attila. <https://github.com/crumblingstatue/rust-libxdo-sys>
+- **lifeguard 0.6.1** (declared `MIT`). Copyright (c) 2015 Zack Slayton. <https://github.com/zslayton/lifeguard>
+- **linux-raw-sys 0.11.0** (declared `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Dan Gohman. <https://github.com/sunfishcode/linux-raw-sys>
 - **litrs 1.0.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2020 Project Developers. <https://github.com/LukasKalbertodt/litrs>
 - **lock_api 0.4.14** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 The Rust Project Developers. <https://github.com/Amanieu/parking_lot>
 - **log 0.4.29** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-lang/log>
 - **lru 0.12.5** (declared `MIT`). Copyright (c) 2016 Jerome Froelich. <https://github.com/jeromefroe/lru-rs.git>
-- **malloc_buf 0.0.6** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Steven Sheldon. <https://github.com/SSheldon/malloc_buf>
 - **matchers 0.2.0** (declared `MIT`). Copyright (c) 2019 Eliza Weisman. <https://github.com/hawkw/matchers>
 - **memchr 2.7.6** (declared `Unlicense OR MIT`). Copyright (c) 2015 Andrew Gallant. <https://github.com/BurntSushi/memchr>
-- **metal 0.29.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2010 The Rust Project Developers. <https://github.com/gfx-rs/metal-rs>
-- **metal 0.31.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2010 The Rust Project Developers. <https://github.com/gfx-rs/metal-rs>
+- **memoffset 0.9.1** (declared `MIT`). Copyright (c) 2017 Gilad Naaman. <https://github.com/Gilnaa/memoffset>
 - **mime 0.3.17** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 Sean McArthur. <https://github.com/hyperium/mime>
 - **mime_guess 2.0.5** (declared `MIT`). Copyright (c) 2015 Austin Bonander. <https://github.com/abonander/mime_guess>
 - **miniz_oxide 0.8.9** (declared `MIT OR Zlib OR Apache-2.0`). Copyright 2013-2014 RAD Game Tools and Valve Software; Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC; Copyright (c) 2017 Frommi; Copyright (c) 2017-2024 oyvindln; Copyright (c) 2020 Frommi. <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide>
@@ -376,6 +414,8 @@ instead.
 - **naga 23.1.0** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: gfx-rs developers. <https://github.com/gfx-rs/wgpu/tree/trunk/naga>
 - **naga 24.0.0** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: gfx-rs developers. <https://github.com/gfx-rs/wgpu/tree/trunk/naga>
 - **new_debug_unreachable 1.0.6** (declared `MIT`). Copyright (c) 2015 Jonathan Reem. <https://github.com/mbrubeck/rust-debug-unreachable>
+- **nix 0.30.1** (declared `MIT`). Copyright (c) 2015 Carl Lerche + nix-rust Authors. <https://github.com/nix-rust/nix>
+- **nom 8.0.0** (declared `MIT`). Copyright (c) 2014-2019 Geoffroy Couprie. <https://github.com/rust-bakery/nom>
 - **nu-ansi-term 0.50.3** (declared `MIT`). Copyright (c) 2014 Benjamin Sago; Copyright (c) 2021-2022 The Nushell Project Developers. <https://github.com/nushell/nu-ansi-term>
 - **num-bigint 0.5.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-num/num-bigint>
 - **num-conv 0.2.2** (declared `MIT OR Apache-2.0`). Copyright (c) Jacob Pratt. <https://github.com/jhpratt/num-conv>
@@ -385,22 +425,16 @@ instead.
 - **num_enum 0.7.6** (declared `BSD-3-Clause OR MIT OR Apache-2.0`). Copyright (c) 2018, Daniel Wagner-Hall. <https://github.com/illicitonion/num_enum>
 - **num_enum_derive 0.7.6** (declared `BSD-3-Clause OR MIT OR Apache-2.0`). Copyright (c) 2018, Daniel Wagner-Hall. <https://github.com/illicitonion/num_enum> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **num_threads 0.1.7** (declared `MIT OR Apache-2.0`). Copyright 2021 Jacob Pratt; Copyright (c) 2021 Jacob Pratt. <https://github.com/jhpratt/num_threads>
-- **objc 0.2.7** (declared `MIT`). Copyright (c) Steven Sheldon. <http://github.com/SSheldon/rust-objc>
-- **objc-sys 0.3.5** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Mads Marquart. <https://github.com/madsmtm/objc2>
-- **objc2 0.5.2** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Steven Sheldon, Mads Marquart. <https://github.com/madsmtm/objc2>
-- **objc2 0.6.3** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Mads Marquart. <https://github.com/madsmtm/objc2>
-- **objc2-app-kit 0.2.2** (declared `MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
-- **objc2-app-kit 0.3.2** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
-- **objc2-core-foundation 0.3.2** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
-- **objc2-encode 4.1.0** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Mads Marquart. <https://github.com/madsmtm/objc2>
-- **objc2-exception-helper 0.1.1** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Mads Marquart. <https://github.com/madsmtm/objc2>
-- **objc2-foundation 0.2.2** (declared `MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
-- **objc2-foundation 0.3.2** (declared `MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
-- **objc2-web-kit 0.3.2** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
 - **object 0.37.3** (declared `Apache-2.0 OR MIT`). Copyright (c) 2015 The Gimli Developers. <https://github.com/gimli-rs/object>
 - **once_cell 1.21.4** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Aleksey Kladov. <https://github.com/matklad/once_cell>
 - **oneshot 0.2.1** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Linus Färnstrand. <https://github.com/faern/oneshot>
 - **opaque-debug 0.3.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2018-2024 The RustCrypto Project Developers. <https://github.com/RustCrypto/utils>
+- **openssl-probe 0.2.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 Alex Crichton. <https://github.com/rustls/openssl-probe>
+- **ordered-float 4.6.0** (declared `MIT`). Copyright (c) 2015 Jonathan Reem. <https://github.com/reem/rust-ordered-float>
+- **ordered-stream 0.2.0** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Daniel De Graaf, Zeeshan Ali Khan. <https://github.com/danieldg/ordered-stream>
+- **os_pipe 1.2.3** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Jack O'Connor. <https://github.com/oconnor663/os_pipe.rs>
+- **pango 0.18.3** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
+- **pango-sys 0.18.0** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: The gtk-rs Project Developers. <https://github.com/gtk-rs/gtk-rs-core>
 - **parking 2.2.1** (declared `Apache-2.0 OR MIT`). Copyright 2014-2020 The Rust Project Developers. <https://github.com/smol-rs/parking>
 - **parking_lot 0.12.5** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 The Rust Project Developers. <https://github.com/Amanieu/parking_lot>
 - **parking_lot_core 0.9.12** (declared `MIT OR Apache-2.0`). Copyright (c) 2016 The Rust Project Developers. <https://github.com/Amanieu/parking_lot>
@@ -408,6 +442,7 @@ instead.
 - **paste 1.0.15** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/paste> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **pastey 0.2.3** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Aditya Kumar, David Tolnay. <https://github.com/as1100k/pastey> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **percent-encoding 2.3.2** (declared `MIT OR Apache-2.0`). Copyright (c) 2013-2025 The rust-url developers. <https://github.com/servo/rust-url/>
+- **petgraph 0.8.3** (declared `MIT OR Apache-2.0`). Copyright (c) 2015. <https://github.com/petgraph/petgraph>
 - **phf 0.14.0** (declared `MIT`). Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi. <https://github.com/rust-phf/rust-phf>
 - **phf_generator 0.14.0** (declared `MIT`). Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi. <https://github.com/rust-phf/rust-phf>
 - **phf_macros 0.14.0** (declared `MIT`). Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi. <https://github.com/rust-phf/rust-phf> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
@@ -417,25 +452,35 @@ instead.
 - **pin-project-internal 1.1.13** (declared `Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/taiki-e/pin-project> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **pin-project-lite 0.2.16** (declared `Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/taiki-e/pin-project-lite>
 - **pin-utils 0.1.0** (declared `MIT OR Apache-2.0`). Copyright 2018 The pin-utils authors; Copyright (c) 2018 The pin-utils authors. <https://github.com/rust-lang-nursery/pin-utils>
+- **piper 0.2.4** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina, John Nunley. <https://github.com/smol-rs/piper>
 - **png 0.17.16** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 nwin. <https://github.com/image-rs/image-png>
+- **polling 3.11.0** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Stjepan Glavina, John Nunley. <https://github.com/smol-rs/polling>
 - **pollster 0.4.0** (declared `Apache-2.0/MIT`). Copyright (c) 2020-2021 Joshua Barretto. <https://github.com/zesterer/pollster>
 - **polyval 0.6.2** (declared `Apache-2.0 OR MIT`). Copyright (c) 2019-2023 RustCrypto Developers. <https://github.com/RustCrypto/universal-hashes>
 - **portable-atomic 1.15.0** (declared `Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/taiki-e/portable-atomic>
 - **powerfmt 0.2.0** (declared `MIT OR Apache-2.0`). Copyright 2023 Jacob Pratt et al; Copyright (c) 2023 Jacob Pratt et al. <https://github.com/jhpratt/powerfmt>
 - **ppv-lite86 0.2.21** (declared `MIT OR Apache-2.0`). Copyright 2019 The CryptoCorrosion Contributors; Copyright (c) 2019 The CryptoCorrosion Contributors. <https://github.com/cryptocorrosion/cryptocorrosion>
 - **precomputed-hash 0.1.1** (declared `MIT`). Copyright (c) 2017 Emilio Cobos Álvarez. <https://github.com/emilio/precomputed-hash>
+- **proc-macro-crate 1.3.1** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Bastian Köcher. <https://github.com/bkchr/proc-macro-crate>
+- **proc-macro-crate 2.0.2** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Bastian Köcher. <https://github.com/bkchr/proc-macro-crate>
 - **proc-macro-crate 3.4.0** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Bastian Köcher. <https://github.com/bkchr/proc-macro-crate>
+- **proc-macro-error 1.0.4** (declared `MIT OR Apache-2.0`). Copyright 2019-2020 CreepySkeleton <creepy-skeleton@yandex.ru>; Copyright (c) 2019-2020 CreepySkeleton. <https://gitlab.com/CreepySkeleton/proc-macro-error>
+- **proc-macro-error-attr 1.0.4** (declared `MIT OR Apache-2.0`). Copyright 2019-2020 CreepySkeleton <creepy-skeleton@yandex.ru>; Copyright (c) 2019-2020 CreepySkeleton. <https://gitlab.com/CreepySkeleton/proc-macro-error> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **proc-macro2 1.0.104** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay, Alex Crichton. <https://github.com/dtolnay/proc-macro2>
 - **profiling 1.0.17** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Philip Degarmo. <https://github.com/aclysma/profiling>
 - **psl 2.1.175** (declared `MIT/Apache-2.0`). Copyright (c) 2016 Rushmore Mushambi. <https://github.com/addr-rs/psl> [the crate's code; the Public Suffix List it compiles in is MPL-2.0 data, see section 1]
 - **psl-types 2.0.11** (declared `MIT/Apache-2.0`). Copyright (c) 2021 Rushmore Mushambi. <https://github.com/addr-rs/psl-types>
 - **quick-error 2.0.1** (declared `MIT/Apache-2.0`). Copyright (c) 2015 The quick-error Developers. <http://github.com/tailhook/quick-error>
+- **quick-xml 0.38.4** (declared `MIT`). Copyright (c) 2016 Johann Tuffe. <https://github.com/tafia/quick-xml>
 - **quote 1.0.47** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/quote>
 - **rand 0.10.3** (declared `MIT OR Apache-2.0`). Copyrights in the Rand project are retained by their contributors; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-random/rand>
 - **rand 0.8.5** (declared `MIT OR Apache-2.0`). Copyrights in the Rand project are retained by their contributors; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-random/rand>
+- **rand 0.9.2** (declared `MIT OR Apache-2.0`). Copyrights in the Rand project are retained by their contributors; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-random/rand>
 - **rand_chacha 0.3.1** (declared `MIT OR Apache-2.0`). Copyrights in the Rand project are retained by their contributors; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-random/rand>
+- **rand_chacha 0.9.0** (declared `MIT OR Apache-2.0`). Copyrights in the Rand project are retained by their contributors; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-random/rand>
 - **rand_core 0.10.1** (declared `MIT OR Apache-2.0`). Copyrights in the Rand project are retained by their contributors; Copyright (c) 2018-2026 The Rand Project Developers. <https://github.com/rust-random/rand_core>
 - **rand_core 0.6.4** (declared `MIT OR Apache-2.0`). Copyrights in the Rand project are retained by their contributors; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-random/rand>
+- **rand_core 0.9.3** (declared `MIT OR Apache-2.0`). Copyrights in the Rand project are retained by their contributors; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-random/rand>
 - **raw-window-handle 0.6.2** (declared `MIT OR Apache-2.0 OR Zlib`). Copyright (c) 2019 Osspial; Copyright (c) 2020 Osspial. <https://github.com/rust-windowing/raw-window-handle>
 - **rayon 1.11.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2010 The Rust Project Developers. <https://github.com/rayon-rs/rayon>
 - **rayon-core 1.13.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2010 The Rust Project Developers. <https://github.com/rayon-rs/rayon>
@@ -443,7 +488,7 @@ instead.
 - **regex-automata 0.4.13** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-lang/regex>
 - **regex-syntax 0.8.8** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 The Rust Project Developers. <https://github.com/rust-lang/regex> [a further licence file inside the crate is reproduced in section 5]
 - **regress 0.12.0** (declared `MIT OR Apache-2.0`). Copyright 2020 ridiculous_fish; Copyright (c) 2020 ridiculous_fish. <https://github.com/ridiculousfish/regress>
-- **reqwest 0.12.28** (declared `MIT OR Apache-2.0`). Copyright 2016 Sean McArthur; Copyright (c) 2016-2025 Sean McArthur. <https://github.com/seanmonstar/reqwest>
+- **renderdoc-sys 1.1.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2022 Eyal Kalderon. <https://github.com/ebkalderon/renderdoc-rs>
 - **rfd 0.15.4** (declared `MIT`). Copyright (c) 2022 Bartłomiej Maryńczak. <https://github.com/PolyMeilex/rfd>
 - **rmp 0.8.14** (declared `MIT`). Copyright (c) 2017 Evgeny Safronov. <https://github.com/3Hren/msgpack-rust>
 - **rmp-serde 0.15.5** (declared `MIT`). Copyright (c) 2017 Evgeny Safronov. <https://github.com/3Hren/msgpack-rust>
@@ -451,27 +496,32 @@ instead.
 - **rustc-demangle 0.1.26** (declared `MIT/Apache-2.0`). Copyright (c) 2014 Alex Crichton. <https://github.com/rust-lang/rustc-demangle>
 - **rustc-hash 1.1.0** (declared `Apache-2.0/MIT`). No copyright line in the published crate; Cargo.toml authors: The Rust Project Developers. <https://github.com/rust-lang-nursery/rustc-hash>
 - **rustc-hash 2.1.3** (declared `Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: The Rust Project Developers. <https://github.com/rust-lang/rustc-hash>
+- **rustix 1.1.3** (declared `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Dan Gohman, Jakub Konka. <https://github.com/bytecodealliance/rustix>
 - **rustls 0.23.35** (declared `Apache-2.0 OR ISC OR MIT`). Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>; Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>. <https://github.com/rustls/rustls>
 - **rustls-native-certs 0.8.4** (declared `Apache-2.0 OR ISC OR MIT`). Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>; Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>. <https://github.com/rustls/rustls-native-certs>
 - **rustls-pki-types 1.13.2** (declared `MIT OR Apache-2.0`). Copyright 2023 Dirkjan Ochtman; Copyright (c) 2023 Dirkjan Ochtman <dirkjan@ochtman.nl>. <https://github.com/rustls/pki-types>
 - **rustversion 1.0.22** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/rustversion> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **rustybuzz 0.20.1** (declared `MIT`). Copyright (c) HarfBuzz developers; Copyright (c) 2020 Yevhenii Reizner. <https://github.com/harfbuzz/rustybuzz> [a further licence file inside the crate is reproduced in section 5]
+- **scoped-tls 1.0.1** (declared `MIT/Apache-2.0`). Copyright (c) 2014 Alex Crichton. <https://github.com/alexcrichton/scoped-tls>
 - **scopeguard 1.2.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers. <https://github.com/bluss/scopeguard>
-- **seahash 4.1.0** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: ticki, Tom Almeida. <https://gitlab.redox-os.org/redox-os/seahash>
-- **security-framework 3.7.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 Steven Fackler. <https://github.com/kornelski/rust-security-framework> [a further licence file inside the crate is reproduced in section 5]
-- **security-framework-sys 2.17.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 Steven Fackler. <https://github.com/kornelski/rust-security-framework>
+- **seahash 3.0.7** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: ticki. <https://gitlab.redox-os.org/redox-os/seahash>
 - **serde 1.0.229** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Erick Tryzelaar, David Tolnay. <https://github.com/serde-rs/serde>
 - **serde_core 1.0.229** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Erick Tryzelaar, David Tolnay. <https://github.com/serde-rs/serde>
 - **serde_derive 1.0.229** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Erick Tryzelaar, David Tolnay. <https://github.com/serde-rs/serde> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **serde_json 1.0.151** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Erick Tryzelaar, David Tolnay. <https://github.com/serde-rs/json>
-- **serde_urlencoded 0.7.1** (declared `MIT/Apache-2.0`). Copyright (c) 2016 Anthony Ramine. <https://github.com/nox/serde_urlencoded>
+- **serde_repr 0.1.20** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/serde-repr> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **serde_spanned 0.6.9** (declared `MIT OR Apache-2.0`). Copyright (c) Individual contributors. <https://github.com/toml-rs/toml>
 - **sha2 0.10.9** (declared `MIT OR Apache-2.0`). Copyright (c) 2006-2009 Graydon Hoare; Copyright (c) 2009-2013 Mozilla Foundation; Copyright (c) 2016 Artyom Pavlov. <https://github.com/RustCrypto/hashes>
 - **sharded-slab 0.1.7** (declared `MIT`). Copyright (c) 2019 Eliza Weisman. <https://github.com/hawkw/sharded-slab>
+- **signal-hook-registry 1.4.8** (declared `MIT OR Apache-2.0`). Copyright (c) 2017 tokio-jsonrpc developers. <https://github.com/vorner/signal-hook>
 - **simd-adler32 0.3.8** (declared `MIT`). Copyright (c) [2021] [Marvin Countryman]. <https://github.com/mcountryman/simd-adler32>
 - **siphasher 1.0.1** (declared `MIT/Apache-2.0`). Copyright 2012-2016 The Rust Project Developers; Copyright 2016-2024 Frank Denis. <https://github.com/jedisct1/rust-siphash>
 - **slab 0.4.11** (declared `MIT`). Copyright (c) 2019 Carl Lerche. <https://github.com/tokio-rs/slab>
 - **small_btree 0.1.0** (declared `Unlicense OR MIT`). No copyright line in the published crate; Cargo.toml authors: boa-dev. <https://github.com/boa-dev/boa>
 - **smallvec 1.15.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2018 The Servo Project Developers. <https://github.com/servo/rust-smallvec>
 - **socket2 0.6.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 Alex Crichton. <https://github.com/rust-lang/socket2>
+- **soup3 0.5.0** (declared `MIT`). Copyright (c) 2013-2017, The Gtk-rs Project Developers. <https://gitlab.gnome.org/World/Rust/soup3-rs>
+- **soup3-sys 0.5.0** (declared `MIT`). Copyright (c) 2013-2017, The Gtk-rs Project Developers. <https://gitlab.gnome.org/World/Rust/soup3-rs>
 - **stable_deref_trait 1.2.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2017 Robert Grosse. <https://github.com/storyyeller/stable_deref_trait>
 - **static_assertions 1.1.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2017 Nikolai Vazquez. <https://github.com/nvzqz/static-assertions-rs>
 - **strict-num 0.1.1** (declared `MIT`). Copyright (c) 2022 Yevhenii Reizner. <https://github.com/RazrFalcon/strict-num>
@@ -480,6 +530,7 @@ instead.
 - **strum 0.28.0** (declared `MIT`). Copyright (c) 2019 Peter Glotfelty. <https://github.com/Peternator7/strum>
 - **strum_macros 0.26.4** (declared `MIT`). Copyright (c) 2019 Peter Glotfelty. <https://github.com/Peternator7/strum> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **strum_macros 0.28.0** (declared `MIT`). Copyright (c) 2019 Peter Glotfelty. <https://github.com/Peternator7/strum> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **syn 1.0.109** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/syn>
 - **syn 2.0.113** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/syn>
 - **syn 3.0.6** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/syn>
 - **synstructure 0.13.2** (declared `MIT`). Copyright 2016 Nika Layzell. <https://github.com/mystor/synstructure>
@@ -502,23 +553,27 @@ instead.
 - **tokio-macros 2.6.0** (declared `MIT`). Copyright (c) 2019 Yoshua Wuyts; Copyright (c) Tokio Contributors. <https://github.com/tokio-rs/tokio> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **tokio-rustls 0.26.4** (declared `MIT OR Apache-2.0`). Copyright 2017 quininer kel; Copyright (c) 2017 quininer kel. <https://github.com/rustls/tokio-rustls>
 - **tokio-util 0.7.17** (declared `MIT`). Copyright (c) Tokio Contributors. <https://github.com/tokio-rs/tokio>
+- **toml_datetime 0.6.3** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 Alex Crichton. <https://github.com/toml-rs/toml>
 - **toml_datetime 0.7.5+spec-1.1.0** (declared `MIT OR Apache-2.0`). Copyright (c) Individual contributors. <https://github.com/toml-rs/toml>
+- **toml_edit 0.19.15** (declared `MIT OR Apache-2.0`). Copyright (c) Individual contributors. <https://github.com/toml-rs/toml>
+- **toml_edit 0.20.2** (declared `MIT OR Apache-2.0`). Copyright (c) Individual contributors. <https://github.com/toml-rs/toml>
 - **toml_edit 0.23.10+spec-1.0.0** (declared `MIT OR Apache-2.0`). Copyright (c) Individual contributors. <https://github.com/toml-rs/toml>
 - **toml_parser 1.0.6+spec-1.1.0** (declared `MIT OR Apache-2.0`). Copyright (c) Individual contributors. <https://github.com/toml-rs/toml>
-- **tower 0.5.2** (declared `MIT`). Copyright (c) 2019 Tower Contributors. <https://github.com/tower-rs/tower>
-- **tower-http 0.6.8** (declared `MIT`). Copyright (c) 2019-2021 Tower Contributors. <https://github.com/tower-rs/tower-http>
-- **tower-layer 0.3.3** (declared `MIT`). Copyright (c) 2019 Tower Contributors. <https://github.com/tower-rs/tower>
-- **tower-service 0.3.3** (declared `MIT`). Copyright (c) 2019 Tower Contributors. <https://github.com/tower-rs/tower>
 - **tracing 0.1.44** (declared `MIT`). Copyright (c) 2019 Tokio Contributors. <https://github.com/tokio-rs/tracing>
 - **tracing-attributes 0.1.31** (declared `MIT`). Copyright (c) 2019 Tokio Contributors. <https://github.com/tokio-rs/tracing> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
 - **tracing-core 0.1.36** (declared `MIT`). Copyright (c) 2019 Tokio Contributors. <https://github.com/tokio-rs/tracing> [a further licence file inside the crate is reproduced in section 5]
 - **tracing-log 0.2.0** (declared `MIT`). Copyright (c) 2019 Tokio Contributors. <https://github.com/tokio-rs/tracing>
 - **tracing-serde 0.2.0** (declared `MIT`). Copyright (c) 2019 Tokio Contributors. <https://github.com/tokio-rs/tracing>
 - **tracing-subscriber 0.3.22** (declared `MIT`). Copyright (c) 2019 Tokio Contributors. <https://github.com/tokio-rs/tracing>
-- **try-lock 0.2.5** (declared `MIT`). Copyright (c) 2018-2023 Sean McArthur; Copyright (c) 2016 Alex Crichton. <https://github.com/seanmonstar/try-lock>
+- **tree_magic_mini 3.2.2** (declared `MIT`). Copyright (c) 2017 Aaron Hancock. <https://github.com/mbrubeck/tree_magic/>
+- **ttf-parser 0.25.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2018 Yevhenii Reizner. <https://github.com/harfbuzz/ttf-parser>
 - **typenum 1.19.0** (declared `MIT OR Apache-2.0`). Copyright 2014 Paho Lurie-Gregg; Copyright (c) 2014 Paho Lurie-Gregg. <https://github.com/paholg/typenum>
 - **unicase 2.8.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2014-2017 Sean McArthur. <https://github.com/seanmonstar/unicase>
 - **unicode-bidi 0.3.18** (declared `MIT OR Apache-2.0`). This project is copyright 2015, The Servo Project Developers; Copyright (c) 2015 The Rust Project Developers. <https://github.com/servo/unicode-bidi>
+- **unicode-bidi-mirroring 0.4.0** (declared `MIT/Apache-2.0`). Copyright (c) 2020 Yevhenii Reizner. <https://github.com/RazrFalcon/unicode-bidi-mirroring>
+- **unicode-ccc 0.4.0** (declared `MIT/Apache-2.0`). Copyright (c) 2020 Yevhenii Reizner. <https://github.com/RazrFalcon/unicode-ccc>
+- **unicode-properties 0.1.4** (declared `MIT/Apache-2.0`). Copyright (c) 2015 The Rust Project Developers. <https://github.com/unicode-rs/unicode-properties>
+- **unicode-script 0.5.8** (declared `MIT OR Apache-2.0`). Copyright 2021 The Unicode-rs Developers; Copyright (c) 2019 Manish Goregaokar. <https://github.com/unicode-rs/unicode-script>
 - **unicode-segmentation 1.12.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 The Rust Project Developers. <https://github.com/unicode-rs/unicode-segmentation>
 - **unicode-width 0.1.14** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 The Rust Project Developers. <https://github.com/unicode-rs/unicode-width>
 - **unicode-xid 0.2.6** (declared `MIT OR Apache-2.0`). Copyright (c) 2015 The Rust Project Developers. <https://github.com/unicode-rs/unicode-xid>
@@ -527,7 +582,15 @@ instead.
 - **urlencoding 2.1.3** (declared `MIT`). © 2016 Bertram Truong; © 2021 Kornel Lesiński. <https://github.com/kornelski/rust_urlencoding>
 - **utf16_iter 1.0.5** (declared `Apache-2.0 OR MIT`). Copyright Mozilla Foundation. <https://github.com/hsivonen/utf16_iter>
 - **utf8_iter 1.0.4** (declared `Apache-2.0 OR MIT`). Copyright Mozilla Foundation. <https://github.com/hsivonen/utf8_iter>
-- **want 0.3.1** (declared `MIT`). Copyright (c) 2018-2019 Sean McArthur. <https://github.com/seanmonstar/want>
+- **uuid 1.19.0** (declared `Apache-2.0 OR MIT`). Copyright (c) 2014 The Rust Project Developers; Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon. <https://github.com/uuid-rs/uuid>
+- **wayland-backend 0.3.12** (declared `MIT`). Copyright (c) 2015 Elinor Berger. <https://github.com/smithay/wayland-rs>
+- **wayland-client 0.31.12** (declared `MIT`). Copyright (c) 2015 Elinor Berger. <https://github.com/smithay/wayland-rs>
+- **wayland-protocols 0.32.10** (declared `MIT`). Copyright (c) 2015 Elinor Berger. <https://github.com/smithay/wayland-rs> [a further licence file inside the crate is reproduced in section 5]
+- **wayland-protocols-wlr 0.3.10** (declared `MIT`). Copyright (c) 2015 Elinor Berger. <https://github.com/smithay/wayland-rs>
+- **wayland-scanner 0.31.8** (declared `MIT`). Copyright (c) 2015 Elinor Berger. <https://github.com/smithay/wayland-rs> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **wayland-sys 0.31.8** (declared `MIT`). Copyright (c) 2015 Elinor Berger. <https://github.com/smithay/wayland-rs>
+- **webkit2gtk 2.0.1** (declared `MIT`). Copyright (c) 2016 Boucher, Antoni <bouanto@zoho.com>; Copyright (c) 2017-2021, The Gtk-rs Project Developers; Copyright (c) 2021, Tauri Programme within The Commons Conservancy. <https://github.com/tauri-apps/webkit2gtk-rs>
+- **webkit2gtk-sys 2.0.1** (declared `MIT`). Copyright (c) 2016 Boucher, Antoni <bouanto@zoho.com>. <https://github.com/tauri-apps/webkit2gtk-rs>
 - **weezl 0.1.12** (declared `MIT OR Apache-2.0`). Copyright (c) HeroicKatora 2020. <https://github.com/image-rs/weezl>
 - **wgpu 23.0.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2021 The gfx-rs developers. <https://github.com/gfx-rs/wgpu>
 - **wgpu 24.0.5** (declared `MIT OR Apache-2.0`). Copyright (c) 2021 The gfx-rs developers. <https://github.com/gfx-rs/wgpu>
@@ -537,13 +600,35 @@ instead.
 - **wgpu-hal 24.0.4** (declared `MIT OR Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: gfx-rs developers. <https://github.com/gfx-rs/wgpu>
 - **wgpu-types 23.0.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2021 The gfx-rs developers. <https://github.com/gfx-rs/wgpu>
 - **wgpu-types 24.0.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2021 The gfx-rs developers. <https://github.com/gfx-rs/wgpu>
+- **windows 0.58.0** (declared `MIT OR Apache-2.0`). Copyright (c) Microsoft Corporation. <https://github.com/microsoft/windows-rs>
+- **windows-core 0.58.0** (declared `MIT OR Apache-2.0`). Copyright (c) Microsoft Corporation. <https://github.com/microsoft/windows-rs>
+- **windows-implement 0.58.0** (declared `MIT OR Apache-2.0`). Copyright (c) Microsoft Corporation. <https://github.com/microsoft/windows-rs> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **windows-interface 0.58.0** (declared `MIT OR Apache-2.0`). Copyright (c) Microsoft Corporation. <https://github.com/microsoft/windows-rs> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **windows-result 0.2.0** (declared `MIT OR Apache-2.0`). Copyright (c) Microsoft Corporation. <https://github.com/microsoft/windows-rs>
+- **windows-strings 0.1.0** (declared `MIT OR Apache-2.0`). Copyright (c) Microsoft Corporation. <https://github.com/microsoft/windows-rs>
+- **windows-targets 0.52.6** (declared `MIT OR Apache-2.0`). Copyright (c) Microsoft Corporation. <https://github.com/microsoft/windows-rs>
+- **windows_x86_64_gnu 0.52.6** (declared `MIT OR Apache-2.0`). Copyright (c) Microsoft Corporation. <https://github.com/microsoft/windows-rs>
+- **winnow 0.5.40** (declared `MIT`). No copyright line and no authors field in the published crate. <https://github.com/winnow-rs/winnow>
 - **winnow 0.7.14** (declared `MIT`). No copyright line and no authors field in the published crate. <https://github.com/winnow-rs/winnow>
+- **wl-clipboard-rs 0.9.5** (declared `MIT OR Apache-2.0`). Copyright (c) 2019 Ivan Molodetskikh. <https://github.com/YaLTeR/wl-clipboard-rs>
 - **write16 1.0.0** (declared `Apache-2.0 OR MIT`). Copyright Mozilla Foundation. <https://github.com/hsivonen/write16>
 - **wry 0.49.0** (declared `Apache-2.0 OR MIT`). Copyright (c) 2020-2023 Ngo Iok Ui & Tauri Programme within The Commons Conservancy. <https://github.com/tauri-apps/wry>
+- **wuff 0.2.9** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Nico Burns. <https://github.com/nicoburns/wuff>
+- **x11 2.21.0** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: daggerbot, Erle Pereira, AltF02. <https://github.com/AltF02/x11-rs.git>
+- **x11-dl 2.21.0** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: daggerbot, Erle Pereira, AltF02. <https://github.com/AltF02/x11-rs.git>
+- **x11rb 0.13.2** (declared `MIT OR Apache-2.0`). Copyright 2019 x11rb Contributers. <https://github.com/psychon/x11rb>
+- **x11rb-protocol 0.13.2** (declared `MIT OR Apache-2.0`). Copyright 2019 x11rb Contributers. <https://github.com/psychon/x11rb>
 - **xsum 0.1.6** (declared `MIT`). Copyright 2015, 2018, 2021, 2024 Radford M. Neal; Copyright 2025 Keita Nonaka. <https://github.com/Gumichocopengin8/xsum.rs>
+- **yeslogic-fontconfig-sys 4.0.1** (declared `MIT`). Copyright 2019 YesLogic Pty. Ltd; Copyright 2016 Manuel Reinhardt; Copyright 2014 Austin Bonander; Copyright 2013 The Servo Project Developers. <https://github.com/yeslogic/fontconfig-rs>
+- **zbus 5.12.0** (declared `MIT`). Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors. <https://github.com/z-galaxy/zbus/>
+- **zbus_macros 5.12.0** (declared `MIT`). Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors. <https://github.com/z-galaxy/zbus/> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **zbus_names 4.2.0** (declared `MIT`). Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors. <https://github.com/dbus2/zbus/>
 - **zerocopy 0.8.31** (declared `BSD-2-Clause OR Apache-2.0 OR MIT`). Copyright 2023 The Fuchsia Authors; Copyright 2019 The Fuchsia Authors. <https://github.com/google/zerocopy>
 - **zeroize 1.8.2** (declared `Apache-2.0 OR MIT`). Copyright (c) 2018-2021 The RustCrypto Project Developers. <https://github.com/RustCrypto/utils>
 - **zmij 1.0.9** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/zmij>
+- **zvariant 5.8.0** (declared `MIT`). Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors. <https://github.com/dbus2/zbus/>
+- **zvariant_derive 5.8.0** (declared `MIT`). Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors. <https://github.com/dbus2/zbus/> [procedural macro: runs at build time; the code it generates is compiled in, the crate itself is not linked]
+- **zvariant_utils 3.2.1** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Zeeshan Ali Khan, turbocooler. <https://github.com/dbus2/zbus/>
 
 #### Text of the MIT License
 
@@ -569,14 +654,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ````
 
-### Apache License 2.0 (`Apache-2.0`): 8 crates
+### Apache License 2.0 (`Apache-2.0`): 7 crates
 
 - **calendrical_calculations 0.2.4** (declared `Apache-2.0`). Copyright 2023 The Unicode Consortium. <https://github.com/unicode-org/icu4x>
 - **codespan-reporting 0.11.1** (declared `Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Brendan Zabarauskas. <https://github.com/brendanzab/codespan>
-- **flatbuffers 25.12.19** (declared `Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Robert Winslow, FlatBuffers Maintainers. <https://github.com/google/flatbuffers>
-- **ryu 1.0.22** (declared `Apache-2.0 OR BSL-1.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay. <https://github.com/dtolnay/ryu>
+- **gethostname 1.1.0** (declared `Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Sebastian Wiesner. <https://codeberg.org/swsnr/gethostname.rs.git>
 - **ryu-js 1.0.3** (declared `Apache-2.0 OR BSL-1.0`). No copyright line in the published crate; Cargo.toml authors: David Tolnay, boa-dev. <https://github.com/boa-dev/ryu-js>
-- **sync_wrapper 1.0.2** (declared `Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Actyx AG. <https://github.com/Actyx/sync_wrapper>
+- **spirv 0.3.0+sdk-1.3.268.0** (declared `Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Lei Zhang. <https://github.com/gfx-rs/rspirv>
 - **tao 0.31.1** (declared `Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Tauri Programme within The Commons Conservancy, The winit contributors. <https://github.com/tauri-apps/tao>
 - **unicode-linebreak 0.1.5** (declared `Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Axel Forsman. <https://github.com/axelf4/unicode-linebreak>
 
@@ -761,8 +845,9 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 END OF TERMS AND CONDITIONS
 ````
 
-### BSD 3-Clause License (`BSD-3-Clause`): 5 crates
+### BSD 3-Clause License (`BSD-3-Clause`): 6 crates
 
+- **alloc-no-stdlib 2.0.4** (declared `BSD-3-Clause`). Copyright (c) 2016 Dropbox, Inc. <https://github.com/dropbox/rust-alloc-no-stdlib>
 - **alloc-no-stdlib 3.0.0** (declared `BSD-3-Clause`). Copyright (c) 2016 Dropbox, Inc. <https://github.com/dropbox/rust-alloc-no-stdlib>
 - **alloc-stdlib 0.3.0** (declared `BSD-3-Clause`). No copyright line in the published crate; Cargo.toml authors: Daniel Reiter Horn. <https://github.com/dropbox/rust-alloc-no-stdlib>
 - **subtle 2.6.1** (declared `BSD-3-Clause`). Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved; Copyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved. <https://github.com/dalek-cryptography/subtle>
@@ -882,7 +967,7 @@ the following restrictions:
 
 ### Mozilla Public License 2.0 (`MPL-2.0`): 2 crates
 
-- **adblock 0.12.0** (declared `MPL-2.0`). No copyright line in the published crate; Cargo.toml authors: Anton Lazarev, Andrius Aucinas. <https://github.com/brave/adblock-rust/>
+- **adblock 0.9.8** (declared `MPL-2.0`). No copyright line in the published crate; Cargo.toml authors: Anton Lazarev, Andrius Aucinas. <https://github.com/brave/adblock-rust/>
 - **option-ext 0.2.0** (declared `MPL-2.0`). No copyright line in the published crate; Cargo.toml authors: Simon Ochsenreither. <https://github.com/soc/option-ext.git>
 
 #### Text of the Mozilla Public License 2.0
@@ -1342,76 +1427,6 @@ authorization of the copyright holder.
 SPDX-License-Identifier: Unicode-3.0
 ````
 
-### Community Data License Agreement, Permissive, 2.0 (`CDLA-Permissive-2.0`): 1 crate
-
-- **webpki-roots 1.0.5** (declared `CDLA-Permissive-2.0`). No copyright line and no authors field in the published crate. <https://github.com/rustls/webpki-roots>
-
-#### Text of the Community Data License Agreement, Permissive, 2.0
-
-````text
-# Community Data License Agreement - Permissive - Version 2.0
-
-This is the Community Data License Agreement - Permissive, Version
-2.0 (the "agreement"). Data Provider(s) and Data Recipient(s) agree
-as follows:
-
-## 1. Provision of the Data
-
-1.1. A Data Recipient may use, modify, and share the Data made
-available by Data Provider(s) under this agreement if that Data
-Recipient follows the terms of this agreement.
-
-1.2. This agreement does not impose any restriction on a Data
-Recipient's use, modification, or sharing of any portions of the
-Data that are in the public domain or that may be used, modified,
-or shared under any other legal exception or limitation.
-
-## 2. Conditions for Sharing Data
-
-2.1. A Data Recipient may share Data, with or without modifications, so
-long as the Data Recipient makes available the text of this agreement
-with the shared Data.
-
-## 3. No Restrictions on Results
-
-3.1. This agreement does not impose any restriction or obligations
-with respect to the use, modification, or sharing of Results.
-
-## 4. No Warranty; Limitation of Liability
-
-4.1. All Data Recipients receive the Data subject to the following
-terms:
-
-THE DATA IS PROVIDED ON AN "AS IS" BASIS, WITHOUT REPRESENTATIONS,
-WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED
-INCLUDING, WITHOUT LIMITATION, ANY WARRANTIES OR CONDITIONS OF TITLE,
-NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
-
-NO DATA PROVIDER SHALL HAVE ANY LIABILITY FOR ANY DIRECT, INDIRECT,
-INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING
-WITHOUT LIMITATION LOST PROFITS), HOWEVER CAUSED AND ON ANY THEORY OF
-LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE DATA OR RESULTS,
-EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
-
-## 5. Definitions
-
-5.1. "Data" means the material received by a Data Recipient under
-this agreement.
-
-5.2. "Data Provider" means any person who is the source of Data
-provided under this agreement and in reliance on a Data Recipient's
-agreement to its terms.
-
-5.3. "Data Recipient" means any person who receives Data directly
-or indirectly from a Data Provider and agrees to the terms of this
-agreement.
-
-5.4. "Results" means any outcome obtained by computational analysis
-of Data, including for example machine learning models and models'
-insights.
-````
-
 ### Creative Commons CC0 1.0 Universal (`CC0-1.0`): 1 crate
 
 - **hexf-parse 0.2.1** (declared `CC0-1.0`). No copyright line in the published crate; Cargo.toml authors: Kang Seonghoon. <https://github.com/lifthrasiir/hexf>
@@ -1550,14 +1565,13 @@ the crate.
 - **aws-lc-rs 1.18.1** (declared `ISC AND (Apache-2.0 OR ISC)`). Copyright Amazon.com, Inc. or its affiliates, and the other holders named in its licence files, which are reproduced in full in section 5. <https://github.com/aws/aws-lc-rs>
 - **aws-lc-sys 0.45.0** (declared `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)`). Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved, and the other holders named in its licence files, which are reproduced in full in section 5. <https://github.com/aws/aws-lc-rs> [a further licence file inside the crate is reproduced in section 5]
 - **dpi 0.1.2** (declared `Apache-2.0 AND MIT`). Copyright (c) 2018 Jorge Aparicio, and the other holders named in its licence files, which are reproduced in full in section 5. <https://github.com/rust-windowing/winit>
-- **ring 0.17.14** (declared `Apache-2.0 AND ISC`). Copyright (c) 2009 The Go Authors. All rights reserved, and the other holders named in its licence files, which are reproduced in full in section 5. <https://github.com/briansmith/ring> [a further licence file inside the crate is reproduced in section 5]
 - **unicode-ident 1.0.22** (declared `(MIT OR Apache-2.0) AND Unicode-3.0`). Copyright © 1991-2023 Unicode, Inc. <https://github.com/dtolnay/unicode-ident>
 
 - **dpi**: Apache-2.0 for the crate (text in section 4) and MIT for the code it
   takes from libm; its `LICENSE-LIBM-MIT` follows in full.
 - **unicode-ident**: used under MIT for its code and Unicode-3.0 for the Unicode
   Character Database tables it embeds; both texts are in section 4.
-- **aws-lc-rs**, **aws-lc-sys** and **ring**: their licence files follow in full,
+- **aws-lc-rs** and **aws-lc-sys**: their licence files follow in full,
   because they attribute individual parts (AWS-LC, BoringSSL, OpenSSL, SSLeay,
   fiat-crypto and others) that a summary would lose.
 
@@ -1569,8 +1583,9 @@ Also reproduced in full below:
   for `LICENSE*`, `COPYING*`, `NOTICE*`, `THIRD_PARTY*` and `PATENTS*` files
   below its root. Those found are reproduced here, except:
   - `aws-lc-sys 0.45.0`: `aws-lc/LICENSE` is the same text as the crate's root `LICENSE`, apart from trailing whitespace.
+  - `freetype-rs 0.35.0`: `examples/assets/LICENSE`. fonts used by the crate's examples, which are not compiled into the binary.
   - `libsqlite3-sys 0.30.1`: `sqlcipher/LICENSE`. SQLCipher is built only with the `sqlcipher` features, which HiWave does not enable.
-  - `ring 0.17.14`: `src/polyfill/once_cell/LICENSE-APACHE` is the Apache-2.0 text, which is in section 4; the once_cell code is used under MIT.
+  - `petgraph 0.8.3`: `assets/images/LICENSE.md`. a documentation image, not compiled into the binary.
 - **V8's licences**, for the code ported into the vendored Boa (section 3).
 
 #### dpi 0.1.2: `LICENSE-LIBM-MIT`
@@ -2449,365 +2464,57 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ````
 
-#### ring 0.17.14: `LICENSE`
+#### freetype-sys 0.20.1: `freetype2/LICENSE.TXT`
+
+FreeType's own licence for its bundled source, which freetype-sys builds when no system FreeType is found; the FreeType License asks for credit.
 
 ````text
-*ring* uses an "ISC" license, like BoringSSL used to use, for new code
-files. See LICENSE-other-bits for the text of that license.
-
-See LICENSE-BoringSSL for code that was sourced from BoringSSL under the
-Apache 2.0 license. Some code that was sourced from BoringSSL under the ISC
-license. In each case, the license info is at the top of the file.
-
-See src/polyfill/once_cell/LICENSE-APACHE and src/polyfill/once_cell/LICENSE-MIT
-for the license to code that was sourced from the once_cell project.
-````
-
-#### ring 0.17.14: `LICENSE-other-bits`
-
-````text
-Copyright 2015-2025 Brian Smith.
-
-Permission to use, copy, modify, and/or distribute this software for any
-purpose with or without fee is hereby granted, provided that the above
-copyright notice and this permission notice appear in all copies.
-
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
-SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
-OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
-CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-````
-
-#### ring 0.17.14: `LICENSE-BoringSSL`
-
-````text
-
-                                 Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
-
-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-
-   1. Definitions.
-
-      "License" shall mean the terms and conditions for use, reproduction,
-      and distribution as defined by Sections 1 through 9 of this document.
-
-      "Licensor" shall mean the copyright owner or entity authorized by
-      the copyright owner that is granting the License.
-
-      "Legal Entity" shall mean the union of the acting entity and all
-      other entities that control, are controlled by, or are under common
-      control with that entity. For the purposes of this definition,
-      "control" means (i) the power, direct or indirect, to cause the
-      direction or management of such entity, whether by contract or
-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
-      outstanding shares, or (iii) beneficial ownership of such entity.
-
-      "You" (or "Your") shall mean an individual or Legal Entity
-      exercising permissions granted by this License.
-
-      "Source" form shall mean the preferred form for making modifications,
-      including but not limited to software source code, documentation
-      source, and configuration files.
-
-      "Object" form shall mean any form resulting from mechanical
-      transformation or translation of a Source form, including but
-      not limited to compiled object code, generated documentation,
-      and conversions to other media types.
-
-      "Work" shall mean the work of authorship, whether in Source or
-      Object form, made available under the License, as indicated by a
-      copyright notice that is included in or attached to the work
-      (an example is provided in the Appendix below).
-
-      "Derivative Works" shall mean any work, whether in Source or Object
-      form, that is based on (or derived from) the Work and for which the
-      editorial revisions, annotations, elaborations, or other modifications
-      represent, as a whole, an original work of authorship. For the purposes
-      of this License, Derivative Works shall not include works that remain
-      separable from, or merely link (or bind by name) to the interfaces of,
-      the Work and Derivative Works thereof.
-
-      "Contribution" shall mean any work of authorship, including
-      the original version of the Work and any modifications or additions
-      to that Work or Derivative Works thereof, that is intentionally
-      submitted to Licensor for inclusion in the Work by the copyright owner
-      or by an individual or Legal Entity authorized to submit on behalf of
-      the copyright owner. For the purposes of this definition, "submitted"
-      means any form of electronic, verbal, or written communication sent
-      to the Licensor or its representatives, including but not limited to
-      communication on electronic mailing lists, source code control systems,
-      and issue tracking systems that are managed by, or on behalf of, the
-      Licensor for the purpose of discussing and improving the Work, but
-      excluding communication that is conspicuously marked or otherwise
-      designated in writing by the copyright owner as "Not a Contribution."
-
-      "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by Licensor and
-      subsequently incorporated within the Work.
-
-   2. Grant of Copyright License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      copyright license to reproduce, prepare Derivative Works of,
-      publicly display, publicly perform, sublicense, and distribute the
-      Work and such Derivative Works in Source or Object form.
-
-   3. Grant of Patent License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      (except as stated in this section) patent license to make, have made,
-      use, offer to sell, sell, import, and otherwise transfer the Work,
-      where such license applies only to those patent claims licensable
-      by such Contributor that are necessarily infringed by their
-      Contribution(s) alone or by combination of their Contribution(s)
-      with the Work to which such Contribution(s) was submitted. If You
-      institute patent litigation against any entity (including a
-      cross-claim or counterclaim in a lawsuit) alleging that the Work
-      or a Contribution incorporated within the Work constitutes direct
-      or contributory patent infringement, then any patent licenses
-      granted to You under this License for that Work shall terminate
-      as of the date such litigation is filed.
-
-   4. Redistribution. You may reproduce and distribute copies of the
-      Work or Derivative Works thereof in any medium, with or without
-      modifications, and in Source or Object form, provided that You
-      meet the following conditions:
-
-      (a) You must give any other recipients of the Work or
-          Derivative Works a copy of this License; and
-
-      (b) You must cause any modified files to carry prominent notices
-          stating that You changed the files; and
-
-      (c) You must retain, in the Source form of any Derivative Works
-          that You distribute, all copyright, patent, trademark, and
-          attribution notices from the Source form of the Work,
-          excluding those notices that do not pertain to any part of
-          the Derivative Works; and
-
-      (d) If the Work includes a "NOTICE" text file as part of its
-          distribution, then any Derivative Works that You distribute must
-          include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding those notices that do not
-          pertain to any part of the Derivative Works, in at least one
-          of the following places: within a NOTICE text file distributed
-          as part of the Derivative Works; within the Source form or
-          documentation, if provided along with the Derivative Works; or,
-          within a display generated by the Derivative Works, if and
-          wherever such third-party notices normally appear. The contents
-          of the NOTICE file are for informational purposes only and
-          do not modify the License. You may add Your own attribution
-          notices within Derivative Works that You distribute, alongside
-          or as an addendum to the NOTICE text from the Work, provided
-          that such additional attribution notices cannot be construed
-          as modifying the License.
-
-      You may add Your own copyright statement to Your modifications and
-      may provide additional or different license terms and conditions
-      for use, reproduction, or distribution of Your modifications, or
-      for any such Derivative Works as a whole, provided Your use,
-      reproduction, and distribution of the Work otherwise complies with
-      the conditions stated in this License.
-
-   5. Submission of Contributions. Unless You explicitly state otherwise,
-      any Contribution intentionally submitted for inclusion in the Work
-      by You to the Licensor shall be under the terms and conditions of
-      this License, without any additional terms or conditions.
-      Notwithstanding the above, nothing herein shall supersede or modify
-      the terms of any separate license agreement you may have executed
-      with Licensor regarding such Contributions.
-
-   6. Trademarks. This License does not grant permission to use the trade
-      names, trademarks, service marks, or product names of the Licensor,
-      except as required for reasonable and customary use in describing the
-      origin of the Work and reproducing the content of the NOTICE file.
-
-   7. Disclaimer of Warranty. Unless required by applicable law or
-      agreed to in writing, Licensor provides the Work (and each
-      Contributor provides its Contributions) on an "AS IS" BASIS,
-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-      implied, including, without limitation, any warranties or conditions
-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
-      PARTICULAR PURPOSE. You are solely responsible for determining the
-      appropriateness of using or redistributing the Work and assume any
-      risks associated with Your exercise of permissions under this License.
-
-   8. Limitation of Liability. In no event and under no legal theory,
-      whether in tort (including negligence), contract, or otherwise,
-      unless required by applicable law (such as deliberate and grossly
-      negligent acts) or agreed to in writing, shall any Contributor be
-      liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as a
-      result of this License or out of the use or inability to use the
-      Work (including but not limited to damages for loss of goodwill,
-      work stoppage, computer failure or malfunction, or any and all
-      other commercial damages or losses), even if such Contributor
-      has been advised of the possibility of such damages.
-
-   9. Accepting Warranty or Additional Liability. While redistributing
-      the Work or Derivative Works thereof, You may choose to offer,
-      and charge a fee for, acceptance of support, warranty, indemnity,
-      or other liability obligations and/or rights consistent with this
-      License. However, in accepting such obligations, You may act only
-      on Your own behalf and on Your sole responsibility, not on behalf
-      of any other Contributor, and only if You agree to indemnify,
-      defend, and hold each Contributor harmless for any liability
-      incurred by, or claims asserted against, such Contributor by reason
-      of your accepting any such warranty or additional liability.
-
-   END OF TERMS AND CONDITIONS
-
-   APPENDIX: How to apply the Apache License to your work.
-
-      To apply the Apache License to your work, attach the following
-      boilerplate notice, with the fields enclosed by brackets "[]"
-      replaced with your own identifying information. (Don't include
-      the brackets!)  The text should be enclosed in the appropriate
-      comment syntax for the file format. We also recommend that a
-      file or class name and description of purpose be included on the
-      same "printed page" as the copyright notice for easier
-      identification within third-party archives.
-
-   Copyright [yyyy] [name of copyright owner]
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-
-
-Licenses for support code
--------------------------
-
-Parts of the TLS test suite are under the Go license. This code is not included
-in BoringSSL (i.e. libcrypto and libssl) when compiled, however, so
-distributing code linked against BoringSSL does not trigger this license:
-
-Copyright (c) 2009 The Go Authors. All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
-
-   * Redistributions of source code must retain the above copyright
-notice, this list of conditions and the following disclaimer.
-   * Redistributions in binary form must reproduce the above
-copyright notice, this list of conditions and the following disclaimer
-in the documentation and/or other materials provided with the
-distribution.
-   * Neither the name of Google Inc. nor the names of its
-contributors may be used to endorse or promote products derived from
-this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-
-BoringSSL uses the Chromium test infrastructure to run a continuous build,
-trybots etc. The scripts which manage this, and the script for generating build
-metadata, are under the Chromium license. Distributing code linked against
-BoringSSL does not trigger this license.
-
-Copyright 2015 The Chromium Authors. All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
-
-   * Redistributions of source code must retain the above copyright
-notice, this list of conditions and the following disclaimer.
-   * Redistributions in binary form must reproduce the above
-copyright notice, this list of conditions and the following disclaimer
-in the documentation and/or other materials provided with the
-distribution.
-   * Neither the name of Google Inc. nor the names of its
-contributors may be used to endorse or promote products derived from
-this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-````
-
-#### ring 0.17.14: `src/polyfill/once_cell/LICENSE-MIT`
-
-ring's copy of code from the once_cell project, `MIT OR Apache-2.0`; used under MIT.
-
-````text
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHOR OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-````
-
-#### ring 0.17.14: `third_party/fiat/LICENSE`
-
-fiat-crypto field arithmetic inside ring.
-
-````text
-The Apache License, Version 2.0 (Apache-2.0)
-
-Copyright 2015-2020 the fiat-crypto authors (see the AUTHORS file)
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+FREETYPE LICENSES
+-----------------
+
+The FreeType  2 font  engine is  copyrighted work  and cannot  be used
+legally without  a software  license.  In order  to make  this project
+usable to  a vast majority of  developers, we distribute it  under two
+mutually exclusive open-source licenses.
+
+This means that *you* must choose  *one* of the two licenses described
+below, then obey all its terms and conditions when using FreeType 2 in
+any of your projects or products.
+
+  - The FreeType License,  found in the file  `docs/FTL.TXT`, which is
+    similar to the  original BSD license *with*  an advertising clause
+    that forces  you to explicitly  cite the FreeType project  in your
+    product's  documentation.  All  details are  in the  license file.
+    This license is suited to products which don't use the GNU General
+    Public License.
+
+    Note that  this license  is compatible to  the GNU  General Public
+    License version 3, but not version 2.
+
+  - The   GNU   General   Public   License   version   2,   found   in
+    `docs/GPLv2.TXT`  (any  later  version  can  be  used  also),  for
+    programs  which  already  use  the  GPL.  Note  that  the  FTL  is
+    incompatible with GPLv2 due to its advertisement clause.
+
+The contributed  BDF and PCF  drivers come  with a license  similar to
+that  of the  X Window  System.   It is  compatible to  the above  two
+licenses (see files `src/bdf/README`  and `src/pcf/README`).  The same
+holds   for   the   source    code   files   `src/base/fthash.c`   and
+`include/freetype/internal/fthash.h`; they were part of the BDF driver
+in earlier FreeType versions.
+
+The gzip  module uses the  zlib license (see  `src/gzip/zlib.h`) which
+too is compatible to the above two licenses.
+
+The files `src/autofit/ft-hb.c` and `src/autofit/ft-hb.h` contain code
+taken almost  verbatim from the  HarfBuzz file `hb-ft.cc`,  which uses
+the 'Old MIT' license, compatible to the above two licenses.
+
+The  MD5 checksum  support  (only used  for  debugging in  development
+builds) is in the public domain.
+
+
+--- end of LICENSE.TXT ---
 ````
 
 #### regex-syntax 0.8.8: `src/unicode_tables/LICENSE-UNICODE`
@@ -2874,114 +2581,32 @@ use or other dealings in these Data Files or Software without prior
 written authorization of the copyright holder.
 ````
 
-#### security-framework 3.7.0: `THIRD_PARTY`
+#### rustybuzz 0.20.1: `scripts/ms-use/COPYING`
 
-Covers documentation comments adapted from Apple's Security framework headers, under the Apple Public Source License 2.0. Documentation only: no Apple code is compiled into the binary.
+Microsoft's Universal Shaping Engine data, from which rustybuzz's compiled-in USE tables are generated.
 
 ````text
-This project contains documentation adapted from Apple Inc.'s Security Framework
-under the following license:
+    MIT License
 
-APPLE PUBLIC SOURCE LICENSE
-Version 2.0 -  August 6, 2003
+    Copyright (c) Microsoft Corporation.
 
-Please read this License carefully before downloading this software.  By downloading or using this software, you are agreeing to be bound by the terms of this License.  If you do not or cannot agree to the terms of this License, please do not download or use the software.
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
 
-Apple Note:  In January 2007, Apple changed its corporate name from "Apple Computer, Inc." to "Apple Inc."  This change has been reflected below and copyright years updated, but no other changes have been made to the APSL 2.0.
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
 
-1.  General; Definitions.  This License applies to any program or other work which Apple Inc. ("Apple") makes publicly available and which contains a notice placed by Apple identifying such program or work as "Original Code" and stating that it is subject to the terms of this Apple Public Source License version 2.0 ("License").  As used in this License:
-
-1.1  "Applicable Patent Rights" mean:  (a) in the case where Apple is the grantor of rights, (i) claims of patents that are now or hereafter acquired, owned by or assigned to Apple and (ii) that cover subject matter contained in the Original Code, but only to the extent necessary to use, reproduce and/or distribute the Original Code without infringement; and (b) in the case where You are the grantor of rights, (i) claims of patents that are now or hereafter acquired, owned by or assigned to You and (ii) that cover subject matter in Your Modifications, taken alone or in combination with Original Code.
-
-1.2 "Contributor" means any person or entity that creates or contributes to the creation of Modifications.
-
-1.3  "Covered Code" means the Original Code, Modifications, the combination of Original Code and any Modifications, and/or any respective portions thereof.
-
-1.4 "Externally Deploy" means: (a) to sublicense, distribute or otherwise make Covered Code available, directly or indirectly, to anyone other than You; and/or (b) to use Covered Code, alone or as part of a Larger Work, in any way to provide a service, including but not limited to delivery of content, through electronic communication with a client other than You.
-
-1.5 "Larger Work" means a work which combines Covered Code or portions thereof with code not governed by the terms of this License.
-
-1.6 "Modifications" mean any addition to, deletion from, and/or change to, the substance and/or structure of the Original Code, any previous Modifications, the combination of Original Code and any previous Modifications, and/or any respective portions thereof.  When code is released as a series of files, a Modification is:  (a) any addition to or deletion from the contents of a file containing Covered Code; and/or (b) any new file or other representation of computer program statements that contains any part of Covered Code.
-
-1.7 "Original Code" means (a) the Source Code of a program or other work as originally made available by Apple under this License, including the Source Code of any updates or upgrades to such programs or works made available by Apple under this License, and that has been expressly identified by Apple as such in the header file(s) of such work; and (b) the object code compiled from such Source Code and originally made available by Apple under this License
-
-1.8 "Source Code" means the human readable form of a program or other work that is suitable for making modifications to it, including all modules it contains, plus any associated interface definition files, scripts used to control compilation and installation of an executable (object code).
-
-1.9 "You" or "Your" means an individual or a legal entity exercising rights under this License.  For legal entities, "You" or "Your" includes any entity which controls, is controlled by, or is under common control with, You, where "control" means (a) the power, direct or indirect, to cause the direction or management of such entity, whether by contract or otherwise, or (b) ownership of fifty percent (50%) or more of the outstanding shares or beneficial ownership of such entity.
-
-2.  Permitted Uses; Conditions & Restrictions.   Subject to the terms and conditions of this License, Apple hereby grants You, effective on the date You accept this License and download the Original Code, a world-wide, royalty-free, non-exclusive license, to the extent of Apple's Applicable Patent Rights and copyrights covering the Original Code, to do the following:
-
-2.1 Unmodified Code.  You may use, reproduce, display, perform, internally distribute within Your organization, and Externally Deploy verbatim, unmodified copies of the Original Code, for commercial or non-commercial purposes, provided that in each instance:
-
-(a) You must retain and reproduce in all copies of Original Code the copyright and other proprietary notices and disclaimers of Apple as they appear in the Original Code, and keep intact all notices in the Original Code that refer to this License; and
-
-(b)     You must include a copy of this License with every copy of Source Code of Covered Code and documentation You distribute or Externally Deploy, and You may not offer or impose any terms on such Source Code that alter or restrict this License or the recipients' rights hereunder, except as permitted under Section 6.
-
-2.2 Modified Code.  You may modify Covered Code and use, reproduce, display, perform, internally distribute within Your organization, and Externally Deploy Your Modifications and Covered Code, for commercial or non-commercial purposes, provided that in each instance You also meet all of these conditions:
-
-(a) You must satisfy all the conditions of Section 2.1 with respect to the Source Code of the Covered Code;
-
-(b) You must duplicate, to the extent it does not already exist, the notice in Exhibit A in each file of the Source Code of all Your Modifications, and cause the modified files to carry prominent notices stating that You changed the files and the date of any change; and
-
-(c) If You Externally Deploy Your Modifications, You must make Source Code of all Your Externally Deployed Modifications either available to those to whom You have Externally Deployed Your Modifications, or publicly available.  Source Code of Your Externally Deployed Modifications must be released under the terms set forth in this License, including the license grants set forth in Section 3 below, for as long as you Externally Deploy the Covered Code or twelve (12) months from the date of initial External Deployment, whichever is longer. You should preferably distribute the Source Code of Your Externally Deployed Modifications electronically (e.g. download from a web site).
-
-2.3 Distribution of Executable Versions.  In addition, if You Externally Deploy Covered Code (Original Code and/or Modifications) in object code, executable form only, You must include a prominent notice, in the code itself as well as in related documentation, stating that Source Code of the Covered Code is available under the terms of this License with information on how and where to obtain such Source Code.
-
-2.4 Third Party Rights.  You expressly acknowledge and agree that although Apple and each Contributor grants the licenses to their respective portions of the Covered Code set forth herein, no assurances are provided by Apple or any Contributor that the Covered Code does not infringe the patent or other intellectual property rights of any other entity. Apple and each Contributor disclaim any liability to You for claims brought by any other entity based on infringement of intellectual property rights or otherwise. As a condition to exercising the rights and licenses granted hereunder, You hereby assume sole responsibility to secure any other intellectual property rights needed, if any. For example, if a third party patent license is required to allow You to distribute the Covered Code, it is Your responsibility to acquire that license before distributing the Covered Code.
-
-3.  Your Grants.  In consideration of, and as a condition to, the licenses granted to You under this License, You hereby grant to any person or entity receiving or distributing Covered Code under this License a non-exclusive, royalty-free, perpetual, irrevocable license, under Your Applicable Patent Rights and other intellectual property rights (other than patent) owned or controlled by You, to use, reproduce, display, perform, modify, sublicense, distribute and Externally Deploy Your Modifications of the same scope and extent as Apple's licenses under Sections 2.1 and 2.2 above.
-
-4.  Larger Works.  You may create a Larger Work by combining Covered Code with other code not governed by the terms of this License and distribute the Larger Work as a single product.  In each such instance, You must make sure the requirements of this License are fulfilled for the Covered Code or any portion thereof.
-
-5.  Limitations on Patent License.   Except as expressly stated in Section 2, no other patent rights, express or implied, are granted by Apple herein.  Modifications and/or Larger Works may require additional patent licenses from Apple which Apple may grant in its sole discretion.
-
-6.  Additional Terms.  You may choose to offer, and to charge a fee for, warranty, support, indemnity or liability obligations and/or other rights consistent with the scope of the license granted herein ("Additional Terms") to one or more recipients of Covered Code. However, You may do so only on Your own behalf and as Your sole responsibility, and not on behalf of Apple or any Contributor. You must obtain the recipient's agreement that any such Additional Terms are offered by You alone, and You hereby agree to indemnify, defend and hold Apple and every Contributor harmless for any liability incurred by or claims asserted against Apple or such Contributor by reason of any such Additional Terms.
-
-7.  Versions of the License.  Apple may publish revised and/or new versions of this License from time to time.  Each version will be given a distinguishing version number.  Once Original Code has been published under a particular version of this License, You may continue to use it under the terms of that version. You may also choose to use such Original Code under the terms of any subsequent version of this License published by Apple.  No one other than Apple has the right to modify the terms applicable to Covered Code created under this License.
-
-8.  NO WARRANTY OR SUPPORT.  The Covered Code may contain in whole or in part pre-release, untested, or not fully tested works.  The Covered Code may contain errors that could cause failures or loss of data, and may be incomplete or contain inaccuracies.  You expressly acknowledge and agree that use of the Covered Code, or any portion thereof, is at Your sole and entire risk.  THE COVERED CODE IS PROVIDED "AS IS" AND WITHOUT WARRANTY, UPGRADES OR SUPPORT OF ANY KIND AND APPLE AND APPLE'S LICENSOR(S) (COLLECTIVELY REFERRED TO AS "APPLE" FOR THE PURPOSES OF SECTIONS 8 AND 9) AND ALL CONTRIBUTORS EXPRESSLY DISCLAIM ALL WARRANTIES AND/OR CONDITIONS, EXPRESS OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES AND/OR CONDITIONS OF MERCHANTABILITY, OF SATISFACTORY QUALITY, OF FITNESS FOR A PARTICULAR PURPOSE, OF ACCURACY, OF QUIET ENJOYMENT, AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.  APPLE AND EACH CONTRIBUTOR DOES NOT WARRANT AGAINST INTERFERENCE WITH YOUR ENJOYMENT OF THE COVERED CODE, THAT THE FUNCTIONS CONTAINED IN THE COVERED CODE WILL MEET YOUR REQUIREMENTS, THAT THE OPERATION OF THE COVERED CODE WILL BE UNINTERRUPTED OR ERROR-FREE, OR THAT DEFECTS IN THE COVERED CODE WILL BE CORRECTED.  NO ORAL OR WRITTEN INFORMATION OR ADVICE GIVEN BY APPLE, AN APPLE AUTHORIZED REPRESENTATIVE OR ANY CONTRIBUTOR SHALL CREATE A WARRANTY.  You acknowledge that the Covered Code is not intended for use in the operation of nuclear facilities, aircraft navigation, communication systems, or air traffic control machines in which case the failure of the Covered Code could lead to death, personal injury, or severe physical or environmental damage.
-
-9.  LIMITATION OF LIABILITY. TO THE EXTENT NOT PROHIBITED BY LAW, IN NO EVENT SHALL APPLE OR ANY CONTRIBUTOR BE LIABLE FOR ANY INCIDENTAL, SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES ARISING OUT OF OR RELATING TO THIS LICENSE OR YOUR USE OR INABILITY TO USE THE COVERED CODE, OR ANY PORTION THEREOF, WHETHER UNDER A THEORY OF CONTRACT, WARRANTY, TORT (INCLUDING NEGLIGENCE), PRODUCTS LIABILITY OR OTHERWISE, EVEN IF APPLE OR SUCH CONTRIBUTOR HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES AND NOTWITHSTANDING THE FAILURE OF ESSENTIAL PURPOSE OF ANY REMEDY. SOME JURISDICTIONS DO NOT ALLOW THE LIMITATION OF LIABILITY OF INCIDENTAL OR CONSEQUENTIAL DAMAGES, SO THIS LIMITATION MAY NOT APPLY TO YOU. In no event shall Apple's total liability to You for all damages (other than as may be required by applicable law) under this License exceed the amount of fifty dollars ($50.00).
-
-10. Trademarks.  This License does not grant any rights to use the trademarks or trade names  "Apple", "Mac", "Mac OS", "QuickTime", "QuickTime Streaming Server" or any other trademarks, service marks, logos or trade names belonging to Apple (collectively "Apple Marks") or to any trademark, service mark, logo or trade name belonging to any Contributor.  You agree not to use any Apple Marks in or as part of the name of products derived from the Original Code or to endorse or promote products derived from the Original Code other than as expressly permitted by and in strict compliance at all times with Apple's third party trademark usage guidelines which are posted at http://www.apple.com/legal/guidelinesfor3rdparties.html.
-
-11. Ownership. Subject to the licenses granted under this License, each Contributor retains all rights, title and interest in and to any Modifications made by such Contributor.  Apple retains all rights, title and interest in and to the Original Code and any Modifications made by or on behalf of Apple ("Apple Modifications"), and such Apple Modifications will not be automatically subject to this License.  Apple may, at its sole discretion, choose to license such Apple Modifications under this License, or on different terms from those contained in this License or may choose not to license them at all.
-
-12. Termination.
-
-12.1    Termination.  This License and the rights granted hereunder will terminate:
-
-(a) automatically without notice from Apple if You fail to comply with any term(s) of this License and fail to cure such breach within 30 days of becoming aware of such breach;
-(b) immediately in the event of the circumstances described in Section 13.5(b); or
-(c) automatically without notice from Apple if You, at any time during the term of this License, commence an action for patent infringement against Apple; provided that Apple did not first commence an action for patent infringement against You in that instance.
-
-12.2    Effect of Termination.  Upon termination, You agree to immediately stop any further use, reproduction, modification, sublicensing and distribution of the Covered Code.  All sublicenses to the Covered Code which have been properly granted prior to termination shall survive any termination of this License.  Provisions which, by their nature, should remain in effect beyond the termination of this License shall survive, including but not limited to Sections 3, 5, 8, 9, 10, 11, 12.2 and 13.  No party will be liable to any other for compensation, indemnity or damages of any sort solely as a result of terminating this License in accordance with its terms, and termination of this License will be without prejudice to any other right or remedy of any party.
-
-13.     Miscellaneous.
-
-13.1    Government End Users.   The Covered Code is a "commercial item" as defined in FAR 2.101.  Government software and technical data rights in the Covered Code include only those rights customarily provided to the public as defined in this License. This customary commercial license in technical data and software is provided in accordance with FAR 12.211 (Technical Data) and 12.212 (Computer Software) and, for Department of Defense purchases, DFAR 252.227-7015 (Technical Data -- Commercial Items) and 227.7202-3 (Rights in Commercial Computer Software or Computer Software Documentation).  Accordingly, all U.S. Government End Users acquire Covered Code with only those rights set forth herein.
-
-13.2    Relationship of Parties.  This License will not be construed as creating an agency, partnership, joint venture or any other form of legal association between or among You, Apple or any Contributor, and You will not represent to the contrary, whether expressly, by implication, appearance or otherwise.
-
-13.3    Independent Development.   Nothing in this License will impair Apple's right to acquire, license, develop, have others develop for it, market and/or distribute technology or products that perform the same or similar functions as, or otherwise compete with, Modifications, Larger Works, technology or products that You may develop, produce, market or distribute.
-
-13.4    Waiver; Construction.  Failure by Apple or any Contributor to enforce any provision of this License will not be deemed a waiver of future enforcement of that or any other provision.  Any law or regulation which provides that the language of a contract shall be construed against the drafter will not apply to this License.
-
-13.5    Severability.  (a) If for any reason a court of competent jurisdiction finds any provision of this License, or portion thereof, to be unenforceable, that provision of the License will be enforced to the maximum extent permissible so as to effect the economic benefits and intent of the parties, and the remainder of this License will continue in full force and effect.  (b) Notwithstanding the foregoing, if applicable law prohibits or restricts You from fully and/or specifically complying with Sections 2 and/or 3 or prevents the enforceability of either of those Sections, this License will immediately terminate and You must immediately discontinue any use of the Covered Code and destroy all copies of it that are in your possession or control.
-
-13.6    Dispute Resolution.  Any litigation or other dispute resolution between You and Apple relating to this License shall take place in the Northern District of California, and You and Apple hereby consent to the personal jurisdiction of, and venue in, the state and federal courts within that District with respect to this License. The application of the United Nations Convention on Contracts for the International Sale of Goods is expressly excluded.
-
-13.7    Entire Agreement; Governing Law.  This License constitutes the entire agreement between the parties with respect to the subject matter hereof.  This License shall be governed by the laws of the United States and the State of California, except that body of California law concerning conflicts of law.
-
-Where You are located in the province of Quebec, Canada, the following clause applies:  The parties hereby confirm that they have requested that this License and all related documents be drafted in English.  Les parties ont exigé que le présent contrat et tous les documents connexes soient rédigés en anglais.
-
-EXHIBIT A.
-
-"Portions Copyright (c) 1999-2007 Apple Inc.  All Rights Reserved.
-
-This file contains Original Code and/or Modifications of Original Code as defined in and that are subject to the Apple Public Source License Version 2.0 (the 'License').  You may not use this file except in compliance with the License.  Please obtain a copy of the License at http://www.opensource.apple.com/apsl/ and read it before using this file.
-
-The Original Code and all software distributed under the License are distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.  Please see the License for the specific language governing rights and limitations under the License."
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE
 ````
 
 #### tracing-core 0.1.36: `src/spin/LICENSE`
@@ -3010,6 +2635,46 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+````
+
+#### wayland-protocols 0.32.10: `protocols/COPYING`
+
+the Wayland protocol definitions, compiled into the crate's generated code.
+
+````text
+Copyright © 2008-2013 Kristian Høgsberg
+Copyright © 2010-2013 Intel Corporation
+Copyright © 2013      Rafael Antognolli
+Copyright © 2013      Jasper St. Pierre
+Copyright © 2014      Jonas Ådahl
+Copyright © 2014      Jason Ekstrand
+Copyright © 2014-2015 Collabora, Ltd.
+Copyright © 2015      Red Hat Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice (including the next
+paragraph) shall be included in all copies or substantial portions of the
+Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+---
+
+The above is the version of the MIT "Expat" License used by X.org:
+
+    http://cgit.freedesktop.org/xorg/xserver/tree/COPYING
 ````
 
 #### V8: `LICENSE.v8`
@@ -3347,15 +3012,15 @@ python3 scripts/third_party_notices.py
 python3 scripts/third_party_notices.py --check
 ```
 
-The crate list is the output of this, for both targets, with the lines whose
+The crate list is the output of this, for that target, with the lines whose
 path is under `crates/` (HiWave's own) removed:
 
 ```bash
 cargo tree -p hiwave-app -e normal --prefix none --format '{p}|{l}|{r}' --target <target> --locked
 ```
 
-It is valid for `-p hiwave-app` with default features on the two macOS
-targets. `-e normal` leaves out build- and dev-dependencies, which are not
+It is valid for `-p hiwave-app` with default features on that Linux
+target. `-e normal` leaves out build- and dev-dependencies, which are not
 linked. A build with other features, of another package, or of the whole
 workspace at once (which unifies features across members) can link more.
 
@@ -3373,8 +3038,8 @@ does not repeat that search.
 
 Not verified:
 
-- Copyright lines are what each crate's own licence files say (300 crates).
-  78 crates ship no copyright line; their entries give the `authors` field
+- Copyright lines are what each crate's own licence files say (341 crates).
+  117 crates ship no copyright line; their entries give the `authors` field
   instead, which names authors, not necessarily copyright holders. Their
   upstream repositories were not read, except Boa's.
 - Licence expressions are the crates' own declarations. No crate's source was
