@@ -836,7 +836,8 @@ impl RustKitView {
                 X11Delivery::MouseMove { x, y } => self.mouse_move_at_point(x, y),
                 X11Delivery::MouseLeave => self.mouse_leave(),
                 X11Delivery::Scroll { x, y, dx, dy } => {
-                    self.scroll_at(x, y, dx, dy);
+                    // An X11 wheel notch: not a gesture step, never a gesture's beginning.
+                    self.scroll_at(x, y, dx, dy, false, false);
                 }
                 X11Delivery::KeyDown { vk, text, ctrl, shift, alt } => {
                     self.handle_text_key(vk, &text, ctrl, shift, alt);

@@ -65,7 +65,9 @@ pub fn button_input(button: u32, down: bool, x: f64, y: f64, state: u32, clicks:
                 6 => (-WHEEL_NOTCH_PX, 0.0),
                 _ => (WHEEL_NOTCH_PX, 0.0),
             };
-            Some(InputKind::Wheel(PendingScroll { x, y, dx, dy }))
+            // A core-protocol wheel button is a notch on its own, with no phase:
+            // not a gesture step, and never a gesture's beginning.
+            Some(InputKind::Wheel(PendingScroll { x, y, dx, dy, gesture: false, began: false }))
         }
         _ => None,
     }

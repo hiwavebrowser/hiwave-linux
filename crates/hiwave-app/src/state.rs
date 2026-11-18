@@ -713,6 +713,8 @@ pub struct AppState {
     pub session_start_time: Instant,
 
     /// Autofill: the pending user-requested fill, if any. Runtime only.
+    /// Linux: the IPC layer (and content-page autofill) is not part of the native-linux build.
+    #[cfg(not(feature = "native-linux"))]
     pub autofill: crate::ipc::autofill::AutofillGate,
 }
 
@@ -791,6 +793,7 @@ impl AppState {
             tab_audio_playing: HashMap::new(),
             tab_audio_muted: HashMap::new(),
             session_start_time: Instant::now(),
+            #[cfg(not(feature = "native-linux"))]
             autofill: Default::default(),
         })
     }
