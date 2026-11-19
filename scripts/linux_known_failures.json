@@ -38,12 +38,64 @@
       "reason": "S22: the inherit-em case's text box is 11 px high on Linux where the pin (Chrome 148 on macOS) is 13: a font-metric pin, as on Windows (hiwave-windows pinned it to Chrome on Windows). Not yet pinned to Chrome 148 on Linux."
     },
     {
-      "test": "rustkit_engine::retained_style_tests::tiles_written_then_read_keep_a_full_builds_boxes",
-      "reason": "Timing-dependent (its display-list comparison races the tile writer); fails the same way on hiwave-macos develop built on Linux. The test-side fix is upstream on Athena's branch, waiting for BOXES-DIFF. Passes on some runs, so it may report as known-now-passing."
-    },
-    {
       "test": "rustkit_layout::tests::inline_block_with_text_sits_on_its_last_line_baseline",
       "reason": "Upstream n53 pin (Chrome for macOS: input top +4, tolerance 2 px). With upstream's control sizing (S22), the CI runner's fonts (DejaVu + Liberation only) seat the input at +1.5 (171x21 box); legion5's fonts seat it at +2.5 and pass. Not measured against Chrome on Linux; the campaign's form-controls case against Linux Chrome 148 improved with S22 (2.8983 -> 2.8274)."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::a_new_src_cancels_the_old_fetch",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::a_server_that_ignores_range_still_loads",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::a_whole_body_past_the_cap_is_a_network_error",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::media_is_fetched_by_range",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::removing_a_video_cancels_its_fetch_and_frees_its_bytes",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::the_metadata_fetches_only_what_it_reads",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::a_small_videos_box_takes_its_size",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::a_video_with_preload_auto_loads_its_metadata",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::a_video_with_the_default_preload_loads_its_metadata",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::a_videos_box_takes_its_ratio_after_metadata",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::an_audio_element_loads_its_metadata",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::bytes_that_are_not_media_are_an_error",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::can_play_type_answers",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::source_selection_skips_a_type_that_cannot_play",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
     }
   ]
 }
