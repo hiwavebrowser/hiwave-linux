@@ -2076,7 +2076,7 @@ mod analytics_hardening_tests {
     fn the_content_ipc_analytics_arm_serves_and_sends_nothing() {
         let main = include_str!("../main.rs");
         let start = main.find("SEC3 content analytics arm").expect("the arm is marked");
-        let end = start + main[start..].find("IpcMessage::OpenExternal").expect("the next arm");
+        let end = start + main[start..].find("_ => {}").expect("the arm after it");
         let arm = &main[start..end];
         assert!(arm.contains("content_page_analytics"), "{arm}");
         assert!(

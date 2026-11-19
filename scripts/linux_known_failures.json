@@ -36,6 +36,14 @@
     {
       "test": "rustkit_engine::flex_aspect_ratio_tests::aspect_ratio_minimum_size_inherit_and_the_card_are_as_in_chrome",
       "reason": "S22: the inherit-em case's text box is 11 px high on Linux where the pin (Chrome 148 on macOS) is 13: a font-metric pin, as on Windows (hiwave-windows pinned it to Chrome on Windows). Not yet pinned to Chrome 148 on Linux."
+    },
+    {
+      "test": "rustkit_engine::retained_style_tests::tiles_written_then_read_keep_a_full_builds_boxes",
+      "reason": "Timing-dependent (its display-list comparison races the tile writer); fails the same way on hiwave-macos develop built on Linux. The test-side fix is upstream on Athena's branch, waiting for BOXES-DIFF. Passes on some runs, so it may report as known-now-passing."
+    },
+    {
+      "test": "rustkit_layout::tests::inline_block_with_text_sits_on_its_last_line_baseline",
+      "reason": "Upstream n53 pin (Chrome for macOS: input top +4, tolerance 2 px). With upstream's control sizing (S22), the CI runner's fonts (DejaVu + Liberation only) seat the input at +1.5 (171x21 box); legion5's fonts seat it at +2.5 and pass. Not measured against Chrome on Linux; the campaign's form-controls case against Linux Chrome 148 improved with S22 (2.8983 -> 2.8274)."
     }
   ]
 }
