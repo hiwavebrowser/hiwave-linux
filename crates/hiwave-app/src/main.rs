@@ -795,6 +795,35 @@ fn load_report_page(content: &impl IWebView) {
     content.load_html(&report_with_chartjs);
 }
 
+/// Whether the main window shows its pages: not while it is minimised or hidden (upstream's). A
+/// window fully covered by others still counts as shown.
+#[cfg(all(not(feature = "native-linux"), any(test, feature = "rustkit")))]
+fn window_shows_pages(window_visible: bool, minimized: bool) -> bool {
+    window_visible && !minimized
+}
+
+/// Tell the RustKit pages of the main window (a RustKit chrome, a RustKit content page) whether the
+/// window shows them (`PageCmd::SetVisible`); each view sends only when its answer changes. A WebKit
+/// view tracks this itself.
+#[cfg(all(feature = "rustkit", not(feature = "native-linux")))]
+fn sync_page_visibility(
+    window: &tao::window::Window,
+    chrome: &chrome_ui::ChromeView,
+    content: &UnifiedContentWebView,
+) {
+    let shown = window_shows_pages(window.is_visible(), window.is_minimized());
+    let mut changed = false;
+    if let chrome_ui::ChromeView::RustKit(chrome) = chrome {
+        changed |= chrome.set_page_visible(shown);
+    }
+    if let UnifiedContentWebView::RustKit(content) = content {
+        changed |= content.set_page_visible(shown);
+    }
+    if changed {
+        info!(shown, "Main window pages visibility");
+    }
+}
+
 /// `RUST_LOG` when it is set to a directive this process can parse. Unset, blank, and unparseable
 /// values stay at info, which is what the app logged before `RUST_LOG` was read (upstream's).
 fn rust_log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
@@ -2583,10 +2612,22 @@ fn main() {
 
                 }
             }
+            // Minimised, restored, hidden or shown again: the main window's pages hear it. A
+            // minimise and a restore each move the focus, and a restore resizes.
+            #[cfg(feature = "rustkit")]
+            Event::WindowEvent {
+                event: WindowEvent::Focused(_),
+                window_id,
+                ..
+            } if window_id == main_window_id => {
+                sync_page_visibility(&window, &chrome_for_events, &content_for_events);
+            }
             Event::WindowEvent {
                 event: WindowEvent::Resized(_new_size),
                 ..
             } => {
+                #[cfg(feature = "rustkit")]
+                sync_page_visibility(&window, &chrome_for_events, &content_for_events);
                 let ch = *chrome_height_for_events.lock().unwrap();
                 let sh = *shelf_height_for_events.lock().unwrap();
                 let sw = *sidebar_width_for_events.lock().unwrap();
@@ -4884,6 +4925,34 @@ mod content_ipc_scope_2_tests {
         }
         for bad in ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", "hiwave://settings", "about:blank", " https://a.test", "httpx://a", ""] {
             assert!(!super::content_new_tab_url_allowed(Some(bad)), "{bad}");
+        }
+    }
+}
+
+#[cfg(all(test, not(feature = "native-linux")))]
+mod page_visibility_tests {
+    use super::window_shows_pages;
+
+    /// Upstream `a_minimised_or_hidden_window_shows_no_page`.
+    #[test]
+    fn a_minimised_or_hidden_window_shows_no_page() {
+        assert!(window_shows_pages(true, false));
+        assert!(!window_shows_pages(true, true), "minimised");
+        assert!(!window_shows_pages(false, false), "hidden");
+        assert!(!window_shows_pages(false, true));
+    }
+
+    /// The main window's focus and resize events tell its RustKit pages whether they are shown
+    /// (a minimise and a restore each move the focus, and a restore resizes), as upstream's do.
+    #[test]
+    fn focus_and_resize_events_sync_page_visibility() {
+        let main = include_str!("main.rs");
+        let event_loop = &main[main.find("event_loop.run(").expect("the event loop")..];
+        for event in ["WindowEvent::Focused(", "WindowEvent::Resized("] {
+            let at = event_loop.find(event).unwrap_or_else(|| panic!("no {event} arm"));
+            let arm = &event_loop[at..];
+            let arm = &arm[..arm.find("Event::WindowEvent {").unwrap_or(arm.len())];
+            assert!(arm.contains("sync_page_visibility("), "{event} arm does not sync page visibility");
         }
     }
 }
