@@ -943,6 +943,7 @@ fn ipc_bodies_logged() -> bool {
 /// What the log says about a chrome IPC command and its answer: the command name, only when it
 /// looks like one (a short snake_case word; anything else is "unknown"), and the answer's kind and
 /// size. Never the answer itself: it can carry what the vault or the history holds.
+#[cfg(not(feature = "native-linux"))]
 fn ipc_log_shape(body: &str, response: &ipc::IpcResponse) -> String {
     let name = serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -4662,5 +4663,57 @@ mod url_log_tests {
         let url = format!("https://a.test/login?token={SECRET}#{SECRET}");
         assert_eq!(page_url_for_log_as(&url, false), "https://a.test/login");
         assert_eq!(page_url_for_log_as(&url, true), url);
+    }
+}
+
+#[cfg(all(test, not(feature = "native-linux")))]
+mod ipc_shape_tests {
+    const MAIN_RS: &str = include_str!("main.rs");
+
+    /// An IPC answer or message is logged by its shape (command, kind, size), never whole: the
+    /// answer can carry what the vault or the history holds.
+    #[test]
+    fn no_ipc_answer_or_message_is_logged_whole() {
+        let whole: Vec<&str> = MAIN_RS
+            .lines()
+            .filter(|l| l.contains("info!(") && l.contains("{:?}"))
+            .filter(|l| l.contains(", response)") || l.contains(", ipc_msg)"))
+            .collect();
+        assert!(whole.is_empty(), "logged whole: {whole:#?}");
+    }
+
+    /// The picked element's path reaches the Inspector as a JavaScript string literal built by
+    /// one function, not by hand-escaping quotes in place.
+    #[test]
+    fn the_picked_element_script_is_built_by_one_function() {
+        let picked = MAIN_RS
+            .split("UserEvent::InspectorElementPicked { path, styles } =>")
+            .nth(1)
+            .expect("the picked-element handler");
+        let handler = &picked[..picked.find("UserEvent::").unwrap_or(picked.len())];
+        assert!(!handler.contains("replace("), "hand-escaped path: {handler}");
+        assert!(handler.contains("inspector_picked_script("), "{handler}");
+    }
+
+    /// The log line names the command and the answer's kind and size, never the answer's data.
+    #[test]
+    fn an_answer_is_logged_by_command_kind_and_size() {
+        let secret = "pw-for-the-test";
+        let answer = crate::ipc::IpcResponse::success(serde_json::json!({ "password": secret }));
+        let line = super::ipc_log_shape(r#"{"cmd":"get_credentials"}"#, &answer);
+        assert!(line.starts_with("get_credentials: success, "), "{line}");
+        assert!(!line.contains(secret), "{line}");
+        let odd = super::ipc_log_shape(r#"{"cmd":"Not A Command <x>"}"#, &answer);
+        assert!(odd.starts_with("unknown: "), "{odd}");
+    }
+
+    /// A path with quotes, a backslash or line breaks reaches the script as one string literal.
+    #[test]
+    fn the_picked_path_is_one_string_literal() {
+        for path in ["div\\'); window.__flag = 1; } //", "div[title=\"a\\\\b\"] > p\n'x'\r\u{2028}"] {
+            let script = super::inspector_picked_script(path, "null");
+            let literal = serde_json::to_string(path).unwrap();
+            assert!(script.contains(&format!("selectElementByPath({literal})")), "{script}");
+        }
     }
 }
