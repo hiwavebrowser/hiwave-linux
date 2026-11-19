@@ -1,0 +1,697 @@
+{
+  "summary": {
+    "set": "chrome-board-42",
+    "cases": 42,
+    "scored": 42,
+    "errors": [],
+    "size_mismatches": [],
+    "mean_pixels_over_8_pct": 1.6401,
+    "mean_channel_diff": 0.9173,
+    "worst10_by_pixels_over_8": [
+      {
+        "case": "chrome/address_focused/1024x700",
+        "pixels_over_8_pct": 5.0932,
+        "mean_channel_diff": 3.023
+      },
+      {
+        "case": "chrome/hover_tab2/1024x700",
+        "pixels_over_8_pct": 4.9068,
+        "mean_channel_diff": 2.7738
+      },
+      {
+        "case": "chrome/default/1024x700",
+        "pixels_over_8_pct": 4.9009,
+        "mean_channel_diff": 2.7936
+      },
+      {
+        "case": "chrome/find_open/1024x700",
+        "pixels_over_8_pct": 4.7461,
+        "mean_channel_diff": 2.3347
+      },
+      {
+        "case": "chrome/address_focused/1280x800",
+        "pixels_over_8_pct": 4.1929,
+        "mean_channel_diff": 2.4807
+      },
+      {
+        "case": "chrome/hover_tab2/1280x800",
+        "pixels_over_8_pct": 3.9624,
+        "mean_channel_diff": 2.202
+      },
+      {
+        "case": "chrome/default/1280x800",
+        "pixels_over_8_pct": 3.9583,
+        "mean_channel_diff": 2.2158
+      },
+      {
+        "case": "chrome/find_open/1280x800",
+        "pixels_over_8_pct": 3.8562,
+        "mean_channel_diff": 1.9405
+      },
+      {
+        "case": "chrome/address_focused/1600x1000",
+        "pixels_over_8_pct": 3.0129,
+        "mean_channel_diff": 1.7556
+      },
+      {
+        "case": "chrome/hover_tab2/1600x1000",
+        "pixels_over_8_pct": 2.7854,
+        "mean_channel_diff": 1.4937
+      }
+    ],
+    "board_green": 22,
+    "mean_geometry_diffs": 76.12
+  },
+  "rows": [
+    {
+      "case": "chrome/address_focused/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 5.0932,
+      "mean_channel_diff": 3.023,
+      "geometry_diffs": 144,
+      "board_green": false
+    },
+    {
+      "case": "chrome/address_focused/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 4.1929,
+      "mean_channel_diff": 2.4807,
+      "geometry_diffs": 144,
+      "board_green": false
+    },
+    {
+      "case": "chrome/address_focused/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 3.0129,
+      "mean_channel_diff": 1.7556,
+      "geometry_diffs": 143,
+      "board_green": false
+    },
+    {
+      "case": "chrome/default/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 4.9009,
+      "mean_channel_diff": 2.7936,
+      "geometry_diffs": 144,
+      "board_green": false
+    },
+    {
+      "case": "chrome/default/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 3.9583,
+      "mean_channel_diff": 2.2158,
+      "geometry_diffs": 144,
+      "board_green": false
+    },
+    {
+      "case": "chrome/default/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 2.7828,
+      "mean_channel_diff": 1.5026,
+      "geometry_diffs": 143,
+      "board_green": false
+    },
+    {
+      "case": "chrome/downloads_open/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 1.5866,
+      "mean_channel_diff": 0.8264,
+      "geometry_diffs": 135,
+      "board_green": false
+    },
+    {
+      "case": "chrome/downloads_open/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 1.1606,
+      "mean_channel_diff": 0.5872,
+      "geometry_diffs": 137,
+      "board_green": false
+    },
+    {
+      "case": "chrome/downloads_open/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 0.7828,
+      "mean_channel_diff": 0.3827,
+      "geometry_diffs": 137,
+      "board_green": true
+    },
+    {
+      "case": "chrome/find_open/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 4.7461,
+      "mean_channel_diff": 2.3347,
+      "geometry_diffs": 144,
+      "board_green": false
+    },
+    {
+      "case": "chrome/find_open/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 3.8562,
+      "mean_channel_diff": 1.9405,
+      "geometry_diffs": 144,
+      "board_green": false
+    },
+    {
+      "case": "chrome/find_open/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 2.7412,
+      "mean_channel_diff": 1.4561,
+      "geometry_diffs": 143,
+      "board_green": false
+    },
+    {
+      "case": "chrome/focus_mode/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 0.3892,
+      "mean_channel_diff": 0.2309,
+      "geometry_diffs": 138,
+      "board_green": true
+    },
+    {
+      "case": "chrome/focus_mode/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 0.2723,
+      "mean_channel_diff": 0.1622,
+      "geometry_diffs": 140,
+      "board_green": true
+    },
+    {
+      "case": "chrome/focus_mode/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 0.1742,
+      "mean_channel_diff": 0.1043,
+      "geometry_diffs": 140,
+      "board_green": true
+    },
+    {
+      "case": "chrome/hover_tab2/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 4.9068,
+      "mean_channel_diff": 2.7738,
+      "geometry_diffs": 144,
+      "board_green": false
+    },
+    {
+      "case": "chrome/hover_tab2/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 3.9624,
+      "mean_channel_diff": 2.202,
+      "geometry_diffs": 144,
+      "board_green": false
+    },
+    {
+      "case": "chrome/hover_tab2/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 2.7854,
+      "mean_channel_diff": 1.4937,
+      "geometry_diffs": 143,
+      "board_green": false
+    },
+    {
+      "case": "chrome/sidebar_collapsed/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 0.909,
+      "mean_channel_diff": 0.4695,
+      "geometry_diffs": 138,
+      "board_green": true
+    },
+    {
+      "case": "chrome/sidebar_collapsed/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 0.6863,
+      "mean_channel_diff": 0.3373,
+      "geometry_diffs": 140,
+      "board_green": true
+    },
+    {
+      "case": "chrome/sidebar_collapsed/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 0.4793,
+      "mean_channel_diff": 0.2228,
+      "geometry_diffs": 140,
+      "board_green": true
+    },
+    {
+      "case": "inspector/console_tab/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 0.6045,
+      "mean_channel_diff": 0.3203,
+      "geometry_diffs": 0,
+      "board_green": true
+    },
+    {
+      "case": "inspector/console_tab/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 0.4231,
+      "mean_channel_diff": 0.235,
+      "geometry_diffs": 0,
+      "board_green": true
+    },
+    {
+      "case": "inspector/console_tab/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 0.2708,
+      "mean_channel_diff": 0.1591,
+      "geometry_diffs": 0,
+      "board_green": true
+    },
+    {
+      "case": "inspector/default/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 1.3544,
+      "mean_channel_diff": 0.5118,
+      "geometry_diffs": 31,
+      "board_green": false
+    },
+    {
+      "case": "inspector/default/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 0.948,
+      "mean_channel_diff": 0.3583,
+      "geometry_diffs": 31,
+      "board_green": true
+    },
+    {
+      "case": "inspector/default/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 0.6068,
+      "mean_channel_diff": 0.2293,
+      "geometry_diffs": 31,
+      "board_green": true
+    },
+    {
+      "case": "report/default/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 1.0275,
+      "mean_channel_diff": 0.6005,
+      "geometry_diffs": 12,
+      "board_green": false
+    },
+    {
+      "case": "report/default/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 0.7253,
+      "mean_channel_diff": 0.4389,
+      "geometry_diffs": 12,
+      "board_green": true
+    },
+    {
+      "case": "report/default/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 0.5165,
+      "mean_channel_diff": 0.3272,
+      "geometry_diffs": 12,
+      "board_green": true
+    },
+    {
+      "case": "report/weekly/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 1.0375,
+      "mean_channel_diff": 0.6003,
+      "geometry_diffs": 12,
+      "board_green": false
+    },
+    {
+      "case": "report/weekly/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 0.7338,
+      "mean_channel_diff": 0.4415,
+      "geometry_diffs": 12,
+      "board_green": true
+    },
+    {
+      "case": "report/weekly/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 0.5218,
+      "mean_channel_diff": 0.3314,
+      "geometry_diffs": 12,
+      "board_green": true
+    },
+    {
+      "case": "settings/default/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 1.9107,
+      "mean_channel_diff": 1.3538,
+      "geometry_diffs": 21,
+      "board_green": false
+    },
+    {
+      "case": "settings/default/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 1.5538,
+      "mean_channel_diff": 1.1535,
+      "geometry_diffs": 21,
+      "board_green": false
+    },
+    {
+      "case": "settings/default/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 1.3393,
+      "mean_channel_diff": 1.0066,
+      "geometry_diffs": 21,
+      "board_green": false
+    },
+    {
+      "case": "shelf/default/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 0.5815,
+      "mean_channel_diff": 0.3485,
+      "geometry_diffs": 0,
+      "board_green": true
+    },
+    {
+      "case": "shelf/default/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 0.4076,
+      "mean_channel_diff": 0.2428,
+      "geometry_diffs": 0,
+      "board_green": true
+    },
+    {
+      "case": "shelf/default/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 0.2603,
+      "mean_channel_diff": 0.1558,
+      "geometry_diffs": 0,
+      "board_green": true
+    },
+    {
+      "case": "shelf/shelf_search/1024x700",
+      "rustkit_size": [
+        1024,
+        700
+      ],
+      "chrome_size": [
+        1024,
+        700
+      ],
+      "pixels_over_8_pct": 0.3177,
+      "mean_channel_diff": 0.1935,
+      "geometry_diffs": 0,
+      "board_green": true
+    },
+    {
+      "case": "shelf/shelf_search/1280x800",
+      "rustkit_size": [
+        1280,
+        800
+      ],
+      "chrome_size": [
+        1280,
+        800
+      ],
+      "pixels_over_8_pct": 0.2216,
+      "mean_channel_diff": 0.135,
+      "geometry_diffs": 0,
+      "board_green": true
+    },
+    {
+      "case": "shelf/shelf_search/1600x1000",
+      "rustkit_size": [
+        1600,
+        1000
+      ],
+      "chrome_size": [
+        1600,
+        1000
+      ],
+      "pixels_over_8_pct": 0.1422,
+      "mean_channel_diff": 0.0868,
+      "geometry_diffs": 0,
+      "board_green": true
+    }
+  ]
+}
