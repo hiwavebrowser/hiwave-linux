@@ -2,7 +2,7 @@
 """Three-way comparison metrics for one set of RustKit vs Chrome image pairs (Linux column).
 
 For each pair: the share of pixels where ANY RGB channel differs by more than 8
-(realsite_board.py's definition), the mean absolute RGB channel difference (0-255, over
+(provisional definition, agreed on the exchange 2026-11-19), the mean absolute RGB channel difference (0-255, over
 all pixels), and the two sizes. A size mismatch is reported, never silently cropped:
 the metrics then cover the common top-left area and the row says so.
 
