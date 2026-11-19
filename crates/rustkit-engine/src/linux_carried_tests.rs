@@ -75,7 +75,7 @@ fn selector_matches_compat(
         .collect();
     let anc: Vec<Ancestor> = anc.into_iter().map(std::rc::Rc::new).collect();
     let _ = e;
-    SelectorMatcher.selector_matches(selector, tag, &attributes, &anc, &[], SiblingContext::SOLE)
+    SelectorMatcher.selector_matches(selector, tag, &rustkit_dom::AttrMap::from(attributes), &anc, &[], SiblingContext::SOLE)
 }
 
 /// One-stop Engine for carried compat tests. GPU-backed (test_compositor), so
@@ -84,6 +84,7 @@ fn selector_matches_compat(
 fn shim_engine() -> Engine {
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     Engine {
+        live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
         clipboard: MemoryClipboard::shared(),
         clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -548,6 +549,7 @@ mod box_shadow_paint_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -734,6 +736,7 @@ mod box_shorthand_and_auto_margins {
             <body><div id=c>x</div></body></html>"#;
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -774,6 +777,7 @@ mod canvas_background_propagation {
     fn first_command(html: &str) -> String {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -952,6 +956,7 @@ mod child_combinator_tests {
         // would pass every test above and change nothing on screen.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -1112,6 +1117,7 @@ mod external_stylesheet_tests {
         // specificity because external is placed first.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -1162,6 +1168,7 @@ mod external_stylesheet_tests {
     fn engine_for_test() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -1223,6 +1230,7 @@ mod external_stylesheet_tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -1261,6 +1269,7 @@ mod flex_column_cross_stretch {
     fn laid_out(html: &str, w: f32) -> Vec<(bool, f32, f32)> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -1514,6 +1523,7 @@ mod flexbox_45_automatic_minimum {
         );
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -1554,6 +1564,7 @@ mod flexbox_45_automatic_minimum {
         );
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -1695,6 +1706,7 @@ mod font_size_cascade_absolutise {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -1961,6 +1973,7 @@ mod grid_intrinsic_track_sizing {
         );
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -2066,6 +2079,7 @@ mod html_root_inheritance {
     fn text_style(html: &str) -> ComputedStyle {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -2152,6 +2166,7 @@ mod inheritance_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -2344,6 +2359,7 @@ mod l1_live_relative_units_reach_flex_and_grid {
     fn element_xs(html: &str) -> Vec<f32> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -2762,6 +2778,7 @@ mod position_wire_tests {
         // resting on my own helper being called.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let e = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -2973,6 +2990,7 @@ mod rounded_rect_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -3206,6 +3224,7 @@ mod text_decoration_tests {
     fn engine() -> Engine {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             clipboard: MemoryClipboard::shared(),
             clipboard_readers: Default::default(),
             config: EngineConfig::default(),
@@ -3577,6 +3596,7 @@ mod x11_content_path {
         let images = rustkit_image::ImageManager::new();
         let commit = FrameCommit {
             modal_popup: false,
+            web_fonts: Default::default(),
             generation: 1,
             nav_generation: 1,
             list: Some(Arc::new(DisplayList::new())),

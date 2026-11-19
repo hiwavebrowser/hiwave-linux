@@ -20193,6 +20193,13 @@ impl layout_ctx::LayoutCtx {
         }
     }
 
+    /// Linux: upstream's tests call the method form; Linux's callers use the associated
+    /// function below (no `self`).
+    #[cfg(test)]
+    fn apply_initial_value(&self, style: &mut ComputedStyle, property: &str) {
+        Self::apply_initial_value_impl(style, property)
+    }
+
     /// Apply the initial (default) value for a CSS property.
     fn apply_initial_value_impl(style: &mut ComputedStyle, property: &str) {
         match property {

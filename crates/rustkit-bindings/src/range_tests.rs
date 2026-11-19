@@ -224,9 +224,9 @@ fn clearing_a_find_puts_every_node_back_exactly_as_it_was() {
     );
     assert_eq!(
         ev(&b, "var h = document.getElementById('hit'); var t = h.firstChild, i = h.lastChild; var before = h.innerHTML; \
-                var r = window.__hiwaveFind.run({query: 'hello', case_sensitive: false, direction: 'reset'}); var marked = h.querySelectorAll('.zen-find-match').length; \
+                var r = window.__hiwaveFind.run({query: 'hello', case_sensitive: false, direction: 'reset'}); var marked = h.querySelectorAll('.hiwave-find-match').length; \
                 window.__hiwaveFind.run({query: '', direction: 'reset'}); \
-                [r.count, marked, h.childNodes.length, h.firstChild === t, h.lastChild === i, h.innerHTML === before, t.data, h.querySelectorAll('.zen-find-match').length].join('|')"),
+                [r.count, marked, h.childNodes.length, h.firstChild === t, h.lastChild === i, h.innerHTML === before, t.data, h.querySelectorAll('.hiwave-find-match').length].join('|')"),
         "4|4|2|true|true|true|hello a hello b hello|0"
     );
 }

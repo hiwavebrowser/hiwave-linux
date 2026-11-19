@@ -6022,6 +6022,8 @@ mod computed_style_field_guards {
             // border-spacing and border-collapse inherit (css-ui-4 / css-tables-3)
             // and the adopted inherit_from copies them.
             pointer_events, border_spacing, border_collapse, cursor,
+            // S22 sync (upstream fields): copied by inherit_from.
+            font_size_keyword, font_size_absolute, font_smoothing, text_rendering_geometric_precision,
             // ---- NOT INHERITED: reset to an initial by inherit_from, or
             //      deliberately left to Default because Default IS the CSS
             //      initial. NOTE min_width/min_height are NOT in that group any
@@ -6088,6 +6090,9 @@ mod computed_style_field_guards {
             transitions, animations, animation_settled_opacity, clip,
             will_change_holds_fixed, contain_holds_fixed, stacks, webkit_scrollbar,
             abspos_was_inline_level,
+            // S22 sync (upstream fields): reset by inherit_from.
+            size_declared, padding_v_declared, border_v_declared, line_height_declared,
+            padding_declared, border_declared, appearance, width_max_content, width_min_content,
         } = ComputedStyle::new();
 
         // THE PARTITION IS CHECKED, NOT MERELY DOCUMENTED - and every
@@ -6134,6 +6139,10 @@ mod computed_style_field_guards {
         parent.border_spacing = (3.0, 4.0);
         parent.border_collapse = BorderCollapse::Collapse;
         parent.cursor = Cursor::Pointer;
+        parent.font_size_keyword = 7;
+        parent.font_size_absolute = true;
+        parent.font_smoothing = FontSmoothing::Antialiased;
+        parent.text_rendering_geometric_precision = true;
         // Non-inherited fields, given non-default values so that "was reset"
         // is distinguishable from "happened to already be the initial".
         parent.width = Length::Px(500.0);
@@ -6143,7 +6152,7 @@ mod computed_style_field_guards {
 
         let child = ComputedStyle::inherit_from(&parent);
 
-        // ---- all 22 inherited fields ----
+        // ---- all 26 inherited fields ----
         assert_eq!(child.overflow_wrap, OverflowWrap::Anywhere, "overflow-wrap must inherit");
         assert_eq!(child.line_break, LineBreak::Strict, "line-break must inherit");
         assert_eq!(child.visibility, Visibility::Hidden, "visibility must inherit");
@@ -6167,6 +6176,10 @@ mod computed_style_field_guards {
         assert_eq!(child.border_spacing, (3.0, 4.0), "border-spacing must inherit");
         assert_eq!(child.border_collapse, BorderCollapse::Collapse, "border-collapse must inherit");
         assert_eq!(child.cursor, Cursor::Pointer, "cursor must inherit");
+        assert_eq!(child.font_size_keyword, 7, "the font-size keyword step must inherit");
+        assert!(child.font_size_absolute, "font-size absoluteness must inherit");
+        assert_eq!(child.font_smoothing, FontSmoothing::Antialiased, "-webkit-font-smoothing must inherit");
+        assert!(child.text_rendering_geometric_precision, "text-rendering must inherit");
 
         // ---- the four non-inherited fields whose DERIVED default is wrong,
         //      i.e. the exact ones that produced the blank-page near-miss ----
@@ -6243,7 +6256,24 @@ mod computed_style_field_guards {
             transitions, animations, animation_settled_opacity, clip,
             will_change_holds_fixed, contain_holds_fixed, stacks, webkit_scrollbar,
             abspos_was_inline_level,
+            // S22 sync (upstream fields).
+            font_size_keyword, font_size_absolute, font_smoothing, text_rendering_geometric_precision,
+            size_declared, padding_v_declared, border_v_declared, line_height_declared,
+            padding_declared, border_declared, appearance, width_max_content, width_min_content,
         } = ComputedStyle::new();
+
+        // S22 sync additions (upstream fields): their initial values as upstream's `new()` sets them.
+        assert_eq!(font_size_keyword, 4, "the font-size keyword step starts at medium");
+        assert!(!font_size_absolute, "font-size absoluteness starts false");
+        assert_eq!(font_smoothing, FontSmoothing::Auto, "-webkit-font-smoothing initial is auto");
+        assert!(!text_rendering_geometric_precision, "text-rendering initial is auto");
+        assert_eq!(size_declared, [false; 2], "no size declared initially");
+        assert!(!padding_v_declared && !border_v_declared && !line_height_declared, "nothing declared initially");
+        assert_eq!(padding_declared, [false; 4], "no padding declared initially");
+        assert_eq!(border_declared, [false; 4], "no border declared initially");
+        // Upstream's choice: CSS's initial for `appearance` is `none`; upstream starts at Auto.
+        assert_eq!(appearance, Appearance::Auto, "appearance starts at Auto (upstream's new())");
+        assert!(!width_max_content && !width_min_content, "no intrinsic width keyword initially");
 
         // 2026-10-29 S1 sync additions: verify initial values.
         assert!(clip_path.is_empty(), "clip-path initial is none (empty)");
