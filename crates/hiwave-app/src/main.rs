@@ -4771,6 +4771,46 @@ mod url_log_tests {
         assert_eq!(url_for_log("hiwave://newtab"), "hiwave://newtab");
     }
 
+    // Ported from hiwave-windows #162 (content_ipc_guard.rs): the URL parser decides what is logged.
+    #[test]
+    fn url_for_log_does_not_panic_when_byte_five_is_inside_a_multibyte_char() {
+        let url = "abc\u{20AC}tail";
+        assert!(!url.is_char_boundary(5));
+        assert_eq!(url_for_log(url), format!("unparsed URL ({} bytes)", url.len()));
+        assert_eq!(url_for_log("DATA:text/html,x"), "data: URL (16 bytes)");
+    }
+
+    #[test]
+    fn a_logged_url_is_scheme_host_and_path() {
+        assert_eq!(url_for_log("https://user:pw@example.com/a/b?token=SECRET#frag"), "https://example.com/a/b");
+        assert_eq!(url_for_log("http://x.test/?q=1"), "http://x.test/");
+        assert_eq!(url_for_log("https://example.com/p#section"), "https://example.com/p");
+        assert_eq!(url_for_log("hiwave://report"), "hiwave://report");
+        assert_eq!(url_for_log("https://example.com:8443/a?x"), "https://example.com:8443/a");
+        assert_eq!(url_for_log("about:blank"), "about:blank");
+    }
+
+    /// The URL parser decides where the userinfo ends, as the browser does: a backslash is a path
+    /// separator in an http(s) URL, so a hand-split at the first '/' would keep the password.
+    #[test]
+    fn a_logged_url_follows_the_url_parser_not_a_hand_split() {
+        assert_eq!(url_for_log("https://user:SECRET@example.com"), "https://example.com/");
+        assert_eq!(url_for_log(&format!("https://user:SECRET@evil.test{}p", '\\')), "https://evil.test/p");
+        assert_eq!(url_for_log("  data:text/html,secret"), "data: URL (21 bytes)");
+        assert_eq!(url_for_log("not a url SECRET"), "unparsed URL (16 bytes)");
+    }
+
+    #[test]
+    fn a_data_url_is_logged_by_size_and_a_long_one_is_cut() {
+        let report = format!("data:text/html;charset=utf-8,<script>const REPORT_NONCE = '{}'</script>", "ab12".repeat(8));
+        let logged = url_for_log(&report);
+        assert!(!logged.contains("ab12") && !logged.contains("REPORT_NONCE"), "no page content: {logged}");
+        assert!(logged.starts_with("data: URL ("));
+        assert_eq!(url_for_log("https://example.com/a"), "https://example.com/a");
+        let long = format!("https://example.com/{}", "x".repeat(500));
+        assert!(url_for_log(&long).len() < 260);
+    }
+
     #[test]
     fn a_navigation_line_has_the_full_url_only_when_bodies_are_logged() {
         let url = format!("https://a.test/login?token={SECRET}#{SECRET}");
