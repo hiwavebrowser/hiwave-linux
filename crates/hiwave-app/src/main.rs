@@ -795,13 +795,20 @@ fn load_report_page(content: &impl IWebView) {
     content.load_html(&report_with_chartjs);
 }
 
+/// A new tab a content page asks for: none (Ctrl+T opens the new-tab page) or an http(s) URL.
+/// Every other scheme (`javascript:`, `file:`, `data:`, `hiwave:`, `about:`) is refused.
 #[cfg(not(feature = "native-linux"))]
-/// Red-run stub; replaced by the fix.
-#[cfg(test)]
-fn content_new_tab_url_allowed(_url: Option<&str>) -> bool {
-    true
+fn content_new_tab_url_allowed(url: Option<&str>) -> bool {
+    match url {
+        None => true,
+        Some(u) => {
+            let lower = u.to_ascii_lowercase();
+            lower.starts_with("https://") || lower.starts_with("http://")
+        }
+    }
 }
 
+#[cfg(not(feature = "native-linux"))]
 fn is_new_tab_url(url: &str) -> bool {
     url == "about:blank" || url == NEW_TAB_URL || url.starts_with("data:text/html")
 }
@@ -1779,7 +1786,11 @@ fn main() {
                         let _ = content_proxy_ipc.send_event(UserEvent::GoForward);
                     }
                     IpcMessage::CreateTab { url } => {
-                        // Handle create tab directly
+                        // A page opens a new tab with an http(s) URL or none (Ctrl+T); nothing else.
+                        if !content_new_tab_url_allowed(url.as_deref()) {
+                            info!("New tab from content with a non-http(s) URL: not served");
+                            return;
+                        }
                         let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
                         let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
                         let _ = content_proxy_ipc.send_event(UserEvent::SyncWorkspaces);
@@ -1788,7 +1799,7 @@ fn main() {
                         }
                     }
                     IpcMessage::AddToShelf { tab_id } => {
-                        // If tab_id is "active", use the currently active tab
+                        // The context menu shelves the active tab; a page names no other tab.
                         let actual_tab_id = if tab_id == "active" {
                             if let Ok(s) = content_state_ipc.lock() {
                                 s.shell.get_active_tab().map(|t| t.id.0.to_string()).unwrap_or_default()
@@ -1796,7 +1807,8 @@ fn main() {
                                 String::new()
                             }
                         } else {
-                            tab_id.clone()
+                            info!("Add to shelf from content by id: not served");
+                            String::new()
                         };
 
                         if !actual_tab_id.is_empty() {
@@ -1843,22 +1855,6 @@ fn main() {
                         // page's own origin. A content page's request gets nothing.
                         let _ = ipc::commands::content_page_autofill(&content_state_ipc, domain);
                     }
-                    // Handle focus mode from content (keyboard shortcuts)
-                    IpcMessage::ExitFocusMode => {
-                        info!("Exit focus mode from content WebView");
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::ExitFocusMode);
-                    }
-                    IpcMessage::ToggleFocusMode => {
-                        info!("Toggle focus mode from content WebView");
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::ToggleFocusMode);
-                    }
-                    IpcMessage::EnterFocusMode => {
-                        info!("Enter focus mode from content WebView");
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::EnterFocusMode);
-                    }
                     // UI shortcuts forwarded from content WebView
                     IpcMessage::CloseTab { id } => {
                         // The context menu closes the active tab; a page names no other tab.
@@ -1892,10 +1888,6 @@ fn main() {
                     IpcMessage::ActivateTabByIndex { index } => {
                         info!("Activate tab by index from content: {}", index);
                         let _ = content_proxy_ipc.send_event(UserEvent::ActivateTabByIndex { index: *index });
-                    }
-                    IpcMessage::TriggerAutofill => {
-                        info!("Trigger autofill from content");
-                        let _ = content_proxy_ipc.send_event(UserEvent::TriggerAutofill);
                     }
                     // SEC3 content analytics arm: a content page gets no analytics, can reset none, and is sent
                     // nothing back.
@@ -4750,7 +4742,7 @@ mod ipc_shape_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "native-linux")))]
 mod content_ipc_scope_2_tests {
     const MAIN_RS: &str = include_str!("main.rs");
 
