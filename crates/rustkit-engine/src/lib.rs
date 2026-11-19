@@ -4053,6 +4053,8 @@ impl Engine {
                 live_modules: Vec::new(),
                 live_modules_started: 0,
                 live_images: Vec::new(),
+                media: media::MediaElements::default(),
+                live_media: Vec::new(),
                 live_sheets: Vec::new(),
                 sheet_links: Vec::new(),
                 external_sheet_owners: Rc::default(),
