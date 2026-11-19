@@ -37,9 +37,9 @@ use wry::{Rect, WebViewBuilder, WebViewBuilderExtUnix};
 
 // Always need logging
 #[cfg(feature = "native-linux")]
-use tracing::{error, info, Level};
+use tracing::{error, info};
 #[cfg(not(feature = "native-linux"))]
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
 // Constants used by hybrid mode
@@ -795,6 +795,16 @@ fn load_report_page(content: &impl IWebView) {
     content.load_html(&report_with_chartjs);
 }
 
+/// `RUST_LOG` when it is set to a directive this process can parse. Unset, blank, and unparseable
+/// values stay at info, which is what the app logged before `RUST_LOG` was read (upstream's).
+fn rust_log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
+    use tracing_subscriber::EnvFilter;
+    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new("info")),
+        None => EnvFilter::new("info"),
+    }
+}
+
 /// A shortcut the app takes at window level, before the focused view (a page included) sees the
 /// key: toggling focus mode and autofill are the app's, not requests a page can make over IPC.
 #[cfg(not(feature = "native-linux"))]
@@ -1089,10 +1099,11 @@ fn main() {
         return;
     }
 
-    // Initialize logging with log compatibility
+    // Initialize logging with log compatibility. `RUST_LOG` selects the
+    // level when it is set; otherwise info, as before.
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(rust_log_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
@@ -4874,6 +4885,78 @@ mod content_ipc_scope_2_tests {
         for bad in ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", "hiwave://settings", "about:blank", " https://a.test", "httpx://a", ""] {
             assert!(!super::content_new_tab_url_allowed(Some(bad)), "{bad}");
         }
+    }
+}
+
+/// Upstream (hiwave-macos) tests for main.rs, ported by LINUX-MAIN-AUDIT.
+#[cfg(all(test, not(feature = "native-linux")))]
+mod main_audit_port_tests {
+    use super::*;
+    use tracing_subscriber::filter::LevelFilter;
+
+    /// Upstream `defaults_to_info_and_honors_a_rust_log_directive`.
+    #[test]
+    fn defaults_to_info_and_honors_a_rust_log_directive() {
+        assert_eq!(rust_log_filter(None).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("   ")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("===bad===")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+        assert_eq!(rust_log_filter(Some("warn")).max_level_hint(), Some(LevelFilter::WARN));
+        assert_eq!(rust_log_filter(Some("info,rustkit_engine=debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+    }
+
+    /// The keys `collectSettingsFromUI()` in settings.html puts in the `save_settings` payload, read
+    /// from the page the app ships (upstream's helper).
+    fn page_save_keys() -> Vec<String> {
+        let start = SETTINGS_HTML
+            .find("function collectSettingsFromUI()")
+            .expect("settings.html has collectSettingsFromUI");
+        let body = &SETTINGS_HTML[start..];
+        let open = body.find("return {").expect("collectSettingsFromUI returns an object literal") + "return {".len();
+        let close = open + body[open..].find("};").expect("the object literal ends");
+        body[open..close]
+            .lines()
+            .filter_map(|line| {
+                let key = line.trim().split(':').next()?.trim();
+                (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| key.to_string())
+            })
+            .collect()
+    }
+
+    /// Upstream `the_page_sends_every_settings_field`: a field added to one side and not the other
+    /// fails here.
+    #[test]
+    fn the_page_sends_every_settings_field() {
+        let keys = page_save_keys();
+        let defaults = serde_json::to_value(crate::state::UserSettings::default()).unwrap();
+        let fields: Vec<&String> = defaults.as_object().unwrap().keys().collect();
+        let missing: Vec<&&String> = fields.iter().filter(|f| !keys.contains(f)).collect();
+        let unknown: Vec<&String> = keys.iter().filter(|k| !fields.contains(k)).collect();
+        assert!(missing.is_empty() && unknown.is_empty(), "page omits {missing:?}, sends unknown {unknown:?}");
+    }
+
+    /// Upstream's credential-delivery pin: no statement in main.rs or ipc/autofill.rs posts
+    /// credentials into a page (`window.ipc.postMessage(..)`, page to app, is the other direction),
+    /// and the credential message type is not in the app.
+    #[test]
+    fn nothing_in_the_app_posts_credentials_into_a_page() {
+        let main = include_str!("main.rs").replace("\r\n", "\n");
+        let production = &main[..main.find("#[cfg(test)]\nmod ").unwrap_or(main.len())];
+        let autofill = include_str!("ipc/autofill.rs").replace("\r\n", "\n");
+        let autofill_production = autofill.split("#[cfg(test)]").next().unwrap_or("");
+        for (file, text) in [("main.rs", production), ("ipc/autofill.rs", autofill_production)] {
+            for statement in text.split(';') {
+                let posts_to_page = statement.contains("postMessage") && !statement.contains("ipc.postMessage");
+                assert!(
+                    !(posts_to_page && (statement.contains("credentials") || statement.contains("password"))),
+                    "{file} posts credentials into a page: {}",
+                    statement.trim().lines().next().unwrap_or("")
+                );
+            }
+        }
+        let marker = ["hiwave_autofill", "_credentials"].concat();
+        assert!(!production.contains(&marker) && !autofill_production.contains(&marker));
     }
 }
 
