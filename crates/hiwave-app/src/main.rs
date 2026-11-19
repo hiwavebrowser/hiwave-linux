@@ -4945,3 +4945,26 @@ mod page_visibility_tests {
         }
     }
 }
+
+/// Linux: every engine-backed test in this binary takes `engine_test_turn` (software Vulkan
+/// deadlocks or crashes with several GPU devices alive at once; SOFTWARE-GPU-TEARDOWN).
+#[cfg(all(test, target_os = "linux", feature = "rustkit", not(feature = "native-linux")))]
+mod engine_test_turn_pin_tests {
+    /// Each Inspector page test that builds an engine (`inspector()`) takes its turn first.
+    #[test]
+    fn every_inspector_page_test_takes_its_turn_before_its_engine() {
+        let src = include_str!("inspector_page_tests.rs");
+        let mut missing = Vec::new();
+        for test in src.split("#[test]").skip(1) {
+            let name = test.split("fn ").nth(1).and_then(|s| s.split('(').next()).unwrap_or("?");
+            let body = &test[..test.find("\n}\n").unwrap_or(test.len())];
+            if let Some(engine) = body.find("inspector()") {
+                match body.find("one_engine_at_a_time()") {
+                    Some(turn) if turn < engine => {}
+                    _ => missing.push(name.to_string()),
+                }
+            }
+        }
+        assert!(missing.is_empty(), "build an engine without the turn: {missing:?}");
+    }
+}
