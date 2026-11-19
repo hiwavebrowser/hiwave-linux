@@ -795,6 +795,43 @@ fn load_report_page(content: &impl IWebView) {
     content.load_html(&report_with_chartjs);
 }
 
+/// A shortcut the app takes at window level, before the focused view (a page included) sees the
+/// key: toggling focus mode and autofill are the app's, not requests a page can make over IPC.
+#[cfg(not(feature = "native-linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowShortcut {
+    ToggleFocusMode,
+    TriggerAutofill,
+}
+
+/// `key` is the GDK key name (`F11`, `f`, `F`, `L`, ...). F11 or Ctrl+Shift+F toggles focus mode,
+/// Ctrl+Shift+L fills the page's login (the keys context_menu.js used to forward); Alt never.
+#[cfg(not(feature = "native-linux"))]
+fn window_shortcut(key: &str, ctrl: bool, shift: bool, alt: bool) -> Option<WindowShortcut> {
+    if alt {
+        return None;
+    }
+    match key {
+        "F11" if !ctrl => Some(WindowShortcut::ToggleFocusMode),
+        "f" | "F" if ctrl && shift => Some(WindowShortcut::ToggleFocusMode),
+        "l" | "L" if ctrl && shift => Some(WindowShortcut::TriggerAutofill),
+        _ => None,
+    }
+}
+
+/// A new tab a content page asks for: none (Ctrl+T opens the new-tab page) or an http(s) URL.
+/// Every other scheme (`javascript:`, `file:`, `data:`, `hiwave:`, `about:`) is refused.
+#[cfg(not(feature = "native-linux"))]
+fn content_new_tab_url_allowed(url: Option<&str>) -> bool {
+    match url {
+        None => true,
+        Some(u) => {
+            let lower = u.to_ascii_lowercase();
+            lower.starts_with("https://") || lower.starts_with("http://")
+        }
+    }
+}
+
 #[cfg(not(feature = "native-linux"))]
 fn is_new_tab_url(url: &str) -> bool {
     url == "about:blank" || url == NEW_TAB_URL || url.starts_with("data:text/html")
@@ -1165,6 +1202,42 @@ fn main() {
     }
 
     info!("Window created successfully");
+
+    // Window-level shortcuts (focus mode, autofill): GTK runs a toplevel's key-press handler before
+    // the focused child, so these keys reach the app whichever view (a page included) has focus, and
+    // stop there; the page is not asked to forward them over IPC.
+    #[cfg(not(feature = "native-linux"))]
+    {
+        use gtk::gdk::ModifierType;
+        use gtk::prelude::*;
+        use tao::platform::unix::WindowExtUnix;
+        let key_proxy = proxy.clone();
+        let key_state = Arc::clone(&state);
+        window.gtk_window().connect_key_press_event(move |_, event| {
+            let mods = event.state();
+            let name = event.keyval().name().map(|n| n.to_string()).unwrap_or_default();
+            let shortcut = window_shortcut(
+                &name,
+                mods.contains(ModifierType::CONTROL_MASK),
+                mods.contains(ModifierType::SHIFT_MASK),
+                mods.contains(ModifierType::MOD1_MASK),
+            );
+            match shortcut {
+                Some(WindowShortcut::ToggleFocusMode) => {
+                    info!("Shortcut: toggle focus mode");
+                    let _ = ipc::commands::handle_message(&key_state, IpcMessage::ToggleFocusMode);
+                    let _ = key_proxy.send_event(UserEvent::ToggleFocusMode);
+                    gtk::glib::Propagation::Stop
+                }
+                Some(WindowShortcut::TriggerAutofill) => {
+                    info!("Shortcut: autofill");
+                    let _ = key_proxy.send_event(UserEvent::TriggerAutofill);
+                    gtk::glib::Propagation::Stop
+                }
+                None => gtk::glib::Propagation::Proceed,
+            }
+        });
+    }
 
     // Linux: the three webviews (chrome/content/shelf) embed into a shared
     // gtk::Fixed. wry's build_gtk honors each webview's with_bounds — (x,y) via
@@ -1773,7 +1846,11 @@ fn main() {
                         let _ = content_proxy_ipc.send_event(UserEvent::GoForward);
                     }
                     IpcMessage::CreateTab { url } => {
-                        // Handle create tab directly
+                        // A page opens a new tab with an http(s) URL or none (Ctrl+T); nothing else.
+                        if !content_new_tab_url_allowed(url.as_deref()) {
+                            info!("New tab from content with a non-http(s) URL: not served");
+                            return;
+                        }
                         let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
                         let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
                         let _ = content_proxy_ipc.send_event(UserEvent::SyncWorkspaces);
@@ -1782,7 +1859,7 @@ fn main() {
                         }
                     }
                     IpcMessage::AddToShelf { tab_id } => {
-                        // If tab_id is "active", use the currently active tab
+                        // The context menu shelves the active tab; a page names no other tab.
                         let actual_tab_id = if tab_id == "active" {
                             if let Ok(s) = content_state_ipc.lock() {
                                 s.shell.get_active_tab().map(|t| t.id.0.to_string()).unwrap_or_default()
@@ -1790,7 +1867,8 @@ fn main() {
                                 String::new()
                             }
                         } else {
-                            tab_id.clone()
+                            info!("Add to shelf from content by id: not served");
+                            String::new()
                         };
 
                         if !actual_tab_id.is_empty() {
@@ -1837,21 +1915,12 @@ fn main() {
                         // page's own origin. A content page's request gets nothing.
                         let _ = ipc::commands::content_page_autofill(&content_state_ipc, domain);
                     }
-                    // Handle focus mode from content (keyboard shortcuts)
+                    // Escape forwarded from the content view (context_menu.js): leaving focus mode is the only
+                    // focus-mode request a page is served; entering or toggling is a window-level shortcut.
                     IpcMessage::ExitFocusMode => {
                         info!("Exit focus mode from content WebView");
                         let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
                         let _ = content_proxy_ipc.send_event(UserEvent::ExitFocusMode);
-                    }
-                    IpcMessage::ToggleFocusMode => {
-                        info!("Toggle focus mode from content WebView");
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::ToggleFocusMode);
-                    }
-                    IpcMessage::EnterFocusMode => {
-                        info!("Enter focus mode from content WebView");
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::EnterFocusMode);
                     }
                     // UI shortcuts forwarded from content WebView
                     IpcMessage::CloseTab { id } => {
@@ -1886,10 +1955,6 @@ fn main() {
                     IpcMessage::ActivateTabByIndex { index } => {
                         info!("Activate tab by index from content: {}", index);
                         let _ = content_proxy_ipc.send_event(UserEvent::ActivateTabByIndex { index: *index });
-                    }
-                    IpcMessage::TriggerAutofill => {
-                        info!("Trigger autofill from content");
-                        let _ = content_proxy_ipc.send_event(UserEvent::TriggerAutofill);
                     }
                     // SEC3 content analytics arm: a content page gets no analytics, can reset none, and is sent
                     // nothing back.
@@ -4740,6 +4805,74 @@ mod ipc_shape_tests {
             let script = super::inspector_picked_script(path, "null");
             let literal = serde_json::to_string(path).unwrap();
             assert!(script.contains(&format!("selectElementByPath({literal})")), "{script}");
+        }
+    }
+}
+
+#[cfg(all(test, not(feature = "native-linux")))]
+mod content_ipc_scope_2_tests {
+    const MAIN_RS: &str = include_str!("main.rs");
+
+    fn content_handler() -> &'static str {
+        let start = MAIN_RS
+            .find("let content_ipc: std::rc::Rc<dyn Fn(&str)>")
+            .expect("the content view's IPC handler");
+        let rest = &MAIN_RS[start..];
+        &rest[..rest.find("\n    });").expect("the end of the content handler")]
+    }
+
+    fn arm(name: &str) -> Option<&'static str> {
+        let handler = content_handler();
+        let at = handler.find(&format!("IpcMessage::{name}"))?;
+        let rest = &handler[at..];
+        let end = rest[1..].find("IpcMessage::").map(|i| i + 1).unwrap_or(rest.len());
+        Some(&rest[..end])
+    }
+
+    /// The context menu shelves the active tab; a page names no other tab.
+    #[test]
+    fn a_page_shelves_only_the_active_tab() {
+        let arm = arm("AddToShelf").expect("the add-to-shelf arm");
+        assert!(!arm.contains("tab_id.clone()"), "{arm}");
+    }
+
+    /// A page's new tab opens only an http(s) URL, or none (Ctrl+T), checked before the tab exists.
+    #[test]
+    fn a_page_new_tab_url_is_checked_first() {
+        let arm = arm("CreateTab").expect("the create-tab arm");
+        let check = arm.find("content_new_tab_url_allowed(").expect("the URL check");
+        assert!(check < arm.find("handle_message").unwrap_or(usize::MAX), "{arm}");
+    }
+
+    /// Autofill, and entering or toggling focus mode, are not served from the content view (Escape's
+    /// exit_focus_mode is).
+    #[test]
+    fn a_page_neither_fills_nor_switches_focus_mode() {
+        for name in ["TriggerAutofill =>", "EnterFocusMode =>", "ToggleFocusMode =>"] {
+            assert!(arm(name).is_none(), "{name} is served to pages");
+        }
+    }
+
+    /// The keys context_menu.js forwarded, now taken at window level; Escape stays the page's.
+    #[test]
+    fn the_window_takes_the_focus_mode_and_autofill_keys() {
+        use super::{window_shortcut, WindowShortcut::*};
+        assert_eq!(window_shortcut("F11", false, false, false), Some(ToggleFocusMode));
+        assert_eq!(window_shortcut("F", true, true, false), Some(ToggleFocusMode));
+        assert_eq!(window_shortcut("f", true, true, false), Some(ToggleFocusMode));
+        assert_eq!(window_shortcut("L", true, true, false), Some(TriggerAutofill));
+        for (key, ctrl, shift, alt) in [("Escape", false, false, false), ("f", true, false, false), ("L", false, true, false), ("L", true, true, true), ("F11", true, false, false), ("t", true, false, false)] {
+            assert_eq!(window_shortcut(key, ctrl, shift, alt), None, "{key} ctrl={ctrl} shift={shift} alt={alt}");
+        }
+    }
+
+    #[test]
+    fn only_http_and_https_or_no_url_open_from_a_page() {
+        for ok in [None, Some("https://example.com/"), Some("http://a.test/x"), Some("HTTPS://A.TEST")] {
+            assert!(super::content_new_tab_url_allowed(ok), "{ok:?}");
+        }
+        for bad in ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", "hiwave://settings", "about:blank", " https://a.test", "httpx://a", ""] {
+            assert!(!super::content_new_tab_url_allowed(Some(bad)), "{bad}");
         }
     }
 }
