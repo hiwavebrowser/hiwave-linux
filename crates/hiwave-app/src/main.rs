@@ -1855,12 +1855,12 @@ fn main() {
                     }
                     // UI shortcuts forwarded from content WebView
                     IpcMessage::CloseTab { id } => {
-                        info!("Close tab from content: {}", id);
+                        // The context menu closes the active tab; a page names no other tab.
                         if id == "active" {
+                            info!("Close tab from content: active");
                             let _ = content_proxy_ipc.send_event(UserEvent::CloseActiveTab);
                         } else {
-                            let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                            let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
+                            info!("Close tab from content by id: not served");
                         }
                     }
                     IpcMessage::Refresh => {
@@ -1902,10 +1902,6 @@ fn main() {
                     | IpcMessage::ResetAnalyticsData
                     | IpcMessage::ExportAnalyticsData { .. } => {
                         let _ = ipc::commands::content_page_analytics(&content_state_ipc);
-                    }
-                    IpcMessage::OpenExternal { url } => {
-                        info!("Opening external URL from content: {}", crate::page_url_for_log(&url));
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
                     }
                     _ => {}
                 }
@@ -4663,6 +4659,36 @@ mod url_log_tests {
         let url = format!("https://a.test/login?token={SECRET}#{SECRET}");
         assert_eq!(page_url_for_log_as(&url, false), "https://a.test/login");
         assert_eq!(page_url_for_log_as(&url, true), url);
+    }
+}
+
+#[cfg(test)]
+mod content_ipc_scope_tests {
+    const MAIN_RS: &str = include_str!("main.rs");
+
+    /// The content view's IPC handler: the closure every page in the content view can reach.
+    fn content_handler() -> &'static str {
+        let start = MAIN_RS
+            .find("let content_ipc: std::rc::Rc<dyn Fn(&str)>")
+            .expect("the content view's IPC handler");
+        let rest = &MAIN_RS[start..];
+        &rest[..rest.find("\n    });").expect("the end of the content handler")]
+    }
+
+    /// A page does not open things outside the browser: the content view's handler has no
+    /// `open_external` arm (macOS's has none either).
+    #[test]
+    fn a_page_cannot_open_an_external_url() {
+        assert!(!content_handler().contains("IpcMessage::OpenExternal"));
+    }
+
+    /// The context menu closes the active tab; the content view closes no tab by its id.
+    #[test]
+    fn a_page_closes_only_the_active_tab() {
+        let handler = content_handler();
+        let arm = &handler[handler.find("IpcMessage::CloseTab { id } =>").expect("the close-tab arm")..];
+        let arm = &arm[..arm.find("IpcMessage::Refresh").unwrap_or(arm.len())];
+        assert!(!arm.contains("handle_message"), "{arm}");
     }
 }
 
