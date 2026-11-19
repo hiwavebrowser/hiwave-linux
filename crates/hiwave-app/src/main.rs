@@ -1044,24 +1044,35 @@ fn log_ipc(what: &str, body: &str) {
     }
 }
 
-/// A URL for the log (#910 R1 nit 3, CH3.A6): scheme, host and path —
-/// without its query, fragment or userinfo; a `data:` URL only up to its
-/// media type (the rest is the page).
+/// A URL as it may be logged (hiwave-windows #162; upstream CH3.A6): a `data:` URL (how the app
+/// loads its own pages) by size only; anything else as scheme, host, port and path as the URL parser
+/// reads them, without its query, fragment or userinfo, cut to a sane length. A URL that does not
+/// parse is logged by size only.
 fn url_for_log(url: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
-    if url.len() >= 5 && url[..5].eq_ignore_ascii_case("data:") {
-        let end = url.find(',').unwrap_or(url.len());
-        return Cow::Borrowed(&url[..end]);
+    let url = url.trim_start_matches(|c: char| c.is_ascii_whitespace() || c.is_ascii_control());
+    // `get`, not a slice: byte 5 may sit inside a multi-byte character.
+    if url.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:")) {
+        return Cow::Owned(format!("data: URL ({} bytes)", url.len()));
     }
-    let url = url.find(['?', '#']).map_or(url, |at| &url[..at]);
-    if let Some(scheme_end) = url.find("://") {
-        let auth_start = scheme_end + 3;
-        let auth_end = url[auth_start..].find('/').map_or(url.len(), |i| auth_start + i);
-        if let Some(at) = url[auth_start..auth_end].rfind('@') {
-            return Cow::Owned(format!("{}{}", &url[..auth_start], &url[auth_start + at + 1..]));
+    let shown = match url::Url::parse(url) {
+        Ok(parsed) => match parsed.host_str() {
+            Some(host) => {
+                let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+                format!("{}://{}{}{}", parsed.scheme(), host, port, parsed.path())
+            }
+            None => format!("{}:{}", parsed.scheme(), parsed.path()),
+        },
+        Err(_) => return Cow::Owned(format!("unparsed URL ({} bytes)", url.len())),
+    };
+    if shown.len() > 200 {
+        let mut cut = 200;
+        while !shown.is_char_boundary(cut) {
+            cut -= 1;
         }
+        return Cow::Owned(format!("{}... ({} bytes)", &shown[..cut], shown.len()));
     }
-    Cow::Borrowed(url)
+    Cow::Owned(shown)
 }
 
 /// A page URL for an info line (CH3.A6): whole only when IPC bodies are
@@ -4763,11 +4774,11 @@ mod url_log_tests {
     fn a_page_url_in_the_log_keeps_scheme_host_and_path_only() {
         // userinfo is a credential; a data: URL's payload is the page.
         assert_eq!(url_for_log(&format!("https://u:{SECRET}@a.test/p?q=1")), "https://a.test/p");
-        assert_eq!(url_for_log(&format!("https://{SECRET}@a.test")), "https://a.test");
+        assert_eq!(url_for_log(&format!("https://{SECRET}@a.test")), "https://a.test/");
         // An '@' in the path is not userinfo.
         assert_eq!(url_for_log("https://a.test/@user/x"), "https://a.test/@user/x");
-        assert_eq!(url_for_log(&format!("data:text/html,<p>{SECRET}</p>")), "data:text/html");
-        assert_eq!(url_for_log(&format!("data:text/html;base64,{SECRET}")), "data:text/html;base64");
+        assert_eq!(url_for_log(&format!("data:text/html,<p>{SECRET}</p>")), format!("data: URL ({} bytes)", "data:text/html,<p></p>".len() + SECRET.len()));
+        assert!(url_for_log(&format!("data:text/html;base64,{SECRET}")).starts_with("data: URL ("));
         assert_eq!(url_for_log("hiwave://newtab"), "hiwave://newtab");
     }
 
