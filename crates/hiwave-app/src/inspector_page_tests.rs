@@ -343,6 +343,7 @@ const MARKUP: &str = "\"><span id=\"injected\" onclick=\"window.__flag=1\">x</sp
 
 #[test]
 fn a_console_line_with_a_non_numeric_doc_shows_no_markup() {
+    let _turn = one_engine_at_a_time(); // Linux: one GPU device at a time (SOFTWARE-GPU-TEARDOWN)
     let (mut engine, view) = inspector();
     console_tab(&mut engine, view);
     arm(&mut engine, view);
@@ -357,6 +358,7 @@ fn a_console_line_with_a_non_numeric_doc_shows_no_markup() {
 
 #[test]
 fn a_dom_tree_with_a_string_children_omitted_shows_no_markup() {
+    let _turn = one_engine_at_a_time(); // Linux: one GPU device at a time (SOFTWARE-GPU-TEARDOWN)
     let (mut engine, view) = inspector();
     arm(&mut engine, view);
     let tree = serde_json::json!({
@@ -380,6 +382,7 @@ fn a_dom_tree_with_a_string_children_omitted_shows_no_markup() {
 /// page sent it, whatever it holds, and nothing in it runs.
 #[test]
 fn a_picked_path_reaches_select_element_by_path_intact() {
+    let _turn = one_engine_at_a_time(); // Linux: one GPU device at a time (SOFTWARE-GPU-TEARDOWN)
     let paths = [
         // A backslash before a quote, then code and a line comment.
         "div\\'); window.__flag = 1; } //",
@@ -411,6 +414,7 @@ fn a_picked_path_reaches_select_element_by_path_intact() {
 /// in it gets no preview (the value itself is still listed, as text).
 #[test]
 fn a_colour_preview_is_only_made_for_a_plain_colour() {
+    let _turn = one_engine_at_a_time(); // Linux: one GPU device at a time (SOFTWARE-GPU-TEARDOWN)
     let (mut engine, view) = inspector();
     let styles = serde_json::json!({
         "selector": "div",
@@ -441,6 +445,7 @@ fn a_colour_preview_is_only_made_for_a_plain_colour() {
 /// A console message `0` shows as `0`, not as an empty line.
 #[test]
 fn a_zero_message_shows_as_zero() {
+    let _turn = one_engine_at_a_time(); // Linux: one GPU device at a time (SOFTWARE-GPU-TEARDOWN)
     let (mut engine, view) = inspector();
     console_tab(&mut engine, view);
     eval(
