@@ -1820,12 +1820,12 @@ fn main() {
                     }
                     // UI shortcuts forwarded from content WebView
                     IpcMessage::CloseTab { id } => {
-                        info!("Close tab from content: {}", id);
+                        // The context menu closes the active tab; a page names no other tab.
                         if id == "active" {
+                            info!("Close tab from content: active");
                             let _ = content_proxy_ipc.send_event(UserEvent::CloseActiveTab);
                         } else {
-                            let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                            let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
+                            info!("Close tab from content by id: not served");
                         }
                     }
                     IpcMessage::Refresh => {
@@ -1867,10 +1867,6 @@ fn main() {
                     | IpcMessage::ResetAnalyticsData
                     | IpcMessage::ExportAnalyticsData { .. } => {
                         let _ = ipc::commands::content_page_analytics(&content_state_ipc);
-                    }
-                    IpcMessage::OpenExternal { url } => {
-                        info!("Opening external URL from content: {}", crate::page_url_for_log(&url));
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
                     }
                     _ => {}
                 }
