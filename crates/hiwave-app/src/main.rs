@@ -4634,3 +4634,33 @@ mod url_log_tests {
         assert_eq!(page_url_for_log_as(&url, true), url);
     }
 }
+
+#[cfg(test)]
+mod ipc_shape_tests {
+    const MAIN_RS: &str = include_str!("main.rs");
+
+    /// An IPC answer or message is logged by its shape (command, kind, size), never whole: the
+    /// answer can carry what the vault or the history holds.
+    #[test]
+    fn no_ipc_answer_or_message_is_logged_whole() {
+        let whole: Vec<&str> = MAIN_RS
+            .lines()
+            .filter(|l| l.contains("info!(") && l.contains("{:?}"))
+            .filter(|l| l.contains(", response)") || l.contains(", ipc_msg)"))
+            .collect();
+        assert!(whole.is_empty(), "logged whole: {whole:#?}");
+    }
+
+    /// The picked element's path reaches the Inspector as a JavaScript string literal built by
+    /// one function, not by hand-escaping quotes in place.
+    #[test]
+    fn the_picked_element_script_is_built_by_one_function() {
+        let picked = MAIN_RS
+            .split("UserEvent::InspectorElementPicked { path, styles } =>")
+            .nth(1)
+            .expect("the picked-element handler");
+        let handler = &picked[..picked.find("UserEvent::").unwrap_or(picked.len())];
+        assert!(!handler.contains("replace("), "hand-escaped path: {handler}");
+        assert!(handler.contains("inspector_picked_script("), "{handler}");
+    }
+}
