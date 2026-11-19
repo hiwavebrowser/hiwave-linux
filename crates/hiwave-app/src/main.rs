@@ -795,6 +795,12 @@ fn load_report_page(content: &impl IWebView) {
     content.load_html(&report_with_chartjs);
 }
 
+/// Red-run stub; replaced by the fix.
+#[cfg(test)]
+fn window_shows_pages(_window_visible: bool, _minimized: bool) -> bool {
+    true
+}
+
 /// A shortcut the app takes at window level, before the focused view (a page included) sees the
 /// key: toggling focus mode and autofill are the app's, not requests a page can make over IPC.
 #[cfg(not(feature = "native-linux"))]
@@ -4873,6 +4879,34 @@ mod content_ipc_scope_2_tests {
         }
         for bad in ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", "hiwave://settings", "about:blank", " https://a.test", "httpx://a", ""] {
             assert!(!super::content_new_tab_url_allowed(Some(bad)), "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod page_visibility_tests {
+    use super::window_shows_pages;
+
+    /// Upstream `a_minimised_or_hidden_window_shows_no_page`.
+    #[test]
+    fn a_minimised_or_hidden_window_shows_no_page() {
+        assert!(window_shows_pages(true, false));
+        assert!(!window_shows_pages(true, true), "minimised");
+        assert!(!window_shows_pages(false, false), "hidden");
+        assert!(!window_shows_pages(false, true));
+    }
+
+    /// The main window's focus and resize events tell its RustKit pages whether they are shown
+    /// (a minimise and a restore each move the focus, and a restore resizes), as upstream's do.
+    #[test]
+    fn focus_and_resize_events_sync_page_visibility() {
+        let main = include_str!("main.rs");
+        let event_loop = &main[main.find("event_loop.run(").expect("the event loop")..];
+        for event in ["WindowEvent::Focused(", "WindowEvent::Resized("] {
+            let at = event_loop.find(event).unwrap_or_else(|| panic!("no {event} arm"));
+            let arm = &event_loop[at..];
+            let arm = &arm[..arm[1..].find("Event::").map(|i| i + 1).unwrap_or(arm.len())];
+            assert!(arm.contains("sync_page_visibility("), "{event} arm does not sync page visibility");
         }
     }
 }
