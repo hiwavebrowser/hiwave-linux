@@ -136,17 +136,19 @@ rustkit-bench = { path = "crates/rustkit-bench" }
 [profile.dev.package."*"]
 opt-level = 2
 
-# tiny-skia's wide u16 arithmetic relies on wrapping subtraction (NEON's vsubq_u16 wraps on aarch64;
-# elsewhere it is plain `-`), so x86-64 debug builds' overflow check aborts the canvas tests. Wrap
-# as aarch64 and release builds do. Carried from hiwave-macos #1320 (batch 107), ahead of the next sync.
-[profile.dev.package.tiny-skia]
-overflow-checks = false
-
 [profile.dev.package.rustkit-js]
 opt-level = 2
 
 [profile.dev.package.rustkit-bindings]
 opt-level = 2
+
+# tiny-skia's 16-lane integer maths wraps on aarch64 (NEON `vsubq_u16`) and in release builds, but on
+# x86-64 it is the plain operator, so a debug build's overflow check panics in it (wide/u16x16_t.rs,
+# `attempt to subtract with overflow`: rustkit-canvas recording_tests, every composite operation),
+# and the second panic while unwinding aborts the whole test binary. Off for this one dependency, the
+# x86 debug build (Windows, Linux) wraps as aarch64 and release do.
+[profile.dev.package.tiny-skia]
+overflow-checks = false
 
 [profile.release]
 opt-level = 3
