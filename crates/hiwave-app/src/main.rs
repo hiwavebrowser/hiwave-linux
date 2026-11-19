@@ -795,6 +795,30 @@ fn load_report_page(content: &impl IWebView) {
     content.load_html(&report_with_chartjs);
 }
 
+/// A shortcut the app takes at window level, before the focused view (a page included) sees the
+/// key: toggling focus mode and autofill are the app's, not requests a page can make over IPC.
+#[cfg(not(feature = "native-linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowShortcut {
+    ToggleFocusMode,
+    TriggerAutofill,
+}
+
+/// `key` is the GDK key name (`F11`, `f`, `F`, `L`, ...). F11 or Ctrl+Shift+F toggles focus mode,
+/// Ctrl+Shift+L fills the page's login (the keys context_menu.js used to forward); Alt never.
+#[cfg(not(feature = "native-linux"))]
+fn window_shortcut(key: &str, ctrl: bool, shift: bool, alt: bool) -> Option<WindowShortcut> {
+    if alt {
+        return None;
+    }
+    match key {
+        "F11" if !ctrl => Some(WindowShortcut::ToggleFocusMode),
+        "f" | "F" if ctrl && shift => Some(WindowShortcut::ToggleFocusMode),
+        "l" | "L" if ctrl && shift => Some(WindowShortcut::TriggerAutofill),
+        _ => None,
+    }
+}
+
 /// A new tab a content page asks for: none (Ctrl+T opens the new-tab page) or an http(s) URL.
 /// Every other scheme (`javascript:`, `file:`, `data:`, `hiwave:`, `about:`) is refused.
 #[cfg(not(feature = "native-linux"))]
@@ -1178,6 +1202,42 @@ fn main() {
     }
 
     info!("Window created successfully");
+
+    // Window-level shortcuts (focus mode, autofill): GTK runs a toplevel's key-press handler before
+    // the focused child, so these keys reach the app whichever view (a page included) has focus, and
+    // stop there; the page is not asked to forward them over IPC.
+    #[cfg(not(feature = "native-linux"))]
+    {
+        use gtk::gdk::ModifierType;
+        use gtk::prelude::*;
+        use tao::platform::unix::WindowExtUnix;
+        let key_proxy = proxy.clone();
+        let key_state = Arc::clone(&state);
+        window.gtk_window().connect_key_press_event(move |_, event| {
+            let mods = event.state();
+            let name = event.keyval().name().map(|n| n.to_string()).unwrap_or_default();
+            let shortcut = window_shortcut(
+                &name,
+                mods.contains(ModifierType::CONTROL_MASK),
+                mods.contains(ModifierType::SHIFT_MASK),
+                mods.contains(ModifierType::MOD1_MASK),
+            );
+            match shortcut {
+                Some(WindowShortcut::ToggleFocusMode) => {
+                    info!("Shortcut: toggle focus mode");
+                    let _ = ipc::commands::handle_message(&key_state, IpcMessage::ToggleFocusMode);
+                    let _ = key_proxy.send_event(UserEvent::ToggleFocusMode);
+                    gtk::glib::Propagation::Stop
+                }
+                Some(WindowShortcut::TriggerAutofill) => {
+                    info!("Shortcut: autofill");
+                    let _ = key_proxy.send_event(UserEvent::TriggerAutofill);
+                    gtk::glib::Propagation::Stop
+                }
+                None => gtk::glib::Propagation::Proceed,
+            }
+        });
+    }
 
     // Linux: the three webviews (chrome/content/shelf) embed into a shared
     // gtk::Fixed. wry's build_gtk honors each webview's with_bounds — (x,y) via
@@ -1854,6 +1914,13 @@ fn main() {
                         // Autofill hardening: credentials are delivered only for a user-requested fill on the
                         // page's own origin. A content page's request gets nothing.
                         let _ = ipc::commands::content_page_autofill(&content_state_ipc, domain);
+                    }
+                    // Escape forwarded from the content view (context_menu.js): leaving focus mode is the only
+                    // focus-mode request a page is served; entering or toggling is a window-level shortcut.
+                    IpcMessage::ExitFocusMode => {
+                        info!("Exit focus mode from content WebView");
+                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
+                        let _ = content_proxy_ipc.send_event(UserEvent::ExitFocusMode);
                     }
                     // UI shortcuts forwarded from content WebView
                     IpcMessage::CloseTab { id } => {
@@ -4777,11 +4844,25 @@ mod content_ipc_scope_2_tests {
         assert!(check < arm.find("handle_message").unwrap_or(usize::MAX), "{arm}");
     }
 
-    /// Autofill and focus mode are not served from the content view.
+    /// Autofill, and entering or toggling focus mode, are not served from the content view (Escape's
+    /// exit_focus_mode is).
     #[test]
     fn a_page_neither_fills_nor_switches_focus_mode() {
-        for name in ["TriggerAutofill =>", "EnterFocusMode =>", "ExitFocusMode =>", "ToggleFocusMode =>"] {
+        for name in ["TriggerAutofill =>", "EnterFocusMode =>", "ToggleFocusMode =>"] {
             assert!(arm(name).is_none(), "{name} is served to pages");
+        }
+    }
+
+    /// The keys context_menu.js forwarded, now taken at window level; Escape stays the page's.
+    #[test]
+    fn the_window_takes_the_focus_mode_and_autofill_keys() {
+        use super::{window_shortcut, WindowShortcut::*};
+        assert_eq!(window_shortcut("F11", false, false, false), Some(ToggleFocusMode));
+        assert_eq!(window_shortcut("F", true, true, false), Some(ToggleFocusMode));
+        assert_eq!(window_shortcut("f", true, true, false), Some(ToggleFocusMode));
+        assert_eq!(window_shortcut("L", true, true, false), Some(TriggerAutofill));
+        for (key, ctrl, shift, alt) in [("Escape", false, false, false), ("f", true, false, false), ("L", false, true, false), ("L", true, true, true), ("F11", true, false, false), ("t", true, false, false)] {
+            assert_eq!(window_shortcut(key, ctrl, shift, alt), None, "{key} ctrl={ctrl} shift={shift} alt={alt}");
         }
     }
 
