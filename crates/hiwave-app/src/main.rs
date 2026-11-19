@@ -796,6 +796,12 @@ fn load_report_page(content: &impl IWebView) {
 }
 
 #[cfg(not(feature = "native-linux"))]
+/// Red-run stub; replaced by the fix.
+#[cfg(test)]
+fn content_new_tab_url_allowed(_url: Option<&str>) -> bool {
+    true
+}
+
 fn is_new_tab_url(url: &str) -> bool {
     url == "about:blank" || url == NEW_TAB_URL || url.starts_with("data:text/html")
 }
@@ -4740,6 +4746,60 @@ mod ipc_shape_tests {
             let script = super::inspector_picked_script(path, "null");
             let literal = serde_json::to_string(path).unwrap();
             assert!(script.contains(&format!("selectElementByPath({literal})")), "{script}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod content_ipc_scope_2_tests {
+    const MAIN_RS: &str = include_str!("main.rs");
+
+    fn content_handler() -> &'static str {
+        let start = MAIN_RS
+            .find("let content_ipc: std::rc::Rc<dyn Fn(&str)>")
+            .expect("the content view's IPC handler");
+        let rest = &MAIN_RS[start..];
+        &rest[..rest.find("\n    });").expect("the end of the content handler")]
+    }
+
+    fn arm(name: &str) -> Option<&'static str> {
+        let handler = content_handler();
+        let at = handler.find(&format!("IpcMessage::{name}"))?;
+        let rest = &handler[at..];
+        let end = rest[1..].find("IpcMessage::").map(|i| i + 1).unwrap_or(rest.len());
+        Some(&rest[..end])
+    }
+
+    /// The context menu shelves the active tab; a page names no other tab.
+    #[test]
+    fn a_page_shelves_only_the_active_tab() {
+        let arm = arm("AddToShelf").expect("the add-to-shelf arm");
+        assert!(!arm.contains("tab_id.clone()"), "{arm}");
+    }
+
+    /// A page's new tab opens only an http(s) URL, or none (Ctrl+T), checked before the tab exists.
+    #[test]
+    fn a_page_new_tab_url_is_checked_first() {
+        let arm = arm("CreateTab").expect("the create-tab arm");
+        let check = arm.find("content_new_tab_url_allowed(").expect("the URL check");
+        assert!(check < arm.find("handle_message").unwrap_or(usize::MAX), "{arm}");
+    }
+
+    /// Autofill and focus mode are not served from the content view.
+    #[test]
+    fn a_page_neither_fills_nor_switches_focus_mode() {
+        for name in ["TriggerAutofill =>", "EnterFocusMode =>", "ExitFocusMode =>", "ToggleFocusMode =>"] {
+            assert!(arm(name).is_none(), "{name} is served to pages");
+        }
+    }
+
+    #[test]
+    fn only_http_and_https_or_no_url_open_from_a_page() {
+        for ok in [None, Some("https://example.com/"), Some("http://a.test/x"), Some("HTTPS://A.TEST")] {
+            assert!(super::content_new_tab_url_allowed(ok), "{ok:?}");
+        }
+        for bad in ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", "hiwave://settings", "about:blank", " https://a.test", "httpx://a", ""] {
+            assert!(!super::content_new_tab_url_allowed(Some(bad)), "{bad}");
         }
     }
 }
