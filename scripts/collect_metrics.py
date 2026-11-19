@@ -152,6 +152,15 @@ def _helper_bodies(applier: str, sources: dict) -> str:
         for name in names:
             for m in re.finditer(r"\bfn " + re.escape(name) + r"\b\s*[(<]", text):
                 out.append(_brace_body(text, m.start()))
+    # A method called ON the style is a direct callee too (`style.set_font_size_length(..)`,
+    # upstream's font-size setters since #1053): its body writes `self.<field>`, which is the
+    # style. Only `&mut self` methods of rustkit-css (a `&self` method cannot write), and only
+    # those the applier calls on `style`/`s`; `self.` is read as `style.` for the field scan.
+    methods = set(re.findall(r"\b(?:style|s)\.([a-z_][a-z_0-9]*)\s*\(", applier))
+    css = Path("crates/rustkit-css/src/lib.rs").read_text()
+    for name in methods:
+        for m in re.finditer(r"\bfn " + re.escape(name) + r"\s*\(\s*&mut self\b", css):
+            out.append(re.sub(r"\bself\.", "style.", _brace_body(css, m.start())))
     return "\n".join(out)
 
 
@@ -179,10 +188,14 @@ def reachability() -> dict:
     is the part someone can act on.
     """
     css = Path("crates/rustkit-css/src/lib.rs").read_text()
-    i = css.find("pub struct ComputedStyle")
+    # Line comments out first, then the struct brace-matched: a doc comment quoting CSS
+    # (`html { line-height: 1.5 }`) ended a first-`}` scan at half the struct, and every field after
+    # it went unchecked without a word.
+    css_code = re.sub(r"//[^\n]*", "", css)
+    i = css_code.find("pub struct ComputedStyle")
     if i < 0:
         return {"error": "ComputedStyle not found"}
-    fields = sorted(set(re.findall(r"pub ([a-z_0-9]+):", css[i:css.find("}", css.find("{", i))])))
+    fields = sorted(set(re.findall(r"pub ([a-z_0-9]+):", _brace_body(css_code, i))))
 
     layout = "".join(p.read_text() for p in sorted(Path("crates/rustkit-layout/src").glob("*.rs")))
     engine = Path("crates/rustkit-engine/src/lib.rs").read_text()
@@ -227,6 +240,8 @@ def reachability() -> dict:
         for recv in ("style", "s"):
             r = r"\b" + recv + r"\." + f
             if (re.search(r + r"\s*=(?!=)", scope)                          # assignment
+                    # one element of an array field: `style.padding_declared[i] = true` (CB3c)
+                    or re.search(r + r"\[[^\]\n]*\]\s*=(?!=)", scope)
                     or re.search(r + r"\s*(?:[-+*/&|^]|<<|>>)=", scope)     # compound: &=, |=, +=, ...
                     or re.search(r + r"\.(?:" + MUTATORS + r")\s*\(", scope)  # in-place mutator
                     # tuple target: `(style.a, style.b) = ..` (either position)

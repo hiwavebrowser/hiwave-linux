@@ -16,41 +16,9 @@
 use hiwave_shield::ResourceType as ShieldResourceType;
 use url::Url;
 use rustkit_net::{BlockReason, InterceptAction, InterceptHandler, Request, RequestDestination};
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, trace};
-
-/// Blocked domains for ad/tracker blocking.
-/// These are the most common ad and tracking domains.
-const BLOCKED_DOMAINS: &[&str] = &[
-    "doubleclick.net",
-    "googlesyndication.com",
-    "googleadservices.com",
-    "adtrafficquality.google",
-    "ads.twitter.com",
-    "facebook.com/tr",
-    "connect.facebook.net",
-    "tr.snapchat.com",
-    "amazon-adsystem.com",
-    "criteo.com",
-    "adnxs.com",
-    "adsrvr.org",
-    "adroll.com",
-    "taboola.com",
-    "outbrain.com",
-    "rubiconproject.com",
-    "openx.net",
-    "pubmatic.com",
-    "scorecardresearch.com",
-    "chartbeat.com",
-    "segment.io",
-    "segment.com",
-    "mixpanel.com",
-    "hotjar.com",
-    "fullstory.com",
-    "googletagmanager.com",
-];
 
 /// Thread-safe adapter that implements rustkit-net's InterceptHandler.
 pub struct ShieldInterceptHandler {
@@ -58,8 +26,6 @@ pub struct ShieldInterceptHandler {
     enabled: Arc<AtomicBool>,
     /// Counter for blocked requests.
     blocked_count: Arc<AtomicU64>,
-    /// Set of blocked domain patterns (fallback + tests).
-    blocked_domains: HashSet<String>,
     /// Per-destination attempted/blocked census.
     census: Arc<ShieldCensus>,
     /// Callback to notify when a request is blocked (for UI updates).
@@ -73,15 +39,9 @@ impl ShieldInterceptHandler {
         // allow-until-ready window starts closing at construction, not at
         // the first request.
         let _ = shield_worker();
-        let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
         Self {
             enabled: Arc::new(AtomicBool::new(true)),
             blocked_count: Arc::new(AtomicU64::new(0)),
-            blocked_domains,
             census: Arc::new(ShieldCensus::default()),
             on_blocked: None,
         }
@@ -92,15 +52,9 @@ impl ShieldInterceptHandler {
         // Production constructor (webview_rustkit path): start closing the
         // pending window here too, not only in new().
         let _ = shield_worker();
-        let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
         Self {
             enabled: Arc::new(AtomicBool::new(true)),
             blocked_count,
-            blocked_domains,
             census: Arc::new(ShieldCensus::default()),
             on_blocked: None,
         }
@@ -127,7 +81,9 @@ impl ShieldInterceptHandler {
         self.census.snapshot()
     }
 
-    /// Set a callback to be called when a request is blocked.
+    /// Set a callback to be called when a request is blocked. It is handed the FULL URL, for
+    /// in-process use (a counter, a UI badge); a callback must not log it, as the shield's own log
+    /// lines carry the host only (the standing rule: logs carry shapes, never bodies).
     pub fn with_on_blocked<F>(mut self, callback: F) -> Self
     where
         F: Fn(&str) + Send + Sync + 'static,
@@ -136,18 +92,20 @@ impl ShieldInterceptHandler {
         self
     }
 
-    /// Check if a host should be blocked.
-    fn should_block_host(&self, host: &str) -> bool {
-        self.floor_domain(host).is_some()
-    }
-
-    /// The interim list's domain that `host` is, or is under.
-    fn floor_domain(&self, host: &str) -> Option<&str> {
-        let host_lower = host.to_lowercase();
-        self.blocked_domains
-            .iter()
-            .find(|domain| host_lower == **domain || host_lower.ends_with(&format!(".{}", domain)))
-            .map(String::as_str)
+    /// What the interim floor says about `request` while the filter lists are still building: the
+    /// built-in defaults (SH2), the same rules the compiled engine carries as its own, so a request
+    /// is judged the same before and after the lists are ready. It was a separate hand-kept domain
+    /// list that blocked more than the engine (all of criteo.com, connect.facebook.net and
+    /// googletagmanager.com) and judged a tracker's own site by the same rule. The engine is
+    /// neither `Send` nor `Sync`, so each thread that asks builds its own, once (about 40 rules).
+    fn pending_floor(&self, request: &Request) -> Option<BlockReason> {
+        thread_local! {
+            static FLOOR: hiwave_shield::AdBlocker = hiwave_shield::AdBlocker::new();
+        }
+        let source = first_party(request);
+        FLOOR
+            .with(|engine| engine.check(&request.url, &source, dest_to_shield(request.destination)))
+            .map(|found| BlockReason { list: "domain-floor".into(), rule: found.rule })
     }
 
     /// Convert HTTP method and URL to a shield ResourceType.
@@ -222,7 +180,7 @@ impl ShieldInterceptHandler {
 
 impl InterceptHandler for ShieldInterceptHandler {
     fn intercept(&self, request: &Request) -> InterceptAction {
-        trace!(url = %request.url, "Shield checking request");
+        trace!(host = %rustkit_net::origin_for_log(&request.url), "Shield checking request");
 
         // Privacy pin 2026-09-29: interception happens BEFORE bytes; the
         // census counts every attempt per destination so "blocked" is a
@@ -247,15 +205,12 @@ impl InterceptHandler for ShieldInterceptHandler {
             return InterceptAction::Allow;
         }
 
-        // First party = the document that made the request. The loader
-        // carries it as the (policy-governed) referrer; a subresource with
-        // no referrer context is judged against its own origin, which
-        // disables third-party-only rules rather than inventing a party.
-        let source = request.referrer.as_ref().unwrap_or(&request.url);
+        // First party = the document that made the request (see `first_party`).
+        let source = first_party(request);
 
         // Which list and rule blocked it (dev-tools T2: the event log's
         // `failure.blocked_by`); the floor names itself and its domain.
-        let blocked = match shared_block(&request.url, source, dest_to_shield(dest)) {
+        let blocked = match shared_block(&request.url, &source, dest_to_shield(dest)) {
             Some(verdict) => verdict.map(|found| BlockReason { list: found.list, rule: found.rule }),
             None => {
                 // PENDING FLOOR (Prometheus R1 on this PR): while EasyList is
@@ -266,18 +221,14 @@ impl InterceptHandler for ShieldInterceptHandler {
                 // not mean permanent allow). The census still counts the
                 // window so the upgrade's coverage delta stays a number.
                 self.census.engine_pending.fetch_add(1, Ordering::Relaxed);
-                request
-                    .url
-                    .host_str()
-                    .and_then(|host| self.floor_domain(host))
-                    .map(|domain| BlockReason { list: "domain-floor".into(), rule: Some(domain.to_string()) })
+                self.pending_floor(request)
             }
         };
 
         if let Some(reason) = blocked {
             self.census.blocked(dest);
             self.blocked_count.fetch_add(1, Ordering::Relaxed);
-            debug!(url = %request.url, ?dest, list = %reason.list, "Shield blocked request");
+            debug!(host = %rustkit_net::origin_for_log(&request.url), ?dest, list = %reason.list, "Shield blocked request");
             if let Some(ref callback) = self.on_blocked {
                 callback(request.url.as_str());
             }
@@ -496,6 +447,19 @@ where
     interceptor
 }
 
+/// The first party a request is judged against: the document that made it, which the loader
+/// carries as the referrer (the document's URL, whatever its referrer policy sends as a header).
+/// A request with none (a view loaded without a URL) gets an opaque first party that matches no
+/// site, so every third-party rule applies to it, as for a document whose origin is opaque.
+/// Judging it against its own URL made it first-party to itself and turned the `$third-party`
+/// defaults off there (R1 on #1132).
+fn first_party(request: &Request) -> Url {
+    match &request.referrer {
+        Some(referrer) => referrer.clone(),
+        None => Url::parse("https://opaque.invalid/").expect("a constant URL"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,23 +577,23 @@ mod tests {
     #[test]
     fn known_tracker_subresources_are_blocked() {
         // Deterministic regardless of EasyList readiness: the pending floor
-        // uses BLOCKED_DOMAINS, and the compiled engine includes the same
-        // hosts. Either path must Block before bytes.
+        // is the compiled engine's own defaults (SH2), so both paths agree.
+        // Either path must Block before bytes.
         let handler = ShieldInterceptHandler::new();
         let action = handler.intercept(&test_request_with(
             "https://doubleclick.net/pagead.js",
             RequestDestination::Script,
             Some("https://news.example/"),
         ));
-        // Before the lists are ready: the floor and its domain. Once ready,
+        // Before the lists are ready: the floor and the default rule it shares with the engine. Once ready,
         // with no `name_matched_rules()` (these tests never call it), two
         // lists name neither list nor rule; with no lists on disk the engine
         // is the defaults, one list that names its rule.
         match action {
             InterceptAction::BlockedBy(reason) => assert!(
-                reason.list == "domain-floor" && reason.rule.as_deref() == Some("doubleclick.net")
+                reason.list == "domain-floor" && reason.rule.as_deref() == Some("||doubleclick.net^$third-party")
                     || reason.list == hiwave_shield::UNATTRIBUTED && reason.rule.is_none()
-                    || reason.list == "HiWave defaults" && reason.rule.as_deref() == Some("||doubleclick.net^"),
+                    || reason.list == "HiWave defaults" && reason.rule.as_deref() == Some("||doubleclick.net^$third-party"),
                 "{reason:?}"
             ),
             other => panic!("not blocked with a reason: {other:?}"),
@@ -640,13 +604,101 @@ mod tests {
         assert_eq!(census[2].1, 1, "script blocked");
     }
 
+    #[derive(Clone, Default)]
+    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    /// Logs carry shapes, never bodies (the standing rule): the handler logs a blocked request by
+    /// its host. Its path, query and fragment, and the page it came from, are not logged.
+    #[test]
+    fn a_blocked_request_is_logged_by_host_only() {
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        let handler = ShieldInterceptHandler::new();
+        let action = tracing::subscriber::with_default(subscriber, || {
+            handler.intercept(&test_request_with(
+                "https://adsrvr.org/pixel/u123abc?session=s3cr3t#frag9",
+                RequestDestination::Script,
+                Some("https://inbox.example/mail/thread42?token=t0k3n"),
+            ))
+        });
+        assert!(!matches!(action, InterceptAction::Allow), "adsrvr.org is blocked: {action:?}");
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("adsrvr.org"), "the block is logged, by host: {text}");
+        for secret in ["pixel", "u123abc", "session", "s3cr3t", "frag9", "inbox", "thread42", "t0k3n"] {
+            assert!(!text.contains(secret), "{secret} reached a log line: {text}");
+        }
+    }
+
+    /// SH1, end to end through the app's own worker and the lists on disk: once the engine is
+    /// READY (the test waits for it, bounded, instead of racing it) the bare floor host is still
+    /// blocked, which the lists alone did not do (EasyList names `ad.doubleclick.net`, not the
+    /// bare host), and what a captcha or a login needs is still allowed.
+    #[test]
+    fn the_ready_engine_still_blocks_the_bare_floor_host_and_allows_captchas_and_logins() {
+        let source = Url::parse("https://news.example/").unwrap();
+        let ask = |url: &str, rt: hiwave_shield::ResourceType| {
+            let url = Url::parse(url).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                if let Some(verdict) = shared_block(&url, &source, rt) {
+                    return verdict;
+                }
+                assert!(std::time::Instant::now() < deadline, "the filter engine never became ready: {url}");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        };
+        use hiwave_shield::ResourceType as R;
+        // A list really loaded (Prometheus #1058 nit 1): `READY` is also set when no list was on
+        // disk and the engine fell back to the built-in rules alone, which would make the rest of
+        // this test prove nothing. `track.adform.net` is blocked by EasyList and by no built-in
+        // rule, so when the lists are cached it must be blocked here. (Nothing cached: say so.)
+        let cached = dirs::data_local_dir()
+            .map(|d| d.join("hiwave").join("filter-lists").join("easylist.txt"))
+            .is_some_and(|p| std::fs::metadata(p).is_ok_and(|m| m.len() > 100_000));
+        if cached {
+            assert!(ask("https://track.adform.net/x.js", R::Script).is_some(), "EasyList is cached, so the engine must have loaded it");
+        } else {
+            eprintln!("NOTE: no cached EasyList: this run proves the defaults-only fallback, not the union");
+        }
+        assert!(ask("https://doubleclick.net/pagead.js", R::Script).is_some(), "the bare floor host is blocked");
+        assert!(ask("https://www.google.com/recaptcha/api2/aframe", R::Other).is_none(), "a captcha frame is allowed");
+        assert!(ask("https://www.google.com/recaptcha/api2/anchor?k=1", R::Other).is_none(), "the reCAPTCHA anchor is allowed");
+        assert!(ask("https://hcaptcha.com/1/api.js", R::Script).is_none(), "hCaptcha is allowed");
+        assert!(ask("https://connect.facebook.net/en_US/sdk.js", R::Script).is_none(), "the Facebook SDK is allowed");
+        assert!(ask("https://news.example/app.js", R::Script).is_none(), "a first-party script is allowed");
+    }
+
     #[test]
     fn subdomain_of_a_blocked_host_is_blocked_by_the_floor() {
         let handler = ShieldInterceptHandler::new();
-        assert!(handler.should_block_host("secure.adnxs.com"));
-        assert!(handler.should_block_host("ADNXS.COM"));
-        assert!(!handler.should_block_host("not-adnxs.com"));
-        assert!(!handler.should_block_host("example.com"));
+        let blocked = |url: &str| {
+            handler
+                .pending_floor(&test_request_with(url, RequestDestination::Script, Some("https://news.example/")))
+                .is_some()
+        };
+        assert!(blocked("https://secure.adnxs.com/a.js"));
+        assert!(blocked("https://ADNXS.COM/a.js"));
+        assert!(!blocked("https://not-adnxs.com/a.js"));
+        assert!(!blocked("https://example.com/a.js"));
     }
 
     #[test]
@@ -676,5 +728,51 @@ mod tests {
         assert_eq!(census[2].0, 1, "attempts still counted while disabled");
         assert_eq!(census[2].1, 0);
     }
-}
 
+    /// SH2: the pending floor and the compiled defaults say the same thing about the same request,
+    /// so a page does not behave differently before and after the filter lists are ready.
+    #[test]
+    fn the_pending_floor_agrees_with_the_defaults_engine() {
+        let handler = ShieldInterceptHandler::new();
+        let defaults = hiwave_shield::AdBlocker::new();
+        let page = "https://news.example/";
+        let cases = [
+            ("https://mixpanel.com/lib.js", "https://mixpanel.com/"),
+            ("https://mixpanel.com/lib.js", page),
+            ("https://connect.facebook.net/en_US/sdk.js", page),
+            ("https://www.criteo.com/ads.js", page),
+            ("https://static.criteo.com/sync", page),
+            ("https://www.googletagmanager.com/gtm.js?id=GTM-1", page),
+            ("https://doubleclick.net/pagead.js", page),
+            ("https://example.com/app.js", page),
+        ];
+        let mut differ = Vec::new();
+        for (url, source) in cases {
+            let request = test_request_with(url, RequestDestination::Script, Some(source));
+            let floor = handler.pending_floor(&request).is_some();
+            let engine = defaults
+                .check(&Url::parse(url).unwrap(), &Url::parse(source).unwrap(), hiwave_shield::ResourceType::Script)
+                .is_some();
+            if floor != engine {
+                differ.push(format!("{url} from {source}: floor {floor}, defaults engine {engine}"));
+            }
+        }
+        assert!(differ.is_empty(), "{}", differ.join("
+"));
+    }
+
+    /// A request with no first party (a view loaded without a URL passes no referrer) is judged
+    /// against an opaque first party that matches no site, so every `$third-party` default applies
+    /// (R1 LOW on #1132). It was judged against its own URL, which made it first-party to itself and
+    /// turned every default off there.
+    #[test]
+    fn a_request_with_no_first_party_still_meets_the_third_party_defaults() {
+        let handler = ShieldInterceptHandler::new();
+        for url in ["https://doubleclick.net/pagead.js", "https://mixpanel.com/lib.js"] {
+            let request = test_request_with(url, RequestDestination::Script, None);
+            assert!(handler.pending_floor(&request).is_some(), "{url} with no first party was allowed");
+        }
+        let own = test_request_with("https://mixpanel.com/lib.js", RequestDestination::Script, Some("https://mixpanel.com/"));
+        assert!(handler.pending_floor(&own).is_none(), "a site's own script was blocked");
+    }
+}

@@ -121,6 +121,22 @@ pub struct Compositor {
 }
 
 impl Compositor {
+    #[cfg(feature = "test-support")]
+    /// A compositor that shares this one's GPU instance, adapter, device and queue
+    /// and has its own empty surface and headless-texture maps. For tests: building
+    /// a device costs ~0.15 s and used to be paid by every engine a test builds.
+    pub fn share_device(&self) -> Self {
+        Self {
+            instance: self.instance.clone(),
+            adapter: self.adapter.clone(),
+            device: Arc::clone(&self.device),
+            queue: Arc::clone(&self.queue),
+            surfaces: RwLock::new(HashMap::new()),
+            headless_textures: RwLock::new(HashMap::new()),
+            config: self.config.clone(),
+        }
+    }
+
     /// Create a new compositor with default configuration.
     pub fn new() -> Result<Self, CompositorError> {
         Self::with_config(CompositorConfig::default())
@@ -192,20 +208,6 @@ impl Compositor {
             headless_textures: RwLock::new(HashMap::new()),
             config,
         })
-    }
-
-    /// Share this compositor's GPU instance, adapter, device, and queue with a
-    /// fresh compositor that has its own empty surface and headless-texture maps.
-    pub fn share_device(&self) -> Self {
-        Self {
-            instance: self.instance.clone(),
-            adapter: self.adapter.clone(),
-            device: Arc::clone(&self.device),
-            queue: Arc::clone(&self.queue),
-            surfaces: RwLock::new(HashMap::new()),
-            headless_textures: RwLock::new(HashMap::new()),
-            config: self.config.clone(),
-        }
     }
 
     /// Create a surface for a view backed by an X11 window.
