@@ -595,6 +595,13 @@ pub(crate) struct ViewLayout {
     /// styled its inline svgs with, for `getComputedStyle(fill / stroke)`
     /// on svg content (`svg_computed`, A2.1).
     pub(crate) svg_paint: RefCell<Option<Rc<crate::svg_computed::SvgPaintSnapshot>>>,
+    /// The keys of the engine's `svg_cache` that this view's inline svg
+    /// passes parsed for an svg holding a moving svg paint value (A2.2):
+    /// one per frame, evicted by this view's next pass that no longer uses
+    /// them, so a long transition keeps the cache flat. Per view: the cache
+    /// is shared, and another view's pass must not evict what this one
+    /// paints.
+    pub(crate) svg_transient_keys: RefCell<Vec<String>>,
     /// This view's running CSS transitions and the values they compare
     /// against, read and advanced by every build (`animations.rs`).
     pub(crate) animations: RefCell<crate::animations::Animations>,
@@ -674,6 +681,11 @@ pub(crate) struct ViewLayout {
     /// can start, move or fill in paint-only frames no build sees; when the layer has been written
     /// since, the kept tree is not spliced into (#1247 delta R1).
     pub(crate) script_unlaid_generation: Cell<u64>,
+    /// The image cache's generation (`ImageManager::cache_generation`) when the kept tree was built.
+    /// An image that arrives later is laid out by its own relayout (`ImageLoaded`, a full build), but
+    /// a script relayout can run before it; the kept tree holds the image's natural size as of its
+    /// build, so once any image has arrived since, the kept tree is not spliced into (BOXES-DIFF).
+    pub(crate) script_unlaid_images: Cell<u64>,
     /// TREE-REUSE step (1): set by a forced layout (a geometry read after a write) for its own
     /// build while `RUSTKIT_RETAINED_STYLES=boxes`: that build keeps its tree, built from the DOM as
     /// it was at the read, so the end-of-task relayout splices the task's writes into it instead of

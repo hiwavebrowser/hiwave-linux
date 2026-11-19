@@ -1,10 +1,15 @@
 {
-  "_comment": "Accepted production uses of ComputedStyle::default(). Entries may only LEAVE this list; adding one is a regression and CI fails. Format: [path, line, text]; matched by path+text and count (the line is informational, it drifts with every macOS sync). lib.rs `check_animation_frame` (macOS upstream, the animation fast-path validator): builds a throwaway style only to set ONE transform value and ask effective_transform().is_identity(); no other field is read, so the derived Default's disagreement with new() cannot reach it. Entered 2026-11-09 with the S1-S20 syncs; same line exists on macOS develop.",
+  "_comment": "Accepted production uses of ComputedStyle::default(). Entries may only LEAVE this list; adding one is a regression and CI fails. Format: [path, line, text]; matched by path+text and count (the line is informational, it drifts with every macOS sync). lib.rs `check_animation_frame` (macOS upstream, the animation fast-path validator): builds a throwaway style only to set ONE transform value and ask effective_transform().is_identity(); no other field is read, so the derived Default's disagreement with new() cannot reach it. Entered 2026-11-09 with the S1-S20 syncs; same line exists on macOS develop. lib.rs SVG fill/stroke transitions (macOS upstream 24915ac3, CSS-TRANS A2, synced in S24 2026-11-19): a scratch style only to parse a node's declared `transition` list; only `scratch.transitions` is read, so Default's disagreement with new() (min-width and the rest) cannot reach it. Same line exists on macOS develop.",
   "allowed": [
     [
       "crates/rustkit-engine/src/lib.rs",
       43986,
       "let mut s = rustkit_css::ComputedStyle::default();"
+    ],
+    [
+      "crates/rustkit-engine/src/lib.rs",
+      21440,
+      "let mut scratch = ComputedStyle::default();"
     ]
   ]
 }
