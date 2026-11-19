@@ -4,6 +4,12 @@ Three sets: campaign 26, websuite cases + micro 29, chrome board 42.
 
 RustKit on Linux vs Chrome on Linux. Measured on legion5, hiwave-linux develop **a5f9ca21** (= hiwave-macos develop 329e5d10, batch 109, plus Linux's own changes).
 
+**Re-measured at batch 111 (2026-11-19):** hiwave-linux develop **b37be7fd** carries hiwave-macos develop 2f70f02f, the engine version shared by all three platforms. All three sets were rerun there (release `parity-capture` sha256 prefix de1b835e942cd02b; same Chrome, fonts and drivers):
+- every metric is identical to the batch-109 run on all 97 pairs;
+- all 97 RustKit frames are pixel-identical to the ones stored here.
+
+So the numbers and frames below stand for batch 111 too.
+
 ## Environment
 
 - **Chrome:** Chrome for Testing 148.0.7778.216 linux64, pinned (`gate-runner/tools/cft`).
