@@ -37,9 +37,9 @@ use wry::{Rect, WebViewBuilder, WebViewBuilderExtUnix};
 
 // Always need logging
 #[cfg(feature = "native-linux")]
-use tracing::{error, info, Level};
+use tracing::{error, info};
 #[cfg(not(feature = "native-linux"))]
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
 // Constants used by hybrid mode
@@ -795,10 +795,14 @@ fn load_report_page(content: &impl IWebView) {
     content.load_html(&report_with_chartjs);
 }
 
-/// Red-run stub; replaced by the fix.
-#[cfg(test)]
-fn rust_log_filter(_rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
-    tracing_subscriber::EnvFilter::new("info")
+/// `RUST_LOG` when it is set to a directive this process can parse. Unset, blank, and unparseable
+/// values stay at info, which is what the app logged before `RUST_LOG` was read (upstream's).
+fn rust_log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
+    use tracing_subscriber::EnvFilter;
+    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new("info")),
+        None => EnvFilter::new("info"),
+    }
 }
 
 /// A shortcut the app takes at window level, before the focused view (a page included) sees the
@@ -1095,10 +1099,11 @@ fn main() {
         return;
     }
 
-    // Initialize logging with log compatibility
+    // Initialize logging with log compatibility. `RUST_LOG` selects the
+    // level when it is set; otherwise info, as before.
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(rust_log_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
