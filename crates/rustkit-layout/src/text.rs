@@ -3400,15 +3400,16 @@ mod tests {
         #[cfg(windows)]
         assert_eq!(system.primary, "Segoe UI");
 
-        // Linux: Chrome on Linux has no system font behind these names; they are
-        // unknown families, skipped like any font that is not installed (CB7b), so
-        // either alone resolves as the default serif does.
+        // Linux: Chrome on Linux has no system font behind these names. Upstream drops
+        // `-apple-system` from the chain everywhere (CB7b), so alone it resolves as the
+        // default serif does; `BlinkMacSystemFont` stays an ordinary family name in the
+        // chain, skipped when shaping like any font that is not installed.
         let apple = FontFamilyChain::from_css_value("-apple-system");
         #[cfg(target_os = "linux")]
         assert_eq!(apple.primary, FontFamilyChain::serif().primary);
         let blink = FontFamilyChain::from_css_value("BlinkMacSystemFont");
         #[cfg(target_os = "linux")]
-        assert_eq!(blink.primary, FontFamilyChain::serif().primary);
+        assert_eq!(blink.primary, "BlinkMacSystemFont");
         #[cfg(not(target_os = "linux"))]
         assert_eq!(blink.primary, system.primary);
     }
