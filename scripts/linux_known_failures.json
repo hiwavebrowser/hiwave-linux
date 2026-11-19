@@ -24,6 +24,18 @@
     {
       "test": "rustkit_engine::paint_only_web_font_tests::an_element_scroll_keeps_the_web_font_when_another_view_painted",
       "reason": "macOS #1017 (E52): the test reads the shaped face from DisplayCommand::Text.run (`r.face.postscript_name`), a shaped-run record that only the macOS CoreText path produces; Linux text commands carry `run: None`, so the face reads as empty. Measured, not assumed: with only that face-name assertion skipped, the test passes on Linux, including its pixel checks (the static line's pixels unchanged across paint-only frames after another view paints; no relayout), so the E52 behaviour itself holds here."
+    },
+    {
+      "test": "rustkit_engine::paint_only_web_font_tests::web_faces_hold_by_weight_when_another_view_on_the_thread_paints",
+      "reason": "S22 (macOS E52 follow-up): reads the face from DisplayCommand::Text.run.face.postscript_name, a shaped-run record only the macOS CoreText path produces (Linux: run None, face reads empty), the same cause as the two entries above. The face-name read fails first; the rest of the test was not measured separately on Linux."
+    },
+    {
+      "test": "rustkit_engine::paint_only_web_font_tests::web_faces_hold_while_another_thread_installs_its_own",
+      "reason": "S22: the same shaped-run face-name read as the entry above (Linux records no run face). The rest of the test was not measured separately on Linux."
+    },
+    {
+      "test": "rustkit_engine::flex_aspect_ratio_tests::aspect_ratio_minimum_size_inherit_and_the_card_are_as_in_chrome",
+      "reason": "S22: the inherit-em case's text box is 11 px high on Linux where the pin (Chrome 148 on macOS) is 13: a font-metric pin, as on Windows (hiwave-windows pinned it to Chrome on Windows). Not yet pinned to Chrome 148 on Linux."
     }
   ]
 }

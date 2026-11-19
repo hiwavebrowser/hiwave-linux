@@ -814,7 +814,7 @@ fn find_in_page_mid_load_then_a_hydrating_script() {
     let page = r#"<!doctype html><body style="margin:0">
 <div id="main" style="width:400px;height:200px;background:rgb(0,160,0)">Main text hello</div>
 <img src="/slow.jpg" width="100" height="100">
-<script>window.sawMark = document.getElementById('main').innerHTML.indexOf('zen-find-match') >= 0;
+<script>window.sawMark = document.getElementById('main').innerHTML.indexOf('hiwave-find-match') >= 0;
 document.getElementById('main').textContent = 'hydrated hello world';</script>"#;
     let fixture = serve(vec![("/page", html(page)), ("/slow.jpg", slow_image(2_000))]);
     let mut load = Load::start(&fixture, "/page");
