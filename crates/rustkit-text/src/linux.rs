@@ -521,6 +521,16 @@ impl LinuxTextBackend {
                 // Chrome asks fontconfig for its default sans; the generic
                 // "sans-serif" pattern is that lookup here.
                 Some("sans-serif".to_string())
+            } else if matches!(lower.as_str(), "cursive" | "fantasy") {
+                // Chrome on Linux draws a bare cursive / fantasy (its named picks absent) in its
+                // standard font, Times New Roman: the metric-compatible Liberation Serif, as
+                // `serif` is. Not the sans-serif default a fontconfig miss would give.
+                Some(
+                    self.fontconfig
+                        .find("Times New Roman", None)
+                        .map(|_| "Times New Roman".to_string())
+                        .unwrap_or_else(|| "serif".to_string()),
+                )
             } else if lower == "helvetica" {
                 // Chrome resolves Helvetica to the same metric-compatible
                 // face as Arial (Liberation Sans), where a bare fontconfig
@@ -991,6 +1001,18 @@ mod tests {
         assert_eq!(b.resolve_family(["No Such Family Zzz", "monospace"]), "monospace");
         assert_eq!(b.resolve_family(["No Such Family Zzz"]), "sans-serif");
         assert_eq!(b.resolve_family([" \"serif\" "]), "serif");
+    }
+
+    /// Chrome 148 on Linux draws a bare `cursive` or `fantasy` (none of its named picks installed)
+    /// with its standard font, Times New Roman, i.e. Liberation Serif: the same face as `serif`
+    /// (measured 2026-11-19 with CSS.getPlatformFontsForNode). Not the sans-serif default.
+    #[test]
+    fn cursive_and_fantasy_fall_back_to_the_standard_serif_font() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let standard = b.resolve_family(["Times New Roman"]);
+        assert_eq!(b.resolve_family(["cursive"]), standard);
+        assert_eq!(b.resolve_family(["fantasy"]), standard);
+        assert_eq!(b.resolve_family(["No Such Script Zzz", "cursive"]), standard);
     }
 
     #[test]
