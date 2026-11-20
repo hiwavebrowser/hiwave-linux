@@ -901,7 +901,25 @@ enum TabUrlUpdate {
 }
 
 #[cfg(not(feature = "native-linux"))]
-fn main_frame_url_update(url: &str, current_tab_is_internal: bool) -> TabUrlUpdate {
+/// How many of the app's own page loads (load_html of the new-tab, About or Report page, or the
+/// start page) have not committed yet. They commit in the main frame as about:blank, which is also
+/// what a page's own navigation to about:blank commits as; this tells the two apart.
+#[cfg(not(feature = "native-linux"))]
+static APP_LOADS_PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Called just before the app loads one of its own pages into the content view.
+#[cfg(not(feature = "native-linux"))]
+fn mark_app_load() {}
+
+/// For the main frame's committed `url`: is it one of the app's own loads?
+#[cfg(not(feature = "native-linux"))]
+fn take_app_load(url: &str) -> bool {
+    url == "about:blank"
+}
+
+#[cfg(not(feature = "native-linux"))]
+fn main_frame_url_update(url: &str, current_tab_is_internal: bool, app_load: bool) -> TabUrlUpdate {
+    let _ = app_load;
     if is_new_tab_url(url) {
         // The app's About page also commits as about:blank: a tab showing it keeps hiwave://about.
         TabUrlUpdate::NewTab { store: !current_tab_is_internal || url == NEW_TAB_URL }
@@ -2204,7 +2222,7 @@ fn main() {
                         is_about_url(&url_str) || url_str == NEW_TAB_URL
                     }))
                     .unwrap_or(false);
-                match main_frame_url_update(&url, current_tab_is_internal) {
+                match main_frame_url_update(&url, current_tab_is_internal, take_app_load(&url)) {
                     TabUrlUpdate::NewTab { store } => {
                         if store {
                             let _ = content_proxy2.send_event(UserEvent::UpdateActiveTabUrl(NEW_TAB_URL.to_string()));
@@ -5118,12 +5136,51 @@ mod content_ipc_scope_2_tests {
     #[test]
     fn a_committed_page_url_follows_the_new_tab_rules() {
         use super::{main_frame_url_update as update, TabUrlUpdate::*};
-        assert_eq!(update("https://a.test/x", false), Page("https://a.test/x".into()));
-        assert_eq!(update("https://a.test/x", true), Page("https://a.test/x".into()));
+        assert_eq!(update("https://a.test/x", false, false), Page("https://a.test/x".into()));
+        assert_eq!(update("https://a.test/x", true, false), Page("https://a.test/x".into()));
         // The app's own pages commit as about:blank: on About the tab keeps hiwave://about.
-        assert_eq!(update("about:blank", false), NewTab { store: true });
-        assert_eq!(update("about:blank", true), NewTab { store: false });
-        assert_eq!(update("hiwave://newtab", true), NewTab { store: true });
+        assert_eq!(update("about:blank", false, true), NewTab { store: true });
+        assert_eq!(update("about:blank", true, true), NewTab { store: false });
+        assert_eq!(update("hiwave://newtab", true, false), NewTab { store: true });
+    }
+
+    /// A page's own navigation to about:blank is that page, as in Chrome: the address bar shows
+    /// about:blank and the tab keeps it, not the new-tab page's empty bar and hiwave://newtab.
+    #[test]
+    fn a_pages_own_about_blank_is_not_the_new_tab_page() {
+        use super::{main_frame_url_update as update, TabUrlUpdate::*};
+        assert_eq!(update("about:blank", false, false), Page("about:blank".into()));
+        assert_eq!(update("about:blank", true, false), Page("about:blank".into()));
+    }
+
+    /// The marker: each app load is taken by the next main-frame about:blank commit; a page's own
+    /// commit (any other URL) means the pending app loads were superseded.
+    #[test]
+    fn an_app_load_is_told_from_a_pages_about_blank() {
+        use super::{mark_app_load, take_app_load, APP_LOADS_PENDING};
+        use std::sync::atomic::Ordering;
+        APP_LOADS_PENDING.store(0, Ordering::SeqCst);
+        assert!(!take_app_load("about:blank"), "no app load pending");
+        mark_app_load();
+        assert!(take_app_load("about:blank"), "the app's load");
+        assert!(!take_app_load("about:blank"), "taken once");
+        mark_app_load();
+        mark_app_load();
+        assert!(!take_app_load("https://a.test/"), "a page committed");
+        assert!(!take_app_load("about:blank"), "the superseded loads are gone");
+    }
+
+    /// Every way the app loads its own page into the content view marks the load first.
+    #[test]
+    fn every_app_page_load_is_marked() {
+        for loader in ["fn load_new_tab(", "fn load_about_page(", "fn load_report_page("] {
+            let at = MAIN_RS.find(loader).unwrap_or_else(|| panic!("{loader}"));
+            let body = &MAIN_RS[at..at + MAIN_RS[at..].find("\n}\n").expect("its end")];
+            assert!(body.contains("mark_app_load();"), "{loader} does not mark its load");
+        }
+        let start = MAIN_RS.find(".with_html(ABOUT_HTML)").expect("the start page");
+        let before = &MAIN_RS[start.saturating_sub(1500)..start];
+        assert!(before.contains("mark_app_load();"), "the start page's load is not marked");
     }
 
     /// A page's navigation to a browser page is refused whatever its case or leading blanks; web,
