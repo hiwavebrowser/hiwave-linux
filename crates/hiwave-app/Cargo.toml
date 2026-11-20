@@ -21,6 +21,9 @@ webview-fallback = ["wry", "tao", "muda"]
 # compiled into debug builds, and into a release build only with this
 # feature. Never in a shipped build. (from macOS)
 test-hooks = []
+# MEDIA-AVF step 3 (macOS only: AVPlayer on the main-thread MediaHost). Declared so the
+# feature name is known; Linux has no media backend and never turns it on.
+media-avf = ["rustkit", "rustkit-engine/media-avf"]
 # RustKit hybrid: Pure Rust browser engine for content rendering (EXPERIMENTAL on Linux)
 # Requires X11/Wayland RustKit viewhost implementation. The macOS list adds rustkit-text, rustkit-compositor
 # and wgpu for its RustKit-drawn chrome; Linux does not take that app layer in S3 (follow-up package).
