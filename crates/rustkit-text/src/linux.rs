@@ -1225,6 +1225,43 @@ mod weight_tests {
         assert!((bare - package).abs() > 1.0, "the bare stopwatch is the text glyph: {bare} vs {package}");
     }
 
+    /// Chrome 148 on Linux's font ascent / descent (canvas fontBoundingBox, 2026-11-20): hhea
+    /// scaled to the size and rounded, then Blink's AscentDescentWithHacks borrow: a descent rounded
+    /// DOWN takes one pixel from the ascent. Liberation Sans (hhea 1854 / -434, upem 2048).
+    #[test]
+    fn line_metrics_round_as_blink_and_borrow_for_a_rounded_down_descent() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let family = b.resolve_family(["Liberation Sans"]);
+        if family != "Liberation Sans" {
+            eprintln!("skipped: Liberation Sans not installed");
+            return;
+        }
+        let chrome = [(10.0, 8.0, 3.0), (12.0, 11.0, 3.0), (13.0, 12.0, 3.0), (14.0, 13.0, 3.0), (16.0, 13.0, 4.0),
+            (18.0, 16.0, 4.0), (20.0, 17.0, 5.0), (24.0, 21.0, 6.0), (32.0, 29.0, 7.0), (48.0, 42.0, 11.0)];
+        for (size, ascent, descent) in chrome {
+            let (a, d, _) = b.line_metrics(&desc(&family, size, 400)).unwrap();
+            assert_eq!((a, d), (ascent, descent), "Liberation Sans {size}px");
+        }
+    }
+
+    /// The same for the bitmap-strike emoji face: its hhea (1900 / -500, upem 2048), not the
+    /// strike's size metrics, as Chrome 148 measures it (canvas fontBoundingBox, 2026-11-20).
+    #[test]
+    fn a_bitmap_emoji_face_takes_its_hhea_metrics() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let family = b.resolve_family(["Noto Color Emoji"]);
+        if family != "Noto Color Emoji" {
+            eprintln!("skipped: Noto Color Emoji not installed");
+            return;
+        }
+        let chrome = [(10.0, 8.0, 3.0), (12.0, 11.0, 3.0), (13.0, 11.0, 4.0), (14.0, 12.0, 4.0), (16.0, 15.0, 4.0),
+            (18.0, 16.0, 5.0), (20.0, 19.0, 5.0), (24.0, 22.0, 6.0), (32.0, 30.0, 8.0), (48.0, 45.0, 12.0)];
+        for (size, ascent, descent) in chrome {
+            let (a, d, _) = b.line_metrics(&desc(&family, size, 400)).unwrap();
+            assert_eq!((a, d), (ascent, descent), "Noto Color Emoji {size}px");
+        }
+    }
+
     #[test]
     fn an_emoji_has_an_advance_and_color_artwork_when_the_font_is_installed() {
         let mut b = LinuxTextBackend::new().unwrap();

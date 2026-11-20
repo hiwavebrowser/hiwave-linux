@@ -15247,6 +15247,27 @@ mod tests {
         assert_eq!(measure("\u{23F1} TIME SAVED"), 21.0, "bare stopwatch: Noto Sans Symbols2");
     }
 
+    /// Chrome 148 on Linux's line heights for Arial text, and the same text with the emoji U+1F4F1
+    /// (Noto Color Emoji), at five sizes (measured 2026-11-20): (size, text, text + emoji).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_emoji_line_is_as_tall_as_in_chrome_on_linux() {
+        let installed = rustkit_text::linux::LinuxTextBackend::new()
+            .map(|mut b| b.resolve_family(["Noto Color Emoji"]) == "Noto Color Emoji")
+            .unwrap_or(false);
+        if !installed {
+            eprintln!("skipped: Noto Color Emoji not installed");
+            return;
+        }
+        let line = |text: &str, size: f32| {
+            used_font_line_height(&measure_text_advanced(text, "Arial", size, rustkit_css::FontWeight::NORMAL, rustkit_css::FontStyle::Normal))
+        };
+        for (size, text, emoji) in [(13.0, 15.0, 16.0), (14.0, 16.0, 17.0), (16.0, 18.0, 20.0), (20.0, 23.0, 25.0), (48.0, 55.0, 57.0)] {
+            assert_eq!(line("Ab", size), text, "Arial {size}px");
+            assert_eq!(line("Ab \u{1F4F1}", size), emoji, "Arial {size}px with an emoji");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_fallback_faces_extents_join_the_line_on_linux() {
