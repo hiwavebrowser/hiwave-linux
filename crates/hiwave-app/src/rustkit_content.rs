@@ -20,6 +20,19 @@ use tao::event_loop::EventLoopProxy;
 use tao::rwh_06::{HasWindowHandle, RawWindowHandle};
 use tracing::{debug, info, warn};
 
+
+/// The event for a page's own navigation (a script's or a link's): the browser's Navigate, unless it
+/// names one of the browser's own pages, which open only from its UI; that is refused, and said in
+/// the page's console.
+pub(crate) fn page_navigation_event(url: String) -> UserEvent {
+    if crate::page_navigation_allowed(&url) {
+        UserEvent::Navigate(url)
+    } else {
+        info!("Page navigation to a browser page: refused");
+        UserEvent::ReportRefusedNavigation(url)
+    }
+}
+
 /// The environment variable that asks for the RustKit page view.
 pub const FLAG: &str = "HIWAVE_RUSTKIT_CONTENT";
 
@@ -132,7 +145,7 @@ pub fn install_pump(
             } else {
                 info!(url = %crate::page_url_for_log(&url), "Script navigation");
             }
-            let _ = proxy.send_event(UserEvent::Navigate(url));
+            let _ = proxy.send_event(page_navigation_event(url));
         }
 
         let updates = view.take_chrome_updates();

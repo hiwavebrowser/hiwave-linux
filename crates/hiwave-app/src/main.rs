@@ -349,6 +349,8 @@ enum UserEvent {
     // Internal page loading
     LoadAboutPage,
     LoadReportPage,
+    /// A page's navigation to a browser page was refused: say so in the page's console, as Chrome does.
+    ReportRefusedNavigation(String),
     // Print
     PrintPage,
     // Zoom controls
@@ -875,8 +877,9 @@ fn content_new_tab_url_allowed(url: Option<&str>) -> bool {
 /// the browser's UI: a page that navigates to one is refused, as Chrome refuses a page's
 /// navigation to chrome:// ("Not allowed to load local resource").
 pub(crate) fn page_navigation_allowed(url: &str) -> bool {
-    let _ = url;
-    true
+    // URL parsing drops leading C0 controls and spaces, and a scheme is case-insensitive.
+    let url = url.trim_start_matches(|c: char| c <= ' ');
+    !url.get(..7).is_some_and(|scheme| scheme.eq_ignore_ascii_case("hiwave:"))
 }
 
 /// What the content view opens at startup for the restored active tab's URL.
@@ -893,7 +896,15 @@ enum StartPage {
 
 #[cfg(not(feature = "native-linux"))]
 fn start_page(url: &str) -> StartPage {
-    if is_new_tab_url(url) { StartPage::Keep } else { StartPage::Url }
+    if is_about_url(url) {
+        StartPage::About
+    } else if is_report_url(url) {
+        StartPage::Report
+    } else if is_new_tab_url(url) || !page_navigation_allowed(url) {
+        StartPage::Keep
+    } else {
+        StartPage::Url
+    }
 }
 
 #[cfg(not(feature = "native-linux"))]
@@ -2086,6 +2097,11 @@ fn main() {
         .with_bounds(content_bounds)
         .with_navigation_handler(move |url| {
             info!("Content navigating to: {}", crate::page_url_for_log(&url));
+            if !page_navigation_allowed(&url) {
+                info!("Content navigation to a browser page: refused");
+                let _ = content_proxy.send_event(UserEvent::ReportRefusedNavigation(url));
+                return false;
+            }
 
             // Check if current tab URL is an internal URL before processing data URLs
             // This prevents overwriting hiwave://about when loading the about page via load_html()
@@ -2107,20 +2123,6 @@ fn main() {
                 }
                 let _ = content_proxy.send_event(UserEvent::UpdateUrl(String::new()));
                 let _ = content_proxy.send_event(UserEvent::SyncShieldStats);
-                return true;
-            }
-            if is_about_url(&url) {
-                let _ = content_proxy
-                    .send_event(UserEvent::UpdateActiveTabUrl(ABOUT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::UpdateUrl(ABOUT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::LoadAboutPage);
-                return true;
-            }
-            if is_report_url(&url) {
-                let _ = content_proxy
-                    .send_event(UserEvent::UpdateActiveTabUrl(REPORT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::UpdateUrl(REPORT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::LoadReportPage);
                 return true;
             }
             if let Ok(s) = content_state.lock() {
@@ -2356,8 +2358,19 @@ fn main() {
             "RustKit content view: initial load_html issued"
         );
     }
-    if !is_new_tab_url(&initial_url) {
-        content_webview.load_url(&initial_url);
+    // A restored browser page opens through the browser's own loader: load_url would reach the
+    // navigation handler, which refuses a hiwave: URL as a page's navigation.
+    match start_page(&initial_url) {
+        StartPage::Keep => {}
+        StartPage::About => {
+            let _ = proxy.send_event(UserEvent::UpdateUrl(ABOUT_URL.to_string()));
+            let _ = proxy.send_event(UserEvent::LoadAboutPage);
+        }
+        StartPage::Report => {
+            let _ = proxy.send_event(UserEvent::UpdateUrl(REPORT_URL.to_string()));
+            let _ = proxy.send_event(UserEvent::LoadReportPage);
+        }
+        StartPage::Url => content_webview.load_url(&initial_url),
     }
     info!("Content WebView created (content area)");
 
@@ -4632,6 +4645,10 @@ fn main() {
                         info!("Loading analytics report page");
                         load_report_page(&content_for_events);
                     }
+                    UserEvent::ReportRefusedNavigation(url) => {
+                        let line = format!("Not allowed to load local resource: {url}");
+                        content_for_events.evaluate_script(&format!("console.error({});", js_string(&line)));
+                    }
                     UserEvent::PrintPage => {
                         info!("Triggering print dialog");
                         content_for_events.evaluate_script("window.print();");
@@ -5054,11 +5071,21 @@ mod content_ipc_scope_2_tests {
 
     #[test]
     fn the_rustkit_views_page_navigations_check_the_url_first() {
+        // The pump sends what page_navigation_event makes of the URL, and nothing else.
         let pump = include_str!("rustkit_content.rs");
         let taken = pump.find("take_script_navigation()").expect("the RustKit view's page navigations");
-        let pump = &pump[taken..];
-        let check = pump.find("page_navigation_allowed(&url)").unwrap_or(usize::MAX);
-        assert!(check < pump.find("UserEvent::Navigate(url)").expect("its Navigate"), "RustKit page navigations");
+        let pump = &pump[taken..pump[taken..].find("\n        }\n").map(|e| taken + e).expect("its end")];
+        assert_eq!(pump.matches("send_event(").count(), 1, "{pump}");
+        assert!(pump.contains("send_event(page_navigation_event(url))"), "{pump}");
+    }
+
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    #[test]
+    fn a_rustkit_page_navigation_to_a_browser_page_becomes_a_refusal() {
+        use super::UserEvent;
+        use crate::rustkit_content::page_navigation_event;
+        assert!(matches!(page_navigation_event("hiwave://report".into()), UserEvent::ReportRefusedNavigation(u) if u == "hiwave://report"));
+        assert!(matches!(page_navigation_event("https://a.test/".into()), UserEvent::Navigate(u) if u == "https://a.test/"));
     }
 
     #[test]
