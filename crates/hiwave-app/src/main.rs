@@ -1118,7 +1118,7 @@ fn js_string(text: &str) -> String {
 
 /// The chrome's script calling `hiwaveChrome.<method>` with `text` (a page's title or URL).
 fn chrome_update_script(method: &str, text: &str) -> String {
-    format!("if(window.hiwaveChrome) {{ hiwaveChrome.{}('{}'); }}", method, text.replace("'", "\\'"))
+    format!("if(window.hiwaveChrome) {{ hiwaveChrome.{}({}); }}", method, js_string(text))
 }
 
 /// The Inspector panel's script for an element picked in the content
@@ -1937,17 +1937,31 @@ fn main() {
                     IpcMessage::FindInPageResult { result } => {
                         let _ = content_proxy_ipc.send_event(UserEvent::FindInPageResult(result.clone()));
                     }
-                    // Inspector data from the injected script in the page (I1b)
+                    // Inspector data from the injected script in the page (I1b). The page can post
+                    // these itself: each payload is read into the shape the injected scripts send,
+                    // and one that does not fit is dropped (upstream SEC1b).
                     IpcMessage::InspectorDomTreeResult { tree } => {
-                        let json = serde_json::to_string(tree).unwrap_or_else(|_| "null".to_string());
+                        let Some(tree) = ipc::inspector_payload::dom_tree(tree) else {
+                            warn!("inspector: dropped a malformed DOM tree from the content page");
+                            return;
+                        };
+                        let json = serde_json::to_string(&tree).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendDomTree(json));
                     }
                     IpcMessage::InspectorElementStylesResult { styles } => {
-                        let json = serde_json::to_string(styles).unwrap_or_else(|_| "null".to_string());
+                        let Some(styles) = ipc::inspector_payload::element_styles(styles) else {
+                            warn!("inspector: dropped malformed element styles from the content page");
+                            return;
+                        };
+                        let json = serde_json::to_string(&styles).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendElementStyles(json));
                     }
                     IpcMessage::InspectorElementPicked { path, styles } => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorElementPicked { path: path.clone(), styles: styles.clone() });
+                        let Some(styles) = ipc::inspector_payload::element_styles(styles) else {
+                            warn!("inspector: dropped a malformed picked element from the content page");
+                            return;
+                        };
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorElementPicked { path: path.clone(), styles });
                     }
                     IpcMessage::InspectorPickerStopped => {
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorPickerStopped);
@@ -1956,7 +1970,11 @@ fn main() {
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectElement { path: path.clone() });
                     }
                     IpcMessage::InspectorConsoleMessage { entry } => {
-                        let json = serde_json::to_string(entry).unwrap_or_else(|_| "null".to_string());
+                        let Some(entry) = ipc::inspector_payload::console_entry(entry) else {
+                            warn!("inspector: dropped a malformed console line from the content page");
+                            return;
+                        };
+                        let json = serde_json::to_string(&entry).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorConsoleMessage(json));
                     }
                     IpcMessage::InspectorConsoleClear => {
@@ -2727,10 +2745,7 @@ fn main() {
                                 format!("https://duckduckgo.com/?q={}", urlencoding::encode(&url))
                             };
                             content_for_events.load_url(&full_url);
-                            let script = format!(
-                                "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
-                                full_url.replace("'", "\\'")
-                            );
+                            let script = chrome_update_script("updateUrl", &full_url);
                             chrome_for_events.evaluate_script(&script);
                         }
                     }
@@ -2774,10 +2789,7 @@ fn main() {
                                     error!("Failed to persist workspace state: {}", e);
                                 }
                             }
-                            let script = format!(
-                                "if(window.hiwaveChrome) {{ hiwaveChrome.updateTitle('{}'); }}",
-                                title.replace("'", "\\'")
-                            );
+                            let script = chrome_update_script("updateTitle", &title);
                             chrome_for_events.evaluate_script(&script);
                             sync_tabs_to_chrome(&state_for_events, &chrome_for_events);
                             // Also sync workspaces so sidebar tab info updates
@@ -2785,10 +2797,7 @@ fn main() {
                         }
                     }
                     UserEvent::UpdateUrl(url) => {
-                        let script = format!(
-                            "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
-                            url.replace("'", "\\'")
-                        );
+                        let script = chrome_update_script("updateUrl", &url);
                         chrome_for_events.evaluate_script(&script);
                         sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                     }
@@ -3088,8 +3097,8 @@ fn main() {
                             return;
                         }
                         let script = format!(
-                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement('{}'); }}",
-                            path.replace("'", "\\'")
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement({}); }}",
+                            js_string(&path)
                         );
                         let _ = content_for_events.evaluate_script(&script);
                     }
@@ -3125,8 +3134,8 @@ fn main() {
                     }
                     UserEvent::InspectorScrollToElement { path } => {
                         let script = format!(
-                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.scrollToElement('{}'); }}",
-                            path.replace("'", "\\'")
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.scrollToElement({}); }}",
+                            js_string(&path)
                         );
                         let _ = content_for_events.evaluate_script(&script);
                     }
@@ -3153,14 +3162,14 @@ fn main() {
                         let script = format!(r#"
                             (function() {{
                                 if (window.__hiwaveInspector) {{
-                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    const styles = window.__hiwaveInspector.getElementStyles({});
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_element_styles_result',
                                         styles: styles
                                     }}));
                                 }}
                             }})();
-                        "#, path.replace("\\", "\\\\").replace("'", "\\'"));
+                        "#, js_string(&path));
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::InspectorExpand { path } => {
@@ -3171,19 +3180,19 @@ fn main() {
                         // Open inspector and select the element
                         let _ = proxy.send_event(UserEvent::OpenInspector);
                         // Delay the selection to allow inspector to initialize
-                        let path_escaped = path.replace("'", "\\'");
+                        let path_literal = js_string(&path);
                         let script = format!(r#"
                             setTimeout(() => {{
                                 if (window.__hiwaveInspector) {{
-                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    const styles = window.__hiwaveInspector.getElementStyles({});
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_element_picked',
-                                        path: '{}',
+                                        path: {},
                                         styles: styles
                                     }}));
                                 }}
                             }}, 200);
-                        "#, path_escaped, path_escaped);
+                        "#, path_literal, path_literal);
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     // Console events
@@ -3207,11 +3216,11 @@ fn main() {
                             return;
                         }
                         // Execute JavaScript in content webview
-                        let escaped_code = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
+                        let code_literal = js_string(&code);
                         let script = format!(r#"
                             (function() {{
                                 try {{
-                                    const result = eval('{}');
+                                    const result = eval({});
                                     const serialized = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_console_message',
@@ -3236,7 +3245,7 @@ fn main() {
                                     }}));
                                 }}
                             }})();
-                        "#, escaped_code);
+                        "#, code_literal);
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::ExpandShelf => {
