@@ -572,6 +572,18 @@ impl LinuxTextBackend {
     /// rounds them before summing into a line box.
     pub fn line_metrics(&mut self, descriptor: &FontDescriptor) -> Result<(f32, f32, f32), TextError> {
         let face = self.get_face(descriptor)?;
+        if face.has_fixed_sizes() && !face.is_scalable() {
+            // A bitmap-strike face (Noto Color Emoji) has no design units: its extents are the
+            // selected strike's size metrics (26.6 pixels), scaled to the size like its advances.
+            let m = face
+                .size_metrics()
+                .ok_or_else(|| TextError::ShapingFailed("strike face has no size metrics".into()))?;
+            let scale = fixed_strike_scale(face, descriptor.size);
+            let ascent = (m.ascender as f32 / 64.0 * scale).round();
+            let descent = (m.descender as f32 / 64.0 * scale).abs().round();
+            let gap = (((m.height - (m.ascender - m.descender)) as f32) / 64.0 * scale).max(0.0).round();
+            return Ok((ascent, descent, gap));
+        }
         let upem = face.em_size() as f32;
         if upem <= 0.0 {
             return Err(TextError::ShapingFailed("face reports no units_per_EM".into()));

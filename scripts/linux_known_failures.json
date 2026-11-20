@@ -3,7 +3,7 @@
   "known": [
     {
       "test": "rustkit_layout::tests::test_an_emoji_label_lifts_a_styled_buttons_line",
-      "reason": "macOS #997: expects Blink to unite the emoji's fallback face into a button's line (32 -> 39 px). Linux measures one FreeType run face (GlyphFace::Primary) and has no fallback-face line union."
+      "reason": "Pinned on Chrome for macOS (Apple Color Emoji lifts the label's line, button 32 -> 39). Chrome 148 on Linux measures this button 33 (Noto Color Emoji lifts Arial 14px's line 16 -> 17) and 32 without the emoji. RustKit on Linux unites fallback faces into the line since LINUX-BOARD-GEOMETRY (b) (Noto Sans Symbols2: 24, as Chrome), but takes Noto Color Emoji's strike metrics (13 + 3 at 14px) where Chrome's line is 17: the button is 32 on Linux, 1px under Chrome's 33. An open item with data."
     },
     {
       "test": "rustkit_layout::tests::test_negative_half_leading_inline_keeps_the_line_baseline",
