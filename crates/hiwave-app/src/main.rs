@@ -779,11 +779,13 @@ fn sync_history_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl IWebView) 
 
 #[cfg(not(feature = "native-linux"))]
 fn load_new_tab(content: &impl IWebView) {
+    mark_app_load();
     content.load_html(ABOUT_HTML);
 }
 
 #[cfg(not(feature = "native-linux"))]
 fn load_about_page(content: &impl IWebView) {
+    mark_app_load();
     content.load_html(ABOUT_HTML);
 }
 
@@ -794,6 +796,7 @@ fn load_report_page(content: &impl IWebView) {
         "<!-- Chart.js is injected by Rust before page load -->",
         &format!("<script>{}</script>", CHART_JS),
     );
+    mark_app_load();
     content.load_html(&report_with_chartjs);
 }
 
@@ -909,17 +912,32 @@ static APP_LOADS_PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::At
 
 /// Called just before the app loads one of its own pages into the content view.
 #[cfg(not(feature = "native-linux"))]
-fn mark_app_load() {}
+fn mark_app_load() {
+    APP_LOADS_PENDING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
 
-/// For the main frame's committed `url`: is it one of the app's own loads?
+/// For the main frame's committed `url`: is it one of the app's own loads? An about:blank commit
+/// takes one pending app load if there is one. Any other commit is a page's, which supersedes the
+/// app loads still pending (a load WebKit replaced never commits), so they are dropped.
 #[cfg(not(feature = "native-linux"))]
 fn take_app_load(url: &str) -> bool {
-    url == "about:blank"
+    use std::sync::atomic::Ordering;
+    if url == "about:blank" {
+        APP_LOADS_PENDING
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+    } else {
+        APP_LOADS_PENDING.store(0, Ordering::SeqCst);
+        false
+    }
 }
 
 #[cfg(not(feature = "native-linux"))]
 fn main_frame_url_update(url: &str, current_tab_is_internal: bool, app_load: bool) -> TabUrlUpdate {
-    let _ = app_load;
+    if url == "about:blank" && !app_load {
+        // A page's own navigation to about:blank: that page, as in Chrome.
+        return TabUrlUpdate::Page(url.to_string());
+    }
     if is_new_tab_url(url) {
         // The app's About page also commits as about:blank: a tab showing it keeps hiwave://about.
         TabUrlUpdate::NewTab { store: !current_tab_is_internal || url == NEW_TAB_URL }
@@ -2160,6 +2178,8 @@ fn main() {
     let content_webview_wry: Option<wry::WebView> = if rustkit_content_view.is_some() {
         None
     } else {
+        // The start page is the app's own load (it commits as about:blank).
+        mark_app_load();
         Some(WebViewBuilder::new()
         .with_html(ABOUT_HTML)
         .with_devtools(cfg!(debug_assertions))
