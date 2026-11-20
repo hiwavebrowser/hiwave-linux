@@ -277,6 +277,19 @@ pub fn is_emoji(ch: char) -> bool {
         0x1F300..=0x1FAFF | 0x1F000..=0x1F0FF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x1F1E6..=0x1F1FF)
 }
 
+/// Unicode's Emoji_Presentation property (emoji-data.txt): the character is drawn as an emoji by
+/// default. Chrome's fallback reads the same property (ICU); a symbol without it is text first.
+pub fn has_emoji_presentation(ch: char) -> bool {
+    use unicode_properties::{EmojiStatus, UnicodeEmoji};
+    matches!(
+        ch.emoji_status(),
+        EmojiStatus::EmojiPresentation
+            | EmojiStatus::EmojiPresentationAndModifierBase
+            | EmojiStatus::EmojiPresentationAndEmojiComponent
+            | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+    )
+}
+
 /// Pixels per strike pixel: how much a bitmap-strike font's glyphs shrink to
 /// reach `size`.
 fn fixed_strike_scale(face: &freetype::Face, size: f32) -> f32 {
@@ -675,10 +688,16 @@ impl LinuxTextBackend {
                 None => descriptor.clone(),
             };
         }
-        let candidates: &[&str] = if is_emoji(ch) {
-            &["Noto Color Emoji", "Noto Sans Symbols 2", "Noto Sans Symbols", "DejaVu Sans"]
+        // By Emoji_Presentation, as Chrome: a symbol in an emoji block that defaults to TEXT
+        // presentation (U+1F6E1 shield, U+2699 gear) tries the text faces first and the colour
+        // face last; an emoji-presentation one (U+1F6AB) the colour face first. fontconfig's family
+        // name is "Noto Sans Symbols2" (no space): spelt with one, it never resolved.
+        let candidates: &[&str] = if is_emoji(ch) && has_emoji_presentation(ch) {
+            &["Noto Color Emoji", "Noto Sans Symbols2", "Noto Sans Symbols", "DejaVu Sans"]
+        } else if is_emoji(ch) {
+            &["DejaVu Sans", "Noto Sans Symbols2", "Noto Sans Symbols", "Noto Color Emoji"]
         } else {
-            &["Noto Sans", "DejaVu Sans", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Sans Math", "Noto Sans CJK SC"]
+            &["Noto Sans", "DejaVu Sans", "Noto Sans Symbols", "Noto Sans Symbols2", "Noto Sans Math", "Noto Sans CJK SC"]
         };
         let mut found = None;
         for name in candidates {
