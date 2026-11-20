@@ -521,6 +521,16 @@ impl LinuxTextBackend {
                 // Chrome asks fontconfig for its default sans; the generic
                 // "sans-serif" pattern is that lookup here.
                 Some("sans-serif".to_string())
+            } else if matches!(lower.as_str(), "cursive" | "fantasy") {
+                // Chrome on Linux draws a bare cursive / fantasy (its named picks absent) in its
+                // standard font, Times New Roman: the metric-compatible Liberation Serif, as
+                // `serif` is. Not the sans-serif default a fontconfig miss would give.
+                Some(
+                    self.fontconfig
+                        .find("Times New Roman", None)
+                        .map(|_| "Times New Roman".to_string())
+                        .unwrap_or_else(|| "serif".to_string()),
+                )
             } else if lower == "helvetica" {
                 // Chrome resolves Helvetica to the same metric-compatible
                 // face as Arial (Liberation Sans), where a bare fontconfig
