@@ -5177,6 +5177,17 @@ mod content_ipc_scope_2_tests {
         assert_eq!(update("about:blank", true, false), Page("about:blank".into()));
     }
 
+    /// A page's own top-level data: navigation is shown as what it is (Linux loads it where Chrome
+    /// refuses it: a declared divergence, docs/LINUX_DIVERGENCES.md). The app's own pages commit
+    /// as about:blank on WebKitGTK, never data:, so a data: commit is always the page's.
+    #[test]
+    fn a_pages_own_data_url_is_shown_as_itself() {
+        use super::{main_frame_url_update as update, TabUrlUpdate::*};
+        for (internal, app_load) in [(false, false), (true, false), (false, true)] {
+            assert_eq!(update("data:text/html,<p>x</p>", internal, app_load), Page("data:text/html,<p>x</p>".into()), "internal={internal} app_load={app_load}");
+        }
+    }
+
     /// The marker: each app load is taken by the next main-frame about:blank commit; a page's own
     /// commit (any other URL) means the pending app loads were superseded.
     #[test]
