@@ -15225,12 +15225,23 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_fallback_faces_extents_join_the_line_on_linux() {
-        let plain = measure_text_advanced("Shield", "Arial", 14.0, rustkit_css::FontWeight::NORMAL, rustkit_css::FontStyle::Normal);
-        let with_symbol = measure_text_advanced("\u{1F6E1} Shield", "Arial", 14.0, rustkit_css::FontWeight::NORMAL, rustkit_css::FontStyle::Normal);
-        if with_symbol.width - plain.width < 10.0 {
-            eprintln!("skipped: no symbol fallback face here (width {} vs {})", with_symbol.width, plain.width);
+        // Skip unless the shield really draws from Noto Sans Symbols2 here: a host without that
+        // face still finds the shield in another one (CI: the colour face), whose line differs.
+        let source = rustkit_text::linux::LinuxTextBackend::new().ok().map(|mut backend| {
+            let primary = rustkit_text::FontDescriptor {
+                family: backend.resolve_family(["Arial"]),
+                weight: rustkit_text::FontWeight(400),
+                style: rustkit_text::FontStyle::Normal,
+                size: 14.0,
+            };
+            backend.source_descriptor('\u{1F6E1}', &primary).family
+        });
+        if source.as_deref() != Some("Noto Sans Symbols2") {
+            eprintln!("skipped: the shield draws from {source:?} here, not Noto Sans Symbols2");
             return;
         }
+        let plain = measure_text_advanced("Shield", "Arial", 14.0, rustkit_css::FontWeight::NORMAL, rustkit_css::FontStyle::Normal);
+        let with_symbol = measure_text_advanced("\u{1F6E1} Shield", "Arial", 14.0, rustkit_css::FontWeight::NORMAL, rustkit_css::FontStyle::Normal);
         assert_eq!((plain.ascent, plain.descent), (13.0, 3.0), "Arial 14px alone");
         assert_eq!(used_font_line_height(&with_symbol), 24.0, "Arial 14px with Noto Sans Symbols2 is 24 tall");
     }
