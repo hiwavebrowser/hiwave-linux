@@ -993,6 +993,18 @@ mod tests {
         assert_eq!(b.resolve_family([" \"serif\" "]), "serif");
     }
 
+    /// Chrome 148 on Linux draws a bare `cursive` or `fantasy` (none of its named picks installed)
+    /// with its standard font, Times New Roman, i.e. Liberation Serif: the same face as `serif`
+    /// (measured 2026-11-19 with CSS.getPlatformFontsForNode). Not the sans-serif default.
+    #[test]
+    fn cursive_and_fantasy_fall_back_to_the_standard_serif_font() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let standard = b.resolve_family(["Times New Roman"]);
+        assert_eq!(b.resolve_family(["cursive"]), standard);
+        assert_eq!(b.resolve_family(["fantasy"]), standard);
+        assert_eq!(b.resolve_family(["No Such Script Zzz", "cursive"]), standard);
+    }
+
     #[test]
     fn system_ui_is_the_fontconfig_default_and_helvetica_is_arial() {
         let mut b = LinuxTextBackend::new().unwrap();
