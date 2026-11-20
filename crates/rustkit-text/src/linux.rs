@@ -687,6 +687,18 @@ impl LinuxTextBackend {
             .unwrap_or(false)
     }
 
+    /// `source_descriptor` for `ch` followed by the variation selector `variation` asks for
+    /// (`Variation::after(next char)`): U+FE0F asks for emoji presentation, U+FE0E for text.
+    pub fn source_descriptor_varied(
+        &mut self,
+        ch: char,
+        variation: crate::Variation,
+        descriptor: &FontDescriptor,
+    ) -> FontDescriptor {
+        let _ = variation;
+        self.source_descriptor(ch, descriptor)
+    }
+
     /// The descriptor whose face paints `ch`: the requested one when it has the
     /// glyph, else the first installed fallback family that does (emoji go to
     /// Noto Color Emoji), else the requested one (its .notdef).
@@ -1139,6 +1151,48 @@ mod weight_tests {
         assert_eq!(b.source_descriptor('\u{1F5D1}', &d).family, "Noto Sans Symbols2", "wastebasket");
         assert_eq!(b.source_descriptor('\u{2699}', &d).family, "DejaVu Sans", "gear");
         assert_eq!(b.source_descriptor('\u{1F6AB}', &d).family, "Noto Color Emoji", "no-entry is emoji");
+    }
+
+    /// A variation selector after the character decides its presentation, as in Chrome 148 on
+    /// Linux (CSS.getPlatformFontsForNode, 2026-11-20): U+23F1 STOPWATCH (text by default) with
+    /// U+FE0F is drawn from Noto Color Emoji; bare or with U+FE0E from Noto Sans Symbols2.
+    #[test]
+    fn a_variation_selector_decides_the_presentation() {
+        use crate::Variation;
+        let mut b = LinuxTextBackend::new().unwrap();
+        let missing: Vec<&str> = ["Noto Color Emoji", "Noto Sans Symbols2"]
+            .into_iter()
+            .filter(|f| b.resolve_family([*f]) != *f)
+            .collect();
+        if !missing.is_empty() {
+            eprintln!("skipped: fonts not installed: {missing:?}");
+            return;
+        }
+        let primary = b.resolve_family(["Liberation Sans"]);
+        let d = desc(&primary, 12.0, 600);
+        assert_eq!(b.source_descriptor_varied('\u{23F1}', Variation::Emoji, &d).family, "Noto Color Emoji", "stopwatch + VS16");
+        assert_eq!(b.source_descriptor_varied('\u{23F1}', Variation::None, &d).family, "Noto Sans Symbols2", "bare stopwatch");
+        assert_eq!(b.source_descriptor_varied('\u{23F1}', Variation::Text, &d).family, "Noto Sans Symbols2", "stopwatch + VS15");
+        // An emoji-presentation character asked for text keeps the text face when one has it.
+        assert_eq!(b.source_descriptor_varied('\u{1F4E6}', Variation::None, &d).family, "Noto Color Emoji", "package");
+    }
+
+    /// advance_widths reads the selector after each character: U+23F1 + U+FE0F advances like any
+    /// other colour emoji (the package, U+1F4E6, an emoji by default), not like the text glyph.
+    #[test]
+    fn advance_widths_follow_the_variation_selector() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        if b.resolve_family(["Noto Color Emoji"]) != "Noto Color Emoji" || b.resolve_family(["Noto Sans Symbols2"]) != "Noto Sans Symbols2" {
+            eprintln!("skipped: Noto Color Emoji or Noto Sans Symbols2 not installed");
+            return;
+        }
+        let primary = b.resolve_family(["Liberation Sans"]);
+        let d = desc(&primary, 12.0, 600);
+        let vs16: f32 = b.advance_widths("\u{23F1}\u{FE0F}", &d).unwrap().iter().sum();
+        let package: f32 = b.advance_widths("\u{1F4E6}", &d).unwrap().iter().sum();
+        let bare: f32 = b.advance_widths("\u{23F1}", &d).unwrap().iter().sum();
+        assert!((vs16 - package).abs() < 0.01, "stopwatch+VS16 {vs16} vs package {package}");
+        assert!((bare - package).abs() > 1.0, "the bare stopwatch is the text glyph: {bare} vs {package}");
     }
 
     #[test]

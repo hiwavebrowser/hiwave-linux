@@ -15222,6 +15222,31 @@ mod tests {
     /// that face's ascent 15 and descent 9 (measured 2026-11-19 on CfT 148, board-fonts.conf). A
     /// <button> with 8px padding and that label is 40 (32 without the symbol). Skipped where Noto
     /// Sans Symbols2 is not installed.
+    /// report.html's "⏱️ Time Saved" stat label (Arial 12px, weight 600, upper-cased): U+23F1 with
+    /// U+FE0F takes Noto Color Emoji and the line stays 14 in Chrome 148 on Linux; bare U+23F1
+    /// takes Noto Sans Symbols2 and the line is 21 (measured 2026-11-20, getPlatformFontsForNode).
+    /// The selector after the character decides the face, so it decides the line. Skipped where
+    /// those two fonts are not both installed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_variation_selector_decides_which_face_joins_the_line_on_linux() {
+        let have = |family: &str| {
+            rustkit_text::linux::LinuxTextBackend::new()
+                .map(|mut b| b.resolve_family([family]) == family)
+                .unwrap_or(false)
+        };
+        if !have("Noto Color Emoji") || !have("Noto Sans Symbols2") {
+            eprintln!("skipped: Noto Color Emoji or Noto Sans Symbols2 not installed");
+            return;
+        }
+        let measure = |text: &str| {
+            used_font_line_height(&measure_text_advanced(text, "Arial", 12.0, rustkit_css::FontWeight(600), rustkit_css::FontStyle::Normal))
+        };
+        assert_eq!(measure("TIME SAVED"), 14.0, "Arial 12px alone");
+        assert_eq!(measure("\u{23F1}\u{FE0F} TIME SAVED"), 14.0, "stopwatch + VS16: the colour face");
+        assert_eq!(measure("\u{23F1} TIME SAVED"), 21.0, "bare stopwatch: Noto Sans Symbols2");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_fallback_faces_extents_join_the_line_on_linux() {
