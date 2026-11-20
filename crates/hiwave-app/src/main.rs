@@ -4969,6 +4969,19 @@ mod content_ipc_scope_2_tests {
         }
     }
 
+    /// A page's window.open / target=_blank opens a tab under the same rule as its CreateTab: only
+    /// an http(s) URL, checked before the tab exists. (The popup filter passes `hiwave:`, and the
+    /// browser's Navigate would then open its own page for the page.)
+    #[test]
+    fn a_page_new_window_url_is_checked_before_its_tab_exists() {
+        let start = MAIN_RS.find(".with_new_window_req_handler(").expect("the new-window handler");
+        let handler = &MAIN_RS[start..];
+        let handler = &handler[..handler.find(".with_ipc_handler(").expect("the end of the new-window handler")];
+        let tab = handler.find("IpcMessage::CreateTab").expect("the new tab it opens");
+        let check = handler.find("content_new_tab_url_allowed(Some(").unwrap_or(usize::MAX);
+        assert!(check < tab, "the new-window handler opens a tab without checking its URL");
+    }
+
     #[test]
     fn only_http_and_https_or_no_url_open_from_a_page() {
         for ok in [None, Some("https://example.com/"), Some("http://a.test/x"), Some("HTTPS://A.TEST")] {
