@@ -349,6 +349,8 @@ enum UserEvent {
     // Internal page loading
     LoadAboutPage,
     LoadReportPage,
+    /// A page's navigation to a browser page was refused: say so in the page's console, as Chrome does.
+    ReportRefusedNavigation(String),
     // Print
     PrintPage,
     // Zoom controls
@@ -868,6 +870,46 @@ fn content_new_tab_url_allowed(url: Option<&str>) -> bool {
             let lower = u.to_ascii_lowercase();
             lower.starts_with("https://") || lower.starts_with("http://")
         }
+    }
+}
+
+/// May a page navigate the content view to `url`? The browser's own pages (`hiwave:`) open only from
+/// the browser's UI: a page that navigates to one is refused, as Chrome refuses a page's
+/// navigation to chrome:// ("Not allowed to load local resource").
+pub(crate) fn page_navigation_allowed(url: &str) -> bool {
+    // As the URL parser reads it: leading C0 controls and spaces dropped, then every tab and newline
+    // anywhere; and a scheme is case-insensitive.
+    let url: String = url
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .take(7)
+        .collect();
+    !url.eq_ignore_ascii_case("hiwave:")
+}
+
+/// What the content view opens at startup for the restored active tab's URL.
+#[cfg(not(feature = "native-linux"))]
+#[derive(Debug, PartialEq, Eq)]
+enum StartPage {
+    /// The start page the view was built with (the new-tab page, or a browser page it has no loader for).
+    Keep,
+    About,
+    Report,
+    /// A web page, loaded by URL.
+    Url,
+}
+
+#[cfg(not(feature = "native-linux"))]
+fn start_page(url: &str) -> StartPage {
+    if is_about_url(url) {
+        StartPage::About
+    } else if is_report_url(url) {
+        StartPage::Report
+    } else if is_new_tab_url(url) || !page_navigation_allowed(url) {
+        StartPage::Keep
+    } else {
+        StartPage::Url
     }
 }
 
@@ -2084,6 +2126,11 @@ fn main() {
         .with_bounds(content_bounds)
         .with_navigation_handler(move |url| {
             info!("Content navigating to: {}", crate::page_url_for_log(&url));
+            if !page_navigation_allowed(&url) {
+                info!("Content navigation to a browser page: refused");
+                let _ = content_proxy.send_event(UserEvent::ReportRefusedNavigation(url));
+                return false;
+            }
 
             // Check if current tab URL is an internal URL before processing data URLs
             // This prevents overwriting hiwave://about when loading the about page via load_html()
@@ -2105,20 +2152,6 @@ fn main() {
                 }
                 let _ = content_proxy.send_event(UserEvent::UpdateUrl(String::new()));
                 let _ = content_proxy.send_event(UserEvent::SyncShieldStats);
-                return true;
-            }
-            if is_about_url(&url) {
-                let _ = content_proxy
-                    .send_event(UserEvent::UpdateActiveTabUrl(ABOUT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::UpdateUrl(ABOUT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::LoadAboutPage);
-                return true;
-            }
-            if is_report_url(&url) {
-                let _ = content_proxy
-                    .send_event(UserEvent::UpdateActiveTabUrl(REPORT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::UpdateUrl(REPORT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::LoadReportPage);
                 return true;
             }
             if let Ok(s) = content_state.lock() {
@@ -2306,6 +2339,13 @@ fn main() {
                 }
             }
 
+            // A page opens a tab only at an http(s) URL, as with its CreateTab command; the
+            // browser's own pages (hiwave:) and other schemes open only from the browser's UI.
+            if !content_new_tab_url_allowed(Some(&url)) {
+                info!("New window request with a non-http(s) URL: not served");
+                return false;
+            }
+
             info!("New window request -> new tab: {}", crate::page_url_for_log(&url));
             let response = ipc::commands::handle_message(
                 &content_state2,
@@ -2347,8 +2387,19 @@ fn main() {
             "RustKit content view: initial load_html issued"
         );
     }
-    if !is_new_tab_url(&initial_url) {
-        content_webview.load_url(&initial_url);
+    // A restored browser page opens through the browser's own loader: load_url would reach the
+    // navigation handler, which refuses a hiwave: URL as a page's navigation.
+    match start_page(&initial_url) {
+        StartPage::Keep => {}
+        StartPage::About => {
+            let _ = proxy.send_event(UserEvent::UpdateUrl(ABOUT_URL.to_string()));
+            let _ = proxy.send_event(UserEvent::LoadAboutPage);
+        }
+        StartPage::Report => {
+            let _ = proxy.send_event(UserEvent::UpdateUrl(REPORT_URL.to_string()));
+            let _ = proxy.send_event(UserEvent::LoadReportPage);
+        }
+        StartPage::Url => content_webview.load_url(&initial_url),
     }
     info!("Content WebView created (content area)");
 
@@ -4614,6 +4665,10 @@ fn main() {
                         info!("Loading analytics report page");
                         load_report_page(&content_for_events);
                     }
+                    UserEvent::ReportRefusedNavigation(url) => {
+                        let line = format!("Not allowed to load local resource: {url}");
+                        content_for_events.evaluate_script(&format!("console.error({});", js_string(&line)));
+                    }
                     UserEvent::PrintPage => {
                         info!("Triggering print dialog");
                         content_for_events.evaluate_script("window.print();");
@@ -4991,6 +5046,77 @@ mod content_ipc_scope_2_tests {
         for (key, ctrl, shift, alt) in [("Escape", false, false, false), ("f", true, false, false), ("L", false, true, false), ("L", true, true, true), ("F11", true, false, false), ("t", true, false, false)] {
             assert_eq!(window_shortcut(key, ctrl, shift, alt), None, "{key} ctrl={ctrl} shift={shift} alt={alt}");
         }
+    }
+
+    /// A page's window.open / target=_blank opens a tab under the same rule as its CreateTab: only
+    /// an http(s) URL, checked before the tab exists. (The popup filter passes `hiwave:`, and the
+    /// browser's Navigate would then open its own page for the page.)
+    #[test]
+    fn a_page_new_window_url_is_checked_before_its_tab_exists() {
+        let start = MAIN_RS.find(".with_new_window_req_handler(").expect("the new-window handler");
+        let handler = &MAIN_RS[start..];
+        let handler = &handler[..handler.find(".with_ipc_handler(").expect("the end of the new-window handler")];
+        let tab = handler.find("IpcMessage::CreateTab").expect("the new tab it opens");
+        let check = handler.find("content_new_tab_url_allowed(Some(").unwrap_or(usize::MAX);
+        assert!(check < tab, "the new-window handler opens a tab without checking its URL");
+    }
+
+    /// A page's navigation to a browser page is refused whatever its case or leading blanks; web,
+    /// blank and data URLs are not this check's business.
+    #[test]
+    fn a_page_cannot_navigate_to_the_browsers_own_pages() {
+        // The URL parser also drops a tab or newline ANYWHERE in the input, not only leading.
+        for bad in ["hiwave://report", "hiwave://about", "HIWAVE://About", "  hiwave://report", "\t\nhiwave:newtab", "hiwave:x", "hi\twave://report", "hiwave\n:x", "h\ri\nw\tave://about"] {
+            assert!(!super::page_navigation_allowed(bad), "{bad:?}");
+        }
+        for ok in ["https://example.com/", "http://a.test/hiwave://x", "about:blank", "data:text/html,x", "file:///tmp/a.html"] {
+            assert!(super::page_navigation_allowed(ok), "{ok:?}");
+        }
+    }
+
+    /// A tab restored on About or Report reopens through the browser's own loader (not load_url,
+    /// which the page-navigation check refuses); other browser URLs keep the start page.
+    #[test]
+    fn a_restored_browser_page_opens_through_the_browsers_own_loader() {
+        use super::{start_page, StartPage::*};
+        assert_eq!(start_page("hiwave://newtab"), Keep);
+        assert_eq!(start_page("about:blank"), Keep);
+        assert_eq!(start_page("hiwave://about"), About);
+        assert_eq!(start_page("hiwave://report"), Report);
+        assert_eq!(start_page("hiwave://settings"), Keep);
+        assert_eq!(start_page("https://example.com/"), Url);
+    }
+
+    /// Each door a page navigates through checks first: the WebKit view's navigation handler (which
+    /// no longer serves About or Report itself), and (below) the RustKit view's script and link
+    /// navigations, which otherwise reach the browser's own Navigate.
+    #[test]
+    fn the_webkit_views_navigation_handler_checks_the_url_first() {
+        let start = MAIN_RS.find(".with_navigation_handler(move |url| {").expect("the navigation handler");
+        let handler = &MAIN_RS[start..];
+        let handler = &handler[..handler.find(".with_on_page_load_handler(").expect("its end")];
+        let check = handler.find("page_navigation_allowed(&url)").unwrap_or(usize::MAX);
+        assert!(check < handler.find("is_new_tab_url(&url)").expect("the new-tab arm"), "navigation handler");
+        assert!(!handler.contains("LoadAboutPage") && !handler.contains("LoadReportPage"), "the handler serves a browser page");
+    }
+
+    #[test]
+    fn the_rustkit_views_page_navigations_check_the_url_first() {
+        // The pump sends what page_navigation_event makes of the URL, and nothing else.
+        let pump = include_str!("rustkit_content.rs");
+        let taken = pump.find("take_script_navigation()").expect("the RustKit view's page navigations");
+        let pump = &pump[taken..pump[taken..].find("\n        }\n").map(|e| taken + e).expect("its end")];
+        assert_eq!(pump.matches("send_event(").count(), 1, "{pump}");
+        assert!(pump.contains("send_event(page_navigation_event(url))"), "{pump}");
+    }
+
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    #[test]
+    fn a_rustkit_page_navigation_to_a_browser_page_becomes_a_refusal() {
+        use super::UserEvent;
+        use crate::rustkit_content::page_navigation_event;
+        assert!(matches!(page_navigation_event("hiwave://report".into()), UserEvent::ReportRefusedNavigation(u) if u == "hiwave://report"));
+        assert!(matches!(page_navigation_event("https://a.test/".into()), UserEvent::Navigate(u) if u == "https://a.test/"));
     }
 
     #[test]
