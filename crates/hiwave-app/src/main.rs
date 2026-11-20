@@ -904,6 +904,13 @@ enum TabUrlUpdate {
 }
 
 #[cfg(not(feature = "native-linux"))]
+/// Does a tab whose stored URL is `url` show one of the browser's own pages (which commit as
+/// about:blank and must keep their URL)?
+#[cfg(not(feature = "native-linux"))]
+fn tab_shows_a_browser_page(url: &str) -> bool {
+    is_about_url(url) || url == NEW_TAB_URL
+}
+
 /// How many of the app's own page loads (load_html of the new-tab, About or Report page, or the
 /// start page) have not committed yet. They commit in the main frame as about:blank, which is also
 /// what a page's own navigation to about:blank commits as; this tells the two apart.
@@ -2237,10 +2244,7 @@ fn main() {
                 let current_tab_is_internal = content_state_page_load
                     .lock()
                     .ok()
-                    .and_then(|s| s.shell.get_active_tab().map(|tab| {
-                        let url_str = tab.url.to_string();
-                        is_about_url(&url_str) || url_str == NEW_TAB_URL
-                    }))
+                    .and_then(|s| s.shell.get_active_tab().map(|tab| tab_shows_a_browser_page(tab.url.as_str())))
                     .unwrap_or(false);
                 match main_frame_url_update(&url, current_tab_is_internal, take_app_load(&url)) {
                     TabUrlUpdate::NewTab { store } => {
@@ -5188,6 +5192,19 @@ mod content_ipc_scope_2_tests {
         mark_app_load();
         assert!(!take_app_load("https://a.test/"), "a page committed");
         assert!(!take_app_load("about:blank"), "the superseded loads are gone");
+    }
+
+    /// A tab on About, Report or the new-tab page keeps its URL when the app's page commits as
+    /// about:blank (a restored Report tab was saved as hiwave://newtab).
+    #[test]
+    fn a_tab_on_any_browser_page_keeps_its_url() {
+        use super::tab_shows_a_browser_page as browser_page;
+        for url in ["hiwave://about", "hiwave://report", "hiwave://newtab"] {
+            assert!(browser_page(url), "{url}");
+        }
+        for url in ["https://a.test/", "about:blank", "file:///tmp/a.html"] {
+            assert!(!browser_page(url), "{url}");
+        }
     }
 
     /// Every way the app loads its own page into the content view marks the load first.
