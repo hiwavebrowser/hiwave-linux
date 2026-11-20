@@ -2283,6 +2283,13 @@ fn main() {
                 }
             }
 
+            // A page opens a tab only at an http(s) URL, as with its CreateTab command; the
+            // browser's own pages (hiwave:) and other schemes open only from the browser's UI.
+            if !content_new_tab_url_allowed(Some(&url)) {
+                info!("New window request with a non-http(s) URL: not served");
+                return false;
+            }
+
             info!("New window request -> new tab: {}", crate::page_url_for_log(&url));
             let response = ipc::commands::handle_message(
                 &content_state2,
