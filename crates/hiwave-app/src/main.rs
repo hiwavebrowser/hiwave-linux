@@ -902,8 +902,12 @@ enum TabUrlUpdate {
 
 #[cfg(not(feature = "native-linux"))]
 fn main_frame_url_update(url: &str, current_tab_is_internal: bool) -> TabUrlUpdate {
-    let _ = current_tab_is_internal;
-    TabUrlUpdate::Page(url.to_string())
+    if is_new_tab_url(url) {
+        // The app's About page also commits as about:blank: a tab showing it keeps hiwave://about.
+        TabUrlUpdate::NewTab { store: !current_tab_is_internal || url == NEW_TAB_URL }
+    } else {
+        TabUrlUpdate::Page(url.to_string())
+    }
 }
 
 /// What the content view opens at startup for the restored active tab's URL.
@@ -1932,6 +1936,8 @@ fn main() {
     #[allow(unused_variables)]
     let content_state2 = Arc::clone(&state);
     #[allow(unused_variables)]
+    let content_state_page_load = Arc::clone(&state);
+    #[allow(unused_variables)]
     let content_state_ipc = Arc::clone(&state);
     #[allow(unused_variables)]
     let content_state_download_start = Arc::clone(&state);
@@ -2127,25 +2133,11 @@ fn main() {
                 return false;
             }
 
-            // Check if current tab URL is an internal URL before processing data URLs
-            // This prevents overwriting hiwave://about when loading the about page via load_html()
-            let current_tab_is_internal = content_state
-                .lock()
-                .ok()
-                .and_then(|s| s.shell.get_active_tab().map(|tab| {
-                    let url_str = tab.url.to_string();
-                    is_about_url(&url_str) || url_str == NEW_TAB_URL
-                }))
-                .unwrap_or(false);
-
+            // This handler is called for every frame's navigation, an iframe's too, with only its
+            // URL: it decides whether the navigation may go ahead, nothing more. The address bar,
+            // the tab's URL and the loading state follow the main frame's committed load (the
+            // page-load handler below).
             if is_new_tab_url(&url) {
-                // Only update tab URL if current tab isn't already an internal URL
-                // This prevents data:text/html from overwriting hiwave://about
-                if !current_tab_is_internal || url == NEW_TAB_URL {
-                    let _ = content_proxy
-                        .send_event(UserEvent::UpdateActiveTabUrl(NEW_TAB_URL.to_string()));
-                }
-                let _ = content_proxy.send_event(UserEvent::UpdateUrl(String::new()));
                 let _ = content_proxy.send_event(UserEvent::SyncShieldStats);
                 return true;
             }
@@ -2174,15 +2166,33 @@ fn main() {
                     }
                 }
             }
-            let _ = content_proxy.send_event(UserEvent::SetLoading(true));
-            let _ = content_proxy.send_event(UserEvent::UpdateUrl(url.clone()));
-            let _ = content_proxy.send_event(UserEvent::UpdateActiveTabUrl(url));
             let _ = content_proxy.send_event(UserEvent::SyncShieldStats);
             true
         })
         .with_on_page_load_handler(move |event, url| match event {
             wry::PageLoadEvent::Started => {
+                // The MAIN frame committed `url` (wry: load-changed Committed, webview.uri()).
                 let _ = content_proxy2.send_event(UserEvent::SetLoading(true));
+                let current_tab_is_internal = content_state_page_load
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.shell.get_active_tab().map(|tab| {
+                        let url_str = tab.url.to_string();
+                        is_about_url(&url_str) || url_str == NEW_TAB_URL
+                    }))
+                    .unwrap_or(false);
+                match main_frame_url_update(&url, current_tab_is_internal) {
+                    TabUrlUpdate::NewTab { store } => {
+                        if store {
+                            let _ = content_proxy2.send_event(UserEvent::UpdateActiveTabUrl(NEW_TAB_URL.to_string()));
+                        }
+                        let _ = content_proxy2.send_event(UserEvent::UpdateUrl(String::new()));
+                    }
+                    TabUrlUpdate::Page(page) => {
+                        let _ = content_proxy2.send_event(UserEvent::UpdateUrl(page.clone()));
+                        let _ = content_proxy2.send_event(UserEvent::UpdateActiveTabUrl(page));
+                    }
+                }
             }
             wry::PageLoadEvent::Finished => {
                 let _ = content_proxy2.send_event(UserEvent::SetLoading(false));
