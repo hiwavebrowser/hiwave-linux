@@ -945,6 +945,12 @@ fn main_frame_url_update(url: &str, current_tab_is_internal: bool, app_load: boo
         // A page's own navigation to about:blank: that page, as in Chrome.
         return TabUrlUpdate::Page(url.to_string());
     }
+    if url.starts_with("data:") {
+        // Never the app's own page (on WebKitGTK those commit as about:blank), so a main-frame
+        // data: commit is shown as what it is. (WebKitGTK itself refuses a page's script-initiated
+        // top-level data: navigation, as Chrome does, so such a commit is rare.)
+        return TabUrlUpdate::Page(url.to_string());
+    }
     if is_new_tab_url(url) {
         // The app's About page also commits as about:blank: a tab showing it keeps hiwave://about.
         TabUrlUpdate::NewTab { store: !current_tab_is_internal || url == NEW_TAB_URL }
@@ -5177,9 +5183,8 @@ mod content_ipc_scope_2_tests {
         assert_eq!(update("about:blank", true, false), Page("about:blank".into()));
     }
 
-    /// A page's own top-level data: navigation is shown as what it is (Linux loads it where Chrome
-    /// refuses it: a declared divergence, docs/LINUX_DIVERGENCES.md). The app's own pages commit
-    /// as about:blank on WebKitGTK, never data:, so a data: commit is always the page's.
+    /// A main-frame data: commit is shown as what it is, not as the new-tab page: the app's own
+    /// pages commit as about:blank on WebKitGTK, never data:.
     #[test]
     fn a_pages_own_data_url_is_shown_as_itself() {
         use super::{main_frame_url_update as update, TabUrlUpdate::*};
