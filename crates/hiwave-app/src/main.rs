@@ -5035,7 +5035,8 @@ mod content_ipc_scope_2_tests {
     /// blank and data URLs are not this check's business.
     #[test]
     fn a_page_cannot_navigate_to_the_browsers_own_pages() {
-        for bad in ["hiwave://report", "hiwave://about", "HIWAVE://About", "  hiwave://report", "\t\nhiwave:newtab", "hiwave:x"] {
+        // The URL parser also drops a tab or newline ANYWHERE in the input, not only leading.
+        for bad in ["hiwave://report", "hiwave://about", "HIWAVE://About", "  hiwave://report", "\t\nhiwave:newtab", "hiwave:x", "hi\twave://report", "hiwave\n:x", "h\ri\nw\tave://about"] {
             assert!(!super::page_navigation_allowed(bad), "{bad:?}");
         }
         for ok in ["https://example.com/", "http://a.test/hiwave://x", "about:blank", "data:text/html,x", "file:///tmp/a.html"] {
