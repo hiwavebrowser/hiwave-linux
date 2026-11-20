@@ -908,7 +908,7 @@ enum TabUrlUpdate {
 /// about:blank and must keep their URL)?
 #[cfg(not(feature = "native-linux"))]
 fn tab_shows_a_browser_page(url: &str) -> bool {
-    is_about_url(url) || url == NEW_TAB_URL
+    is_about_url(url) || is_report_url(url) || url == NEW_TAB_URL
 }
 
 /// How many of the app's own page loads (load_html of the new-tab, About or Report page, or the
