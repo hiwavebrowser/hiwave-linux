@@ -349,6 +349,8 @@ enum UserEvent {
     // Internal page loading
     LoadAboutPage,
     LoadReportPage,
+    /// A page's navigation to a browser page was refused: say so in the page's console, as Chrome does.
+    ReportRefusedNavigation(String),
     // Print
     PrintPage,
     // Zoom controls
@@ -777,11 +779,13 @@ fn sync_history_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl IWebView) 
 
 #[cfg(not(feature = "native-linux"))]
 fn load_new_tab(content: &impl IWebView) {
+    mark_app_load();
     content.load_html(ABOUT_HTML);
 }
 
 #[cfg(not(feature = "native-linux"))]
 fn load_about_page(content: &impl IWebView) {
+    mark_app_load();
     content.load_html(ABOUT_HTML);
 }
 
@@ -792,6 +796,7 @@ fn load_report_page(content: &impl IWebView) {
         "<!-- Chart.js is injected by Rust before page load -->",
         &format!("<script>{}</script>", CHART_JS),
     );
+    mark_app_load();
     content.load_html(&report_with_chartjs);
 }
 
@@ -868,6 +873,114 @@ fn content_new_tab_url_allowed(url: Option<&str>) -> bool {
             let lower = u.to_ascii_lowercase();
             lower.starts_with("https://") || lower.starts_with("http://")
         }
+    }
+}
+
+/// May a page navigate the content view to `url`? The browser's own pages (`hiwave:`) open only from
+/// the browser's UI: a page that navigates to one is refused, as Chrome refuses a page's
+/// navigation to chrome:// ("Not allowed to load local resource").
+pub(crate) fn page_navigation_allowed(url: &str) -> bool {
+    // As the URL parser reads it: leading C0 controls and spaces dropped, then every tab and newline
+    // anywhere; and a scheme is case-insensitive.
+    let url: String = url
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .take(7)
+        .collect();
+    !url.eq_ignore_ascii_case("hiwave:")
+}
+
+/// What the address bar and the active tab's stored URL take when the content view's MAIN frame
+/// commits `url` (`current_tab_is_internal`: the tab shows About or the new-tab page).
+#[cfg(not(feature = "native-linux"))]
+#[derive(Debug, PartialEq, Eq)]
+enum TabUrlUpdate {
+    /// The new-tab page (or the app's own page, loaded as about:blank): an empty address bar; the
+    /// tab's URL becomes hiwave://newtab only when `store`.
+    NewTab { store: bool },
+    /// A web page: the address bar and the tab's URL take it.
+    Page(String),
+}
+
+#[cfg(not(feature = "native-linux"))]
+/// Does a tab whose stored URL is `url` show one of the browser's own pages (which commit as
+/// about:blank and must keep their URL)?
+#[cfg(not(feature = "native-linux"))]
+fn tab_shows_a_browser_page(url: &str) -> bool {
+    is_about_url(url) || is_report_url(url) || url == NEW_TAB_URL
+}
+
+/// How many of the app's own page loads (load_html of the new-tab, About or Report page, or the
+/// start page) have not committed yet. They commit in the main frame as about:blank, which is also
+/// what a page's own navigation to about:blank commits as; this tells the two apart.
+#[cfg(not(feature = "native-linux"))]
+static APP_LOADS_PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Called just before the app loads one of its own pages into the content view.
+#[cfg(not(feature = "native-linux"))]
+fn mark_app_load() {
+    APP_LOADS_PENDING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// For the main frame's committed `url`: is it one of the app's own loads? An about:blank commit
+/// takes one pending app load if there is one. Any other commit is a page's, which supersedes the
+/// app loads still pending (a load WebKit replaced never commits), so they are dropped.
+#[cfg(not(feature = "native-linux"))]
+fn take_app_load(url: &str) -> bool {
+    use std::sync::atomic::Ordering;
+    if url == "about:blank" {
+        APP_LOADS_PENDING
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+    } else {
+        APP_LOADS_PENDING.store(0, Ordering::SeqCst);
+        false
+    }
+}
+
+#[cfg(not(feature = "native-linux"))]
+fn main_frame_url_update(url: &str, current_tab_is_internal: bool, app_load: bool) -> TabUrlUpdate {
+    if url == "about:blank" && !app_load {
+        // A page's own navigation to about:blank: that page, as in Chrome.
+        return TabUrlUpdate::Page(url.to_string());
+    }
+    if url.starts_with("data:") {
+        // Never the app's own page (on WebKitGTK those commit as about:blank), so a main-frame
+        // data: commit is shown as what it is. (WebKitGTK itself refuses a page's script-initiated
+        // top-level data: navigation, as Chrome does, so such a commit is rare.)
+        return TabUrlUpdate::Page(url.to_string());
+    }
+    if is_new_tab_url(url) {
+        // The app's About page also commits as about:blank: a tab showing it keeps hiwave://about.
+        TabUrlUpdate::NewTab { store: !current_tab_is_internal || url == NEW_TAB_URL }
+    } else {
+        TabUrlUpdate::Page(url.to_string())
+    }
+}
+
+/// What the content view opens at startup for the restored active tab's URL.
+#[cfg(not(feature = "native-linux"))]
+#[derive(Debug, PartialEq, Eq)]
+enum StartPage {
+    /// The start page the view was built with (the new-tab page, or a browser page it has no loader for).
+    Keep,
+    About,
+    Report,
+    /// A web page, loaded by URL.
+    Url,
+}
+
+#[cfg(not(feature = "native-linux"))]
+fn start_page(url: &str) -> StartPage {
+    if is_about_url(url) {
+        StartPage::About
+    } else if is_report_url(url) {
+        StartPage::Report
+    } else if is_new_tab_url(url) || !page_navigation_allowed(url) {
+        StartPage::Keep
+    } else {
+        StartPage::Url
     }
 }
 
@@ -1114,6 +1227,11 @@ fn apply_gpu_workarounds() -> bool {
 /// A JavaScript string literal for `text` (JSON's escaping is a valid JS literal).
 fn js_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// The chrome's script calling `hiwaveChrome.<method>` with `text` (a page's title or URL).
+fn chrome_update_script(method: &str, text: &str) -> String {
+    format!("if(window.hiwaveChrome) {{ hiwaveChrome.{}({}); }}", method, js_string(text))
 }
 
 /// The Inspector panel's script for an element picked in the content
@@ -1872,6 +1990,8 @@ fn main() {
     #[allow(unused_variables)]
     let content_state2 = Arc::clone(&state);
     #[allow(unused_variables)]
+    let content_state_page_load = Arc::clone(&state);
+    #[allow(unused_variables)]
     let content_state_ipc = Arc::clone(&state);
     #[allow(unused_variables)]
     let content_state_download_start = Arc::clone(&state);
@@ -1932,17 +2052,31 @@ fn main() {
                     IpcMessage::FindInPageResult { result } => {
                         let _ = content_proxy_ipc.send_event(UserEvent::FindInPageResult(result.clone()));
                     }
-                    // Inspector data from the injected script in the page (I1b)
+                    // Inspector data from the injected script in the page (I1b). The page can post
+                    // these itself: each payload is read into the shape the injected scripts send,
+                    // and one that does not fit is dropped (upstream SEC1b).
                     IpcMessage::InspectorDomTreeResult { tree } => {
-                        let json = serde_json::to_string(tree).unwrap_or_else(|_| "null".to_string());
+                        let Some(tree) = ipc::inspector_payload::dom_tree(tree) else {
+                            warn!("inspector: dropped a malformed DOM tree from the content page");
+                            return;
+                        };
+                        let json = serde_json::to_string(&tree).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendDomTree(json));
                     }
                     IpcMessage::InspectorElementStylesResult { styles } => {
-                        let json = serde_json::to_string(styles).unwrap_or_else(|_| "null".to_string());
+                        let Some(styles) = ipc::inspector_payload::element_styles(styles) else {
+                            warn!("inspector: dropped malformed element styles from the content page");
+                            return;
+                        };
+                        let json = serde_json::to_string(&styles).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendElementStyles(json));
                     }
                     IpcMessage::InspectorElementPicked { path, styles } => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorElementPicked { path: path.clone(), styles: styles.clone() });
+                        let Some(styles) = ipc::inspector_payload::element_styles(styles) else {
+                            warn!("inspector: dropped a malformed picked element from the content page");
+                            return;
+                        };
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorElementPicked { path: path.clone(), styles });
                     }
                     IpcMessage::InspectorPickerStopped => {
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorPickerStopped);
@@ -1951,7 +2085,11 @@ fn main() {
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectElement { path: path.clone() });
                     }
                     IpcMessage::InspectorConsoleMessage { entry } => {
-                        let json = serde_json::to_string(entry).unwrap_or_else(|_| "null".to_string());
+                        let Some(entry) = ipc::inspector_payload::console_entry(entry) else {
+                            warn!("inspector: dropped a malformed console line from the content page");
+                            return;
+                        };
+                        let json = serde_json::to_string(&entry).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorConsoleMessage(json));
                     }
                     IpcMessage::InspectorConsoleClear => {
@@ -2053,6 +2191,8 @@ fn main() {
     let content_webview_wry: Option<wry::WebView> = if rustkit_content_view.is_some() {
         None
     } else {
+        // The start page is the app's own load (it commits as about:blank).
+        mark_app_load();
         Some(WebViewBuilder::new()
         .with_html(ABOUT_HTML)
         .with_devtools(cfg!(debug_assertions))
@@ -2061,41 +2201,18 @@ fn main() {
         .with_bounds(content_bounds)
         .with_navigation_handler(move |url| {
             info!("Content navigating to: {}", crate::page_url_for_log(&url));
+            if !page_navigation_allowed(&url) {
+                info!("Content navigation to a browser page: refused");
+                let _ = content_proxy.send_event(UserEvent::ReportRefusedNavigation(url));
+                return false;
+            }
 
-            // Check if current tab URL is an internal URL before processing data URLs
-            // This prevents overwriting hiwave://about when loading the about page via load_html()
-            let current_tab_is_internal = content_state
-                .lock()
-                .ok()
-                .and_then(|s| s.shell.get_active_tab().map(|tab| {
-                    let url_str = tab.url.to_string();
-                    is_about_url(&url_str) || url_str == NEW_TAB_URL
-                }))
-                .unwrap_or(false);
-
+            // This handler is called for every frame's navigation, an iframe's too, with only its
+            // URL: it decides whether the navigation may go ahead, nothing more. The address bar,
+            // the tab's URL and the loading state follow the main frame's committed load (the
+            // page-load handler below).
             if is_new_tab_url(&url) {
-                // Only update tab URL if current tab isn't already an internal URL
-                // This prevents data:text/html from overwriting hiwave://about
-                if !current_tab_is_internal || url == NEW_TAB_URL {
-                    let _ = content_proxy
-                        .send_event(UserEvent::UpdateActiveTabUrl(NEW_TAB_URL.to_string()));
-                }
-                let _ = content_proxy.send_event(UserEvent::UpdateUrl(String::new()));
                 let _ = content_proxy.send_event(UserEvent::SyncShieldStats);
-                return true;
-            }
-            if is_about_url(&url) {
-                let _ = content_proxy
-                    .send_event(UserEvent::UpdateActiveTabUrl(ABOUT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::UpdateUrl(ABOUT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::LoadAboutPage);
-                return true;
-            }
-            if is_report_url(&url) {
-                let _ = content_proxy
-                    .send_event(UserEvent::UpdateActiveTabUrl(REPORT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::UpdateUrl(REPORT_URL.to_string()));
-                let _ = content_proxy.send_event(UserEvent::LoadReportPage);
                 return true;
             }
             if let Ok(s) = content_state.lock() {
@@ -2123,15 +2240,30 @@ fn main() {
                     }
                 }
             }
-            let _ = content_proxy.send_event(UserEvent::SetLoading(true));
-            let _ = content_proxy.send_event(UserEvent::UpdateUrl(url.clone()));
-            let _ = content_proxy.send_event(UserEvent::UpdateActiveTabUrl(url));
             let _ = content_proxy.send_event(UserEvent::SyncShieldStats);
             true
         })
         .with_on_page_load_handler(move |event, url| match event {
             wry::PageLoadEvent::Started => {
+                // The MAIN frame committed `url` (wry: load-changed Committed, webview.uri()).
                 let _ = content_proxy2.send_event(UserEvent::SetLoading(true));
+                let current_tab_is_internal = content_state_page_load
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.shell.get_active_tab().map(|tab| tab_shows_a_browser_page(tab.url.as_str())))
+                    .unwrap_or(false);
+                match main_frame_url_update(&url, current_tab_is_internal, take_app_load(&url)) {
+                    TabUrlUpdate::NewTab { store } => {
+                        if store {
+                            let _ = content_proxy2.send_event(UserEvent::UpdateActiveTabUrl(NEW_TAB_URL.to_string()));
+                        }
+                        let _ = content_proxy2.send_event(UserEvent::UpdateUrl(String::new()));
+                    }
+                    TabUrlUpdate::Page(page) => {
+                        let _ = content_proxy2.send_event(UserEvent::UpdateUrl(page.clone()));
+                        let _ = content_proxy2.send_event(UserEvent::UpdateActiveTabUrl(page));
+                    }
+                }
             }
             wry::PageLoadEvent::Finished => {
                 let _ = content_proxy2.send_event(UserEvent::SetLoading(false));
@@ -2283,6 +2415,13 @@ fn main() {
                 }
             }
 
+            // A page opens a tab only at an http(s) URL, as with its CreateTab command; the
+            // browser's own pages (hiwave:) and other schemes open only from the browser's UI.
+            if !content_new_tab_url_allowed(Some(&url)) {
+                info!("New window request with a non-http(s) URL: not served");
+                return false;
+            }
+
             info!("New window request -> new tab: {}", crate::page_url_for_log(&url));
             let response = ipc::commands::handle_message(
                 &content_state2,
@@ -2324,8 +2463,19 @@ fn main() {
             "RustKit content view: initial load_html issued"
         );
     }
-    if !is_new_tab_url(&initial_url) {
-        content_webview.load_url(&initial_url);
+    // A restored browser page opens through the browser's own loader: load_url would reach the
+    // navigation handler, which refuses a hiwave: URL as a page's navigation.
+    match start_page(&initial_url) {
+        StartPage::Keep => {}
+        StartPage::About => {
+            let _ = proxy.send_event(UserEvent::UpdateUrl(ABOUT_URL.to_string()));
+            let _ = proxy.send_event(UserEvent::LoadAboutPage);
+        }
+        StartPage::Report => {
+            let _ = proxy.send_event(UserEvent::UpdateUrl(REPORT_URL.to_string()));
+            let _ = proxy.send_event(UserEvent::LoadReportPage);
+        }
+        StartPage::Url => content_webview.load_url(&initial_url),
     }
     info!("Content WebView created (content area)");
 
@@ -2722,10 +2872,7 @@ fn main() {
                                 format!("https://duckduckgo.com/?q={}", urlencoding::encode(&url))
                             };
                             content_for_events.load_url(&full_url);
-                            let script = format!(
-                                "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
-                                full_url.replace("'", "\\'")
-                            );
+                            let script = chrome_update_script("updateUrl", &full_url);
                             chrome_for_events.evaluate_script(&script);
                         }
                     }
@@ -2769,10 +2916,7 @@ fn main() {
                                     error!("Failed to persist workspace state: {}", e);
                                 }
                             }
-                            let script = format!(
-                                "if(window.hiwaveChrome) {{ hiwaveChrome.updateTitle('{}'); }}",
-                                title.replace("'", "\\'")
-                            );
+                            let script = chrome_update_script("updateTitle", &title);
                             chrome_for_events.evaluate_script(&script);
                             sync_tabs_to_chrome(&state_for_events, &chrome_for_events);
                             // Also sync workspaces so sidebar tab info updates
@@ -2780,10 +2924,7 @@ fn main() {
                         }
                     }
                     UserEvent::UpdateUrl(url) => {
-                        let script = format!(
-                            "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
-                            url.replace("'", "\\'")
-                        );
+                        let script = chrome_update_script("updateUrl", &url);
                         chrome_for_events.evaluate_script(&script);
                         sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                     }
@@ -3083,8 +3224,8 @@ fn main() {
                             return;
                         }
                         let script = format!(
-                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement('{}'); }}",
-                            path.replace("'", "\\'")
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement({}); }}",
+                            js_string(&path)
                         );
                         let _ = content_for_events.evaluate_script(&script);
                     }
@@ -3120,8 +3261,8 @@ fn main() {
                     }
                     UserEvent::InspectorScrollToElement { path } => {
                         let script = format!(
-                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.scrollToElement('{}'); }}",
-                            path.replace("'", "\\'")
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.scrollToElement({}); }}",
+                            js_string(&path)
                         );
                         let _ = content_for_events.evaluate_script(&script);
                     }
@@ -3148,14 +3289,14 @@ fn main() {
                         let script = format!(r#"
                             (function() {{
                                 if (window.__hiwaveInspector) {{
-                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    const styles = window.__hiwaveInspector.getElementStyles({});
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_element_styles_result',
                                         styles: styles
                                     }}));
                                 }}
                             }})();
-                        "#, path.replace("\\", "\\\\").replace("'", "\\'"));
+                        "#, js_string(&path));
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::InspectorExpand { path } => {
@@ -3166,19 +3307,19 @@ fn main() {
                         // Open inspector and select the element
                         let _ = proxy.send_event(UserEvent::OpenInspector);
                         // Delay the selection to allow inspector to initialize
-                        let path_escaped = path.replace("'", "\\'");
+                        let path_literal = js_string(&path);
                         let script = format!(r#"
                             setTimeout(() => {{
                                 if (window.__hiwaveInspector) {{
-                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    const styles = window.__hiwaveInspector.getElementStyles({});
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_element_picked',
-                                        path: '{}',
+                                        path: {},
                                         styles: styles
                                     }}));
                                 }}
                             }}, 200);
-                        "#, path_escaped, path_escaped);
+                        "#, path_literal, path_literal);
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     // Console events
@@ -3202,11 +3343,11 @@ fn main() {
                             return;
                         }
                         // Execute JavaScript in content webview
-                        let escaped_code = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
+                        let code_literal = js_string(&code);
                         let script = format!(r#"
                             (function() {{
                                 try {{
-                                    const result = eval('{}');
+                                    const result = eval({});
                                     const serialized = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_console_message',
@@ -3231,7 +3372,7 @@ fn main() {
                                     }}));
                                 }}
                             }})();
-                        "#, escaped_code);
+                        "#, code_literal);
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::ExpandShelf => {
@@ -4600,6 +4741,10 @@ fn main() {
                         info!("Loading analytics report page");
                         load_report_page(&content_for_events);
                     }
+                    UserEvent::ReportRefusedNavigation(url) => {
+                        let line = format!("Not allowed to load local resource: {url}");
+                        content_for_events.evaluate_script(&format!("console.error({});", js_string(&line)));
+                    }
                     UserEvent::PrintPage => {
                         info!("Triggering print dialog");
                         content_for_events.evaluate_script("window.print();");
@@ -4901,6 +5046,16 @@ mod ipc_shape_tests {
         assert!(odd.starts_with("unknown: "), "{odd}");
     }
 
+    /// A page's title or URL reaches the chrome's script as one string literal, whatever it holds.
+    #[test]
+    fn a_page_title_reaches_the_chrome_script_as_one_string_literal() {
+        for title in ["it's", "ends in a backslash \\", "a\\'); window.__flag = 1; //", "two\nlines\r\u{2028}"] {
+            let script = super::chrome_update_script("updateTitle", title);
+            let literal = serde_json::to_string(title).unwrap();
+            assert_eq!(script, format!("if(window.hiwaveChrome) {{ hiwaveChrome.updateTitle({literal}); }}"), "{title:?}");
+        }
+    }
+
     /// A path with quotes, a backslash or line breaks reaches the script as one string literal.
     #[test]
     fn the_picked_path_is_one_string_literal() {
@@ -4967,6 +5122,176 @@ mod content_ipc_scope_2_tests {
         for (key, ctrl, shift, alt) in [("Escape", false, false, false), ("f", true, false, false), ("L", false, true, false), ("L", true, true, true), ("F11", true, false, false), ("t", true, false, false)] {
             assert_eq!(window_shortcut(key, ctrl, shift, alt), None, "{key} ctrl={ctrl} shift={shift} alt={alt}");
         }
+    }
+
+    /// A page's window.open / target=_blank opens a tab under the same rule as its CreateTab: only
+    /// an http(s) URL, checked before the tab exists. (The popup filter passes `hiwave:`, and the
+    /// browser's Navigate would then open its own page for the page.)
+    #[test]
+    fn a_page_new_window_url_is_checked_before_its_tab_exists() {
+        let start = MAIN_RS.find(".with_new_window_req_handler(").expect("the new-window handler");
+        let handler = &MAIN_RS[start..];
+        let handler = &handler[..handler.find(".with_ipc_handler(").expect("the end of the new-window handler")];
+        let tab = handler.find("IpcMessage::CreateTab").expect("the new tab it opens");
+        let check = handler.find("content_new_tab_url_allowed(Some(").unwrap_or(usize::MAX);
+        assert!(check < tab, "the new-window handler opens a tab without checking its URL");
+    }
+
+    fn navigation_handler() -> &'static str {
+        let start = MAIN_RS.find(".with_navigation_handler(move |url| {").expect("the navigation handler");
+        let handler = &MAIN_RS[start..];
+        &handler[..handler.find(".with_on_page_load_handler(").expect("its end")]
+    }
+
+    /// WebKitGTK calls the navigation handler for every frame's navigation, an iframe's too, with
+    /// only its URL: the address bar, the tab's stored URL and the loading state are not set there.
+    #[test]
+    fn a_frames_navigation_sets_neither_the_address_bar_nor_the_tab_url() {
+        let handler = navigation_handler();
+        for event in ["UserEvent::UpdateUrl(", "UserEvent::UpdateActiveTabUrl(", "UserEvent::SetLoading(true)"] {
+            assert!(!handler.contains(event), "the navigation handler sends {event}");
+        }
+    }
+
+    /// The main frame's committed load (wry's page-load Started: load-changed, webview.uri()) is
+    /// where the address bar and the tab's URL are set.
+    #[test]
+    fn the_main_frames_committed_load_sets_the_address_bar_and_tab_url() {
+        let start = MAIN_RS.find(".with_on_page_load_handler(move |event, url| match event {").expect("the page-load handler");
+        let handler = &MAIN_RS[start..];
+        let started = &handler[handler.find("wry::PageLoadEvent::Started").expect("Started")..handler.find("wry::PageLoadEvent::Finished").expect("Finished")];
+        assert!(started.contains("main_frame_url_update("), "{started}");
+    }
+
+    #[test]
+    fn a_committed_page_url_follows_the_new_tab_rules() {
+        use super::{main_frame_url_update as update, TabUrlUpdate::*};
+        assert_eq!(update("https://a.test/x", false, false), Page("https://a.test/x".into()));
+        assert_eq!(update("https://a.test/x", true, false), Page("https://a.test/x".into()));
+        // The app's own pages commit as about:blank: on About the tab keeps hiwave://about.
+        assert_eq!(update("about:blank", false, true), NewTab { store: true });
+        assert_eq!(update("about:blank", true, true), NewTab { store: false });
+        assert_eq!(update("hiwave://newtab", true, false), NewTab { store: true });
+    }
+
+    /// A page's own navigation to about:blank is that page, as in Chrome: the address bar shows
+    /// about:blank and the tab keeps it, not the new-tab page's empty bar and hiwave://newtab.
+    #[test]
+    fn a_pages_own_about_blank_is_not_the_new_tab_page() {
+        use super::{main_frame_url_update as update, TabUrlUpdate::*};
+        assert_eq!(update("about:blank", false, false), Page("about:blank".into()));
+        assert_eq!(update("about:blank", true, false), Page("about:blank".into()));
+    }
+
+    /// A main-frame data: commit is shown as what it is, not as the new-tab page: the app's own
+    /// pages commit as about:blank on WebKitGTK, never data:.
+    #[test]
+    fn a_pages_own_data_url_is_shown_as_itself() {
+        use super::{main_frame_url_update as update, TabUrlUpdate::*};
+        for (internal, app_load) in [(false, false), (true, false), (false, true)] {
+            assert_eq!(update("data:text/html,<p>x</p>", internal, app_load), Page("data:text/html,<p>x</p>".into()), "internal={internal} app_load={app_load}");
+        }
+    }
+
+    /// The marker: each app load is taken by the next main-frame about:blank commit; a page's own
+    /// commit (any other URL) means the pending app loads were superseded.
+    #[test]
+    fn an_app_load_is_told_from_a_pages_about_blank() {
+        use super::{mark_app_load, take_app_load, APP_LOADS_PENDING};
+        use std::sync::atomic::Ordering;
+        APP_LOADS_PENDING.store(0, Ordering::SeqCst);
+        assert!(!take_app_load("about:blank"), "no app load pending");
+        mark_app_load();
+        assert!(take_app_load("about:blank"), "the app's load");
+        assert!(!take_app_load("about:blank"), "taken once");
+        mark_app_load();
+        mark_app_load();
+        assert!(!take_app_load("https://a.test/"), "a page committed");
+        assert!(!take_app_load("about:blank"), "the superseded loads are gone");
+    }
+
+    /// A tab on About, Report or the new-tab page keeps its URL when the app's page commits as
+    /// about:blank (a restored Report tab was saved as hiwave://newtab).
+    #[test]
+    fn a_tab_on_any_browser_page_keeps_its_url() {
+        use super::tab_shows_a_browser_page as browser_page;
+        for url in ["hiwave://about", "hiwave://report", "hiwave://newtab"] {
+            assert!(browser_page(url), "{url}");
+        }
+        for url in ["https://a.test/", "about:blank", "file:///tmp/a.html"] {
+            assert!(!browser_page(url), "{url}");
+        }
+    }
+
+    /// Every way the app loads its own page into the content view marks the load first.
+    #[test]
+    fn every_app_page_load_is_marked() {
+        for loader in ["fn load_new_tab(", "fn load_about_page(", "fn load_report_page("] {
+            let at = MAIN_RS.find(loader).unwrap_or_else(|| panic!("{loader}"));
+            let body = &MAIN_RS[at..at + MAIN_RS[at..].find("\n}\n").expect("its end")];
+            assert!(body.contains("mark_app_load();"), "{loader} does not mark its load");
+        }
+        let start = MAIN_RS.find(".with_html(ABOUT_HTML)").expect("the start page");
+        let before = &MAIN_RS[start.saturating_sub(1500)..start];
+        assert!(before.contains("mark_app_load();"), "the start page's load is not marked");
+    }
+
+    /// A page's navigation to a browser page is refused whatever its case or leading blanks; web,
+    /// blank and data URLs are not this check's business.
+    #[test]
+    fn a_page_cannot_navigate_to_the_browsers_own_pages() {
+        // The URL parser also drops a tab or newline ANYWHERE in the input, not only leading.
+        for bad in ["hiwave://report", "hiwave://about", "HIWAVE://About", "  hiwave://report", "\t\nhiwave:newtab", "hiwave:x", "hi\twave://report", "hiwave\n:x", "h\ri\nw\tave://about"] {
+            assert!(!super::page_navigation_allowed(bad), "{bad:?}");
+        }
+        for ok in ["https://example.com/", "http://a.test/hiwave://x", "about:blank", "data:text/html,x", "file:///tmp/a.html"] {
+            assert!(super::page_navigation_allowed(ok), "{ok:?}");
+        }
+    }
+
+    /// A tab restored on About or Report reopens through the browser's own loader (not load_url,
+    /// which the page-navigation check refuses); other browser URLs keep the start page.
+    #[test]
+    fn a_restored_browser_page_opens_through_the_browsers_own_loader() {
+        use super::{start_page, StartPage::*};
+        assert_eq!(start_page("hiwave://newtab"), Keep);
+        assert_eq!(start_page("about:blank"), Keep);
+        assert_eq!(start_page("hiwave://about"), About);
+        assert_eq!(start_page("hiwave://report"), Report);
+        assert_eq!(start_page("hiwave://settings"), Keep);
+        assert_eq!(start_page("https://example.com/"), Url);
+    }
+
+    /// Each door a page navigates through checks first: the WebKit view's navigation handler (which
+    /// no longer serves About or Report itself), and (below) the RustKit view's script and link
+    /// navigations, which otherwise reach the browser's own Navigate.
+    #[test]
+    fn the_webkit_views_navigation_handler_checks_the_url_first() {
+        let start = MAIN_RS.find(".with_navigation_handler(move |url| {").expect("the navigation handler");
+        let handler = &MAIN_RS[start..];
+        let handler = &handler[..handler.find(".with_on_page_load_handler(").expect("its end")];
+        let check = handler.find("page_navigation_allowed(&url)").unwrap_or(usize::MAX);
+        assert!(check < handler.find("is_new_tab_url(&url)").expect("the new-tab arm"), "navigation handler");
+        assert!(!handler.contains("LoadAboutPage") && !handler.contains("LoadReportPage"), "the handler serves a browser page");
+    }
+
+    #[test]
+    fn the_rustkit_views_page_navigations_check_the_url_first() {
+        // The pump sends what page_navigation_event makes of the URL, and nothing else.
+        let pump = include_str!("rustkit_content.rs");
+        let taken = pump.find("take_script_navigation()").expect("the RustKit view's page navigations");
+        let pump = &pump[taken..pump[taken..].find("\n        }\n").map(|e| taken + e).expect("its end")];
+        assert_eq!(pump.matches("send_event(").count(), 1, "{pump}");
+        assert!(pump.contains("send_event(page_navigation_event(url))"), "{pump}");
+    }
+
+    #[cfg(all(target_os = "linux", feature = "rustkit"))]
+    #[test]
+    fn a_rustkit_page_navigation_to_a_browser_page_becomes_a_refusal() {
+        use super::UserEvent;
+        use crate::rustkit_content::page_navigation_event;
+        assert!(matches!(page_navigation_event("hiwave://report".into()), UserEvent::ReportRefusedNavigation(u) if u == "hiwave://report"));
+        assert!(matches!(page_navigation_event("https://a.test/".into()), UserEvent::Navigate(u) if u == "https://a.test/"));
     }
 
     #[test]
@@ -5100,5 +5425,54 @@ mod engine_test_turn_pin_tests {
             }
         }
         assert!(missing.is_empty(), "build an engine without the turn: {missing:?}");
+    }
+}
+
+
+/// Text a page controls (its title and URL, an element path, console input) reaches a script the app
+/// builds only as a `js_string` literal; and the inspector data a content page posts is read into the
+/// shape the injected scripts send before it is forwarded (`ipc::inspector_payload`), as upstream.
+#[cfg(all(test, not(feature = "native-linux")))]
+mod script_string_tests {
+    const MAIN_RS: &str = include_str!("main.rs");
+
+    /// main.rs without its test modules.
+    fn app_code() -> &'static str {
+        &MAIN_RS[..MAIN_RS.find("\n#[cfg(test)]\nmod ").expect("the first test module")]
+    }
+
+    #[test]
+    fn no_script_is_built_by_escaping_quotes_by_hand() {
+        let code = app_code();
+        for (n, line) in code.lines().enumerate() {
+            assert!(!line.contains(r#".replace("'", "\\'")"#), "main.rs:{}: {}", n + 1, line.trim());
+            assert!(!line.contains("('{}')"), "main.rs:{}: {}", n + 1, line.trim());
+        }
+    }
+
+    fn content_handler() -> &'static str {
+        let start = MAIN_RS.find("let content_ipc: std::rc::Rc<dyn Fn(&str)>").expect("the content view's IPC handler");
+        let rest = &MAIN_RS[start..];
+        &rest[..rest.find("\n    });").expect("the end of the content handler")]
+    }
+
+    fn arm(name: &str) -> &'static str {
+        let handler = content_handler();
+        let at = handler.find(&format!("IpcMessage::{name} ")).unwrap_or_else(|| panic!("the {name} arm"));
+        let rest = &handler[at..];
+        let end = rest[1..].find("IpcMessage::").map(|i| i + 1).unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn inspector_data_from_a_content_page_is_read_before_it_is_forwarded() {
+        for (name, reader) in [
+            ("InspectorDomTreeResult", "inspector_payload::dom_tree("),
+            ("InspectorElementStylesResult", "inspector_payload::element_styles("),
+            ("InspectorElementPicked", "inspector_payload::element_styles("),
+            ("InspectorConsoleMessage", "inspector_payload::console_entry("),
+        ] {
+            assert!(arm(name).contains(reader), "{name} must go through {reader}");
+        }
     }
 }
