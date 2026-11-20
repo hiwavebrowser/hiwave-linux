@@ -15217,6 +15217,24 @@ mod tests {
         }
     }
 
+    /// Chrome 148 on Linux unites a fallback face into the line under `line-height: normal`: Arial
+    /// 14px is 16 tall, and "\u{1F6E1} Shield" (the shield from Noto Sans Symbols2) is 24, from
+    /// that face's ascent 15 and descent 9 (measured 2026-11-19 on CfT 148, board-fonts.conf). A
+    /// <button> with 8px padding and that label is 40 (32 without the symbol). Skipped where Noto
+    /// Sans Symbols2 is not installed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fallback_faces_extents_join_the_line_on_linux() {
+        let plain = measure_text_advanced("Shield", "Arial", 14.0, rustkit_css::FontWeight::NORMAL, rustkit_css::FontStyle::Normal);
+        let with_symbol = measure_text_advanced("\u{1F6E1} Shield", "Arial", 14.0, rustkit_css::FontWeight::NORMAL, rustkit_css::FontStyle::Normal);
+        if with_symbol.width - plain.width < 10.0 {
+            eprintln!("skipped: no symbol fallback face here (width {} vs {})", with_symbol.width, plain.width);
+            return;
+        }
+        assert_eq!((plain.ascent, plain.descent), (13.0, 3.0), "Arial 14px alone");
+        assert_eq!(used_font_line_height(&with_symbol), 24.0, "Arial 14px with Noto Sans Symbols2 is 24 tall");
+    }
+
     #[test]
     fn test_an_emoji_label_lifts_a_styled_buttons_line() {
         // report.html `.export-btn { padding: .5rem 1rem; font-size: .875rem }`:
