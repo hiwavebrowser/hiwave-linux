@@ -877,9 +877,15 @@ fn content_new_tab_url_allowed(url: Option<&str>) -> bool {
 /// the browser's UI: a page that navigates to one is refused, as Chrome refuses a page's
 /// navigation to chrome:// ("Not allowed to load local resource").
 pub(crate) fn page_navigation_allowed(url: &str) -> bool {
-    // URL parsing drops leading C0 controls and spaces, and a scheme is case-insensitive.
-    let url = url.trim_start_matches(|c: char| c <= ' ');
-    !url.get(..7).is_some_and(|scheme| scheme.eq_ignore_ascii_case("hiwave:"))
+    // As the URL parser reads it: leading C0 controls and spaces dropped, then every tab and newline
+    // anywhere; and a scheme is case-insensitive.
+    let url: String = url
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .take(7)
+        .collect();
+    !url.eq_ignore_ascii_case("hiwave:")
 }
 
 /// What the content view opens at startup for the restored active tab's URL.
