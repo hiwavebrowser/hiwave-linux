@@ -888,6 +888,28 @@ pub(crate) fn page_navigation_allowed(url: &str) -> bool {
     !url.eq_ignore_ascii_case("hiwave:")
 }
 
+/// What the address bar and the active tab's stored URL take when the content view's MAIN frame
+/// commits `url` (`current_tab_is_internal`: the tab shows About or the new-tab page).
+#[cfg(not(feature = "native-linux"))]
+#[derive(Debug, PartialEq, Eq)]
+enum TabUrlUpdate {
+    /// The new-tab page (or the app's own page, loaded as about:blank): an empty address bar; the
+    /// tab's URL becomes hiwave://newtab only when `store`.
+    NewTab { store: bool },
+    /// A web page: the address bar and the tab's URL take it.
+    Page(String),
+}
+
+#[cfg(not(feature = "native-linux"))]
+fn main_frame_url_update(url: &str, current_tab_is_internal: bool) -> TabUrlUpdate {
+    if is_new_tab_url(url) {
+        // The app's About page also commits as about:blank: a tab showing it keeps hiwave://about.
+        TabUrlUpdate::NewTab { store: !current_tab_is_internal || url == NEW_TAB_URL }
+    } else {
+        TabUrlUpdate::Page(url.to_string())
+    }
+}
+
 /// What the content view opens at startup for the restored active tab's URL.
 #[cfg(not(feature = "native-linux"))]
 #[derive(Debug, PartialEq, Eq)]
@@ -1919,6 +1941,8 @@ fn main() {
     #[allow(unused_variables)]
     let content_state2 = Arc::clone(&state);
     #[allow(unused_variables)]
+    let content_state_page_load = Arc::clone(&state);
+    #[allow(unused_variables)]
     let content_state_ipc = Arc::clone(&state);
     #[allow(unused_variables)]
     let content_state_download_start = Arc::clone(&state);
@@ -2132,25 +2156,11 @@ fn main() {
                 return false;
             }
 
-            // Check if current tab URL is an internal URL before processing data URLs
-            // This prevents overwriting hiwave://about when loading the about page via load_html()
-            let current_tab_is_internal = content_state
-                .lock()
-                .ok()
-                .and_then(|s| s.shell.get_active_tab().map(|tab| {
-                    let url_str = tab.url.to_string();
-                    is_about_url(&url_str) || url_str == NEW_TAB_URL
-                }))
-                .unwrap_or(false);
-
+            // This handler is called for every frame's navigation, an iframe's too, with only its
+            // URL: it decides whether the navigation may go ahead, nothing more. The address bar,
+            // the tab's URL and the loading state follow the main frame's committed load (the
+            // page-load handler below).
             if is_new_tab_url(&url) {
-                // Only update tab URL if current tab isn't already an internal URL
-                // This prevents data:text/html from overwriting hiwave://about
-                if !current_tab_is_internal || url == NEW_TAB_URL {
-                    let _ = content_proxy
-                        .send_event(UserEvent::UpdateActiveTabUrl(NEW_TAB_URL.to_string()));
-                }
-                let _ = content_proxy.send_event(UserEvent::UpdateUrl(String::new()));
                 let _ = content_proxy.send_event(UserEvent::SyncShieldStats);
                 return true;
             }
@@ -2179,15 +2189,33 @@ fn main() {
                     }
                 }
             }
-            let _ = content_proxy.send_event(UserEvent::SetLoading(true));
-            let _ = content_proxy.send_event(UserEvent::UpdateUrl(url.clone()));
-            let _ = content_proxy.send_event(UserEvent::UpdateActiveTabUrl(url));
             let _ = content_proxy.send_event(UserEvent::SyncShieldStats);
             true
         })
         .with_on_page_load_handler(move |event, url| match event {
             wry::PageLoadEvent::Started => {
+                // The MAIN frame committed `url` (wry: load-changed Committed, webview.uri()).
                 let _ = content_proxy2.send_event(UserEvent::SetLoading(true));
+                let current_tab_is_internal = content_state_page_load
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.shell.get_active_tab().map(|tab| {
+                        let url_str = tab.url.to_string();
+                        is_about_url(&url_str) || url_str == NEW_TAB_URL
+                    }))
+                    .unwrap_or(false);
+                match main_frame_url_update(&url, current_tab_is_internal) {
+                    TabUrlUpdate::NewTab { store } => {
+                        if store {
+                            let _ = content_proxy2.send_event(UserEvent::UpdateActiveTabUrl(NEW_TAB_URL.to_string()));
+                        }
+                        let _ = content_proxy2.send_event(UserEvent::UpdateUrl(String::new()));
+                    }
+                    TabUrlUpdate::Page(page) => {
+                        let _ = content_proxy2.send_event(UserEvent::UpdateUrl(page.clone()));
+                        let _ = content_proxy2.send_event(UserEvent::UpdateActiveTabUrl(page));
+                    }
+                }
             }
             wry::PageLoadEvent::Finished => {
                 let _ = content_proxy2.send_event(UserEvent::SetLoading(false));
@@ -5059,6 +5087,43 @@ mod content_ipc_scope_2_tests {
         let tab = handler.find("IpcMessage::CreateTab").expect("the new tab it opens");
         let check = handler.find("content_new_tab_url_allowed(Some(").unwrap_or(usize::MAX);
         assert!(check < tab, "the new-window handler opens a tab without checking its URL");
+    }
+
+    fn navigation_handler() -> &'static str {
+        let start = MAIN_RS.find(".with_navigation_handler(move |url| {").expect("the navigation handler");
+        let handler = &MAIN_RS[start..];
+        &handler[..handler.find(".with_on_page_load_handler(").expect("its end")]
+    }
+
+    /// WebKitGTK calls the navigation handler for every frame's navigation, an iframe's too, with
+    /// only its URL: the address bar, the tab's stored URL and the loading state are not set there.
+    #[test]
+    fn a_frames_navigation_sets_neither_the_address_bar_nor_the_tab_url() {
+        let handler = navigation_handler();
+        for event in ["UserEvent::UpdateUrl(", "UserEvent::UpdateActiveTabUrl(", "UserEvent::SetLoading(true)"] {
+            assert!(!handler.contains(event), "the navigation handler sends {event}");
+        }
+    }
+
+    /// The main frame's committed load (wry's page-load Started: load-changed, webview.uri()) is
+    /// where the address bar and the tab's URL are set.
+    #[test]
+    fn the_main_frames_committed_load_sets_the_address_bar_and_tab_url() {
+        let start = MAIN_RS.find(".with_on_page_load_handler(move |event, url| match event {").expect("the page-load handler");
+        let handler = &MAIN_RS[start..];
+        let started = &handler[handler.find("wry::PageLoadEvent::Started").expect("Started")..handler.find("wry::PageLoadEvent::Finished").expect("Finished")];
+        assert!(started.contains("main_frame_url_update("), "{started}");
+    }
+
+    #[test]
+    fn a_committed_page_url_follows_the_new_tab_rules() {
+        use super::{main_frame_url_update as update, TabUrlUpdate::*};
+        assert_eq!(update("https://a.test/x", false), Page("https://a.test/x".into()));
+        assert_eq!(update("https://a.test/x", true), Page("https://a.test/x".into()));
+        // The app's own pages commit as about:blank: on About the tab keeps hiwave://about.
+        assert_eq!(update("about:blank", false), NewTab { store: true });
+        assert_eq!(update("about:blank", true), NewTab { store: false });
+        assert_eq!(update("hiwave://newtab", true), NewTab { store: true });
     }
 
     /// A page's navigation to a browser page is refused whatever its case or leading blanks; web,
