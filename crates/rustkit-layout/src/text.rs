@@ -2300,11 +2300,14 @@ impl TextShaper {
             // draws characters from, as on macOS: Blink unites every used fallback face into the
             // line box under `line-height: normal` (NGInlineBoxState::AccumulateUsedFonts).
             let mut fallback: Option<(f32, f32, f32)> = None;
-            for c in text.chars() {
+            let chars: Vec<char> = text.chars().collect();
+            for (i, &c) in chars.iter().enumerate() {
                 if c.is_whitespace() || matches!(c as u32, 0x200B..=0x200D | 0xFE00..=0xFE0F | 0x2060) {
                     continue;
                 }
-                let src = backend.source_descriptor(c, &descriptor);
+                // The selector after the character decides its face, as for its advance.
+                let variation = rustkit_text::Variation::after(chars.get(i + 1).copied());
+                let src = backend.source_descriptor_varied(c, variation, &descriptor);
                 if src.family == descriptor.family {
                     continue;
                 }

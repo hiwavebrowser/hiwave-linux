@@ -77,6 +77,17 @@ pub enum FaceKey {
     Recorded(rustkit_text::GlyphFace),
 }
 
+impl FaceKey {
+    /// The variation selector after the character, when the key carries one (`Auto`); a recorded
+    /// face is drawn as recorded.
+    pub fn variation(&self) -> rustkit_text::Variation {
+        match self {
+            FaceKey::Auto(v) => *v,
+            FaceKey::Recorded(_) => rustkit_text::Variation::None,
+        }
+    }
+}
+
 impl Default for FaceKey {
     fn default() -> Self {
         FaceKey::Auto(rustkit_text::Variation::None)
@@ -795,7 +806,7 @@ impl GlyphCache {
                 style: rustkit_text::FontStyle::Normal,
                 size: key.font_size as f32 / 10.0,
             };
-            backend.rasterize_color_glyph(key.codepoint, &descriptor)
+            backend.rasterize_color_glyph_varied(key.codepoint, key.face.variation(), &descriptor)
         });
         #[cfg(windows)]
         let raster = rasterize_glyph_directwrite_color(key, key.font_size as f32 / 10.0);
@@ -986,8 +997,9 @@ impl GlyphCache {
                         },
                         size: font_size,
                     };
-                    match backend.rasterize_glyph_at_phase(
+                    match backend.rasterize_glyph_at_phase_varied(
                         key.codepoint,
+                        key.face.variation(),
                         &descriptor,
                         key.subpixel_phase,
                         SUBPIXEL_QUANTIZE,

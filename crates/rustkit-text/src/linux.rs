@@ -42,9 +42,9 @@ pub struct LinuxTextBackend {
     /// `webfonts::generation()` the caches were filled under; a change means a
     /// family name may now resolve to a different face.
     webfont_generation: u64,
-    /// Char -> installed family that covers it, for chars the requested face
-    /// lacks (None = nothing installed covers it).
-    fallback_cache: HashMap<char, Option<String>>,
+    /// (char, emoji presentation) -> installed family that covers it, for chars the requested
+    /// face lacks (None = nothing installed covers it).
+    fallback_cache: HashMap<(char, bool), Option<String>>,
     /// Face key -> its variable-axis pin (None = no weight or optical-size axis).
     face_axes: HashMap<String, Option<AxisPin>>,
     /// Face key -> HarfBuzz face over the same bytes (None = unparsable).
@@ -435,6 +435,19 @@ impl LinuxTextBackend {
         phase: u8,
         phases: u8,
     ) -> Result<RasterizedGlyph, TextError> {
+        self.rasterize_glyph_at_phase_varied(ch, crate::Variation::None, descriptor, phase, phases)
+    }
+
+    /// `rasterize_glyph_at_phase` from the face the selector after `ch` asks for, as layout
+    /// measured it (`source_descriptor_varied`).
+    pub fn rasterize_glyph_at_phase_varied(
+        &mut self,
+        ch: char,
+        variation: crate::Variation,
+        descriptor: &FontDescriptor,
+        phase: u8,
+        phases: u8,
+    ) -> Result<RasterizedGlyph, TextError> {
         if is_zero_width(ch) {
             return Ok(RasterizedGlyph {
                 bitmap: Vec::new(),
@@ -446,7 +459,7 @@ impl LinuxTextBackend {
                 ascent: 0.0,
             });
         }
-        let descriptor = &self.source_descriptor(ch, descriptor);
+        let descriptor = &self.source_descriptor_varied(ch, variation, descriptor);
         let face = self.get_face(descriptor)?;
         if face.has_fixed_sizes() && !face.is_scalable() {
             return Err(TextError::ShapingFailed(format!("{ch:?} is color-bitmap only")));
@@ -638,7 +651,7 @@ impl LinuxTextBackend {
                 i += 1;
                 continue;
             }
-            let src = self.source_descriptor(c, descriptor);
+            let src = self.source_descriptor_varied(c, crate::Variation::after(chars.get(i + 1).copied()), descriptor);
             let fixed = {
                 let face = self.get_face(&src)?;
                 face.has_fixed_sizes() && !face.is_scalable()
@@ -658,7 +671,7 @@ impl LinuxTextBackend {
             let mut j = i + 1;
             while j < chars.len()
                 && !is_zero_width(chars[j])
-                && self.source_descriptor(chars[j], descriptor).family == src.family
+                && self.source_descriptor_varied(chars[j], crate::Variation::after(chars.get(j + 1).copied()), descriptor).family == src.family
             {
                 j += 1;
             }
@@ -695,28 +708,28 @@ impl LinuxTextBackend {
         variation: crate::Variation,
         descriptor: &FontDescriptor,
     ) -> FontDescriptor {
-        let _ = variation;
-        self.source_descriptor(ch, descriptor)
-    }
-
-    /// The descriptor whose face paints `ch`: the requested one when it has the
-    /// glyph, else the first installed fallback family that does (emoji go to
-    /// Noto Color Emoji), else the requested one (its .notdef).
-    pub fn source_descriptor(&mut self, ch: char, descriptor: &FontDescriptor) -> FontDescriptor {
         if self.has_glyph(descriptor, ch) {
+            // The primary face keeps a character it has, whatever the selector asks (not measured
+            // against Chrome for a primary face that has the glyph; left as it was).
             return descriptor.clone();
         }
-        if let Some(hit) = self.fallback_cache.get(&ch) {
+        // Emoji presentation: asked for by U+FE0F, refused by U+FE0E, else the character's own
+        // Emoji_Presentation, as Chrome (U+23F1 + U+FE0F: Noto Color Emoji; bare: Symbols2).
+        let emoji = match variation {
+            crate::Variation::Emoji => true,
+            crate::Variation::Text => false,
+            crate::Variation::None => is_emoji(ch) && has_emoji_presentation(ch),
+        };
+        if let Some(hit) = self.fallback_cache.get(&(ch, emoji)) {
             return match hit {
                 Some(family) => FontDescriptor { family: family.clone(), ..descriptor.clone() },
                 None => descriptor.clone(),
             };
         }
-        // By Emoji_Presentation, as Chrome: a symbol in an emoji block that defaults to TEXT
-        // presentation (U+1F6E1 shield, U+2699 gear) tries the text faces first and the colour
-        // face last; an emoji-presentation one (U+1F6AB) the colour face first. fontconfig's family
-        // name is "Noto Sans Symbols2" (no space): spelt with one, it never resolved.
-        let candidates: &[&str] = if is_emoji(ch) && has_emoji_presentation(ch) {
+        // fontconfig's family name is "Noto Sans Symbols2" (no space): spelt with one, it never
+        // resolved. A symbol in an emoji block that defaults to TEXT presentation (U+1F6E1
+        // shield, U+2699 gear) tries the text faces first and the colour face last.
+        let candidates: &[&str] = if emoji {
             &["Noto Color Emoji", "Noto Sans Symbols2", "Noto Sans Symbols", "DejaVu Sans"]
         } else if is_emoji(ch) {
             &["DejaVu Sans", "Noto Sans Symbols2", "Noto Sans Symbols", "Noto Color Emoji"]
@@ -735,11 +748,18 @@ impl LinuxTextBackend {
                 break;
             }
         }
-        self.fallback_cache.insert(ch, found.clone());
+        self.fallback_cache.insert((ch, emoji), found.clone());
         match found {
             Some(family) => FontDescriptor { family, ..descriptor.clone() },
             None => descriptor.clone(),
         }
+    }
+
+    /// The descriptor whose face paints `ch`: the requested one when it has the
+    /// glyph, else the first installed fallback family that does (emoji go to
+    /// Noto Color Emoji), else the requested one (its .notdef).
+    pub fn source_descriptor(&mut self, ch: char, descriptor: &FontDescriptor) -> FontDescriptor {
+        self.source_descriptor_varied(ch, crate::Variation::None, descriptor)
     }
 
     /// Rasterize a color-bitmap glyph (emoji) to premultiplied RGBA, scaled
@@ -752,7 +772,17 @@ impl LinuxTextBackend {
         ch: char,
         descriptor: &FontDescriptor,
     ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
-        let src = self.source_descriptor(ch, descriptor);
+        self.rasterize_color_glyph_varied(ch, crate::Variation::None, descriptor)
+    }
+
+    /// `rasterize_color_glyph` from the face the selector after `ch` asks for.
+    pub fn rasterize_color_glyph_varied(
+        &mut self,
+        ch: char,
+        variation: crate::Variation,
+        descriptor: &FontDescriptor,
+    ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+        let src = self.source_descriptor_varied(ch, variation, descriptor);
         let face = self.get_face(&src).ok()?;
         if !face.has_color() {
             return None;
