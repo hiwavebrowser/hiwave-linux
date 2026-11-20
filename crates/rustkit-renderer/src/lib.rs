@@ -6425,10 +6425,15 @@ impl Renderer {
         for (char_idx, &ch) in chars.iter().enumerate() {
             let (pen_x, subpixel_phase) = glyph::pen_and_phase(cursor_x);
             let next = chars.get(char_idx + 1).copied();
+            #[cfg(not(target_os = "linux"))]
             let face = match faces {
                 Some(faces) => FaceKey::Recorded(faces[char_idx]),
                 None => FaceKey::Auto(rustkit_text::Variation::after(next)),
             };
+            // Linux layout records no per-character face (every glyph is Primary); the face is
+            // chosen from the character and the selector after it, at measure and at paint alike.
+            #[cfg(target_os = "linux")]
+            let face = FaceKey::Auto(rustkit_text::Variation::after(next));
             let key = GlyphKey {
                 // EM1: an emoji sequence layout folded into this character.
                 cluster: Self::emoji_cluster_at(&chars, faces, char_idx),
@@ -6814,10 +6819,15 @@ impl Renderer {
         for (char_idx, &ch) in chars.iter().enumerate() {
             let (pen_x, subpixel_phase) = glyph::pen_and_phase(cursor_x);
             let next = chars.get(char_idx + 1).copied();
+            #[cfg(not(target_os = "linux"))]
             let face = match faces {
                 Some(faces) => FaceKey::Recorded(faces[char_idx]),
                 None => FaceKey::Auto(rustkit_text::Variation::after(next)),
             };
+            // Linux layout records no per-character face (every glyph is Primary); the face is
+            // chosen from the character and the selector after it, at measure and at paint alike.
+            #[cfg(target_os = "linux")]
+            let face = FaceKey::Auto(rustkit_text::Variation::after(next));
             let key = GlyphKey {
                 // EM1: an emoji sequence layout folded into this character.
                 cluster: Self::emoji_cluster_at(&chars, faces, char_idx),
