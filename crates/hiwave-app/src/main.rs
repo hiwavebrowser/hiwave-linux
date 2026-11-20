@@ -1116,6 +1116,11 @@ fn js_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
 }
 
+/// The chrome's script calling `hiwaveChrome.<method>` with `text` (a page's title or URL).
+fn chrome_update_script(method: &str, text: &str) -> String {
+    format!("if(window.hiwaveChrome) {{ hiwaveChrome.{}('{}'); }}", method, text.replace("'", "\\'"))
+}
+
 /// The Inspector panel's script for an element picked in the content
 /// page: select it by `path` and show `styles_json`.
 fn inspector_picked_script(path: &str, styles_json: &str) -> String {
@@ -4901,6 +4906,16 @@ mod ipc_shape_tests {
         assert!(odd.starts_with("unknown: "), "{odd}");
     }
 
+    /// A page's title or URL reaches the chrome's script as one string literal, whatever it holds.
+    #[test]
+    fn a_page_title_reaches_the_chrome_script_as_one_string_literal() {
+        for title in ["it's", "ends in a backslash \\", "a\\'); window.__flag = 1; //", "two\nlines\r\u{2028}"] {
+            let script = super::chrome_update_script("updateTitle", title);
+            let literal = serde_json::to_string(title).unwrap();
+            assert_eq!(script, format!("if(window.hiwaveChrome) {{ hiwaveChrome.updateTitle({literal}); }}"), "{title:?}");
+        }
+    }
+
     /// A path with quotes, a backslash or line breaks reaches the script as one string literal.
     #[test]
     fn the_picked_path_is_one_string_literal() {
@@ -5100,5 +5115,54 @@ mod engine_test_turn_pin_tests {
             }
         }
         assert!(missing.is_empty(), "build an engine without the turn: {missing:?}");
+    }
+}
+
+
+/// Text a page controls (its title and URL, an element path, console input) reaches a script the app
+/// builds only as a `js_string` literal; and the inspector data a content page posts is read into the
+/// shape the injected scripts send before it is forwarded (`ipc::inspector_payload`), as upstream.
+#[cfg(all(test, not(feature = "native-linux")))]
+mod script_string_tests {
+    const MAIN_RS: &str = include_str!("main.rs");
+
+    /// main.rs without its test modules.
+    fn app_code() -> &'static str {
+        &MAIN_RS[..MAIN_RS.find("\n#[cfg(test)]\nmod ").expect("the first test module")]
+    }
+
+    #[test]
+    fn no_script_is_built_by_escaping_quotes_by_hand() {
+        let code = app_code();
+        for (n, line) in code.lines().enumerate() {
+            assert!(!line.contains(r#".replace("'", "\\'")"#), "main.rs:{}: {}", n + 1, line.trim());
+            assert!(!line.contains("('{}')"), "main.rs:{}: {}", n + 1, line.trim());
+        }
+    }
+
+    fn content_handler() -> &'static str {
+        let start = MAIN_RS.find("let content_ipc: std::rc::Rc<dyn Fn(&str)>").expect("the content view's IPC handler");
+        let rest = &MAIN_RS[start..];
+        &rest[..rest.find("\n    });").expect("the end of the content handler")]
+    }
+
+    fn arm(name: &str) -> &'static str {
+        let handler = content_handler();
+        let at = handler.find(&format!("IpcMessage::{name} ")).unwrap_or_else(|| panic!("the {name} arm"));
+        let rest = &handler[at..];
+        let end = rest[1..].find("IpcMessage::").map(|i| i + 1).unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn inspector_data_from_a_content_page_is_read_before_it_is_forwarded() {
+        for (name, reader) in [
+            ("InspectorDomTreeResult", "inspector_payload::dom_tree("),
+            ("InspectorElementStylesResult", "inspector_payload::element_styles("),
+            ("InspectorElementPicked", "inspector_payload::element_styles("),
+            ("InspectorConsoleMessage", "inspector_payload::console_entry("),
+        ] {
+            assert!(arm(name).contains(reader), "{name} must go through {reader}");
+        }
     }
 }
