@@ -1180,6 +1180,11 @@ fn js_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
 }
 
+/// The chrome's script calling `hiwaveChrome.<method>` with `text` (a page's title or URL).
+fn chrome_update_script(method: &str, text: &str) -> String {
+    format!("if(window.hiwaveChrome) {{ hiwaveChrome.{}({}); }}", method, js_string(text))
+}
+
 /// The Inspector panel's script for an element picked in the content
 /// page: select it by `path` and show `styles_json`.
 fn inspector_picked_script(path: &str, styles_json: &str) -> String {
@@ -1998,17 +2003,31 @@ fn main() {
                     IpcMessage::FindInPageResult { result } => {
                         let _ = content_proxy_ipc.send_event(UserEvent::FindInPageResult(result.clone()));
                     }
-                    // Inspector data from the injected script in the page (I1b)
+                    // Inspector data from the injected script in the page (I1b). The page can post
+                    // these itself: each payload is read into the shape the injected scripts send,
+                    // and one that does not fit is dropped (upstream SEC1b).
                     IpcMessage::InspectorDomTreeResult { tree } => {
-                        let json = serde_json::to_string(tree).unwrap_or_else(|_| "null".to_string());
+                        let Some(tree) = ipc::inspector_payload::dom_tree(tree) else {
+                            warn!("inspector: dropped a malformed DOM tree from the content page");
+                            return;
+                        };
+                        let json = serde_json::to_string(&tree).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendDomTree(json));
                     }
                     IpcMessage::InspectorElementStylesResult { styles } => {
-                        let json = serde_json::to_string(styles).unwrap_or_else(|_| "null".to_string());
+                        let Some(styles) = ipc::inspector_payload::element_styles(styles) else {
+                            warn!("inspector: dropped malformed element styles from the content page");
+                            return;
+                        };
+                        let json = serde_json::to_string(&styles).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendElementStyles(json));
                     }
                     IpcMessage::InspectorElementPicked { path, styles } => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorElementPicked { path: path.clone(), styles: styles.clone() });
+                        let Some(styles) = ipc::inspector_payload::element_styles(styles) else {
+                            warn!("inspector: dropped a malformed picked element from the content page");
+                            return;
+                        };
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorElementPicked { path: path.clone(), styles });
                     }
                     IpcMessage::InspectorPickerStopped => {
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorPickerStopped);
@@ -2017,7 +2036,11 @@ fn main() {
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectElement { path: path.clone() });
                     }
                     IpcMessage::InspectorConsoleMessage { entry } => {
-                        let json = serde_json::to_string(entry).unwrap_or_else(|_| "null".to_string());
+                        let Some(entry) = ipc::inspector_payload::console_entry(entry) else {
+                            warn!("inspector: dropped a malformed console line from the content page");
+                            return;
+                        };
+                        let json = serde_json::to_string(&entry).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorConsoleMessage(json));
                     }
                     IpcMessage::InspectorConsoleClear => {
@@ -2801,10 +2824,7 @@ fn main() {
                                 format!("https://duckduckgo.com/?q={}", urlencoding::encode(&url))
                             };
                             content_for_events.load_url(&full_url);
-                            let script = format!(
-                                "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
-                                full_url.replace("'", "\\'")
-                            );
+                            let script = chrome_update_script("updateUrl", &full_url);
                             chrome_for_events.evaluate_script(&script);
                         }
                     }
@@ -2848,10 +2868,7 @@ fn main() {
                                     error!("Failed to persist workspace state: {}", e);
                                 }
                             }
-                            let script = format!(
-                                "if(window.hiwaveChrome) {{ hiwaveChrome.updateTitle('{}'); }}",
-                                title.replace("'", "\\'")
-                            );
+                            let script = chrome_update_script("updateTitle", &title);
                             chrome_for_events.evaluate_script(&script);
                             sync_tabs_to_chrome(&state_for_events, &chrome_for_events);
                             // Also sync workspaces so sidebar tab info updates
@@ -2859,10 +2876,7 @@ fn main() {
                         }
                     }
                     UserEvent::UpdateUrl(url) => {
-                        let script = format!(
-                            "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
-                            url.replace("'", "\\'")
-                        );
+                        let script = chrome_update_script("updateUrl", &url);
                         chrome_for_events.evaluate_script(&script);
                         sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                     }
@@ -3162,8 +3176,8 @@ fn main() {
                             return;
                         }
                         let script = format!(
-                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement('{}'); }}",
-                            path.replace("'", "\\'")
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement({}); }}",
+                            js_string(&path)
                         );
                         let _ = content_for_events.evaluate_script(&script);
                     }
@@ -3199,8 +3213,8 @@ fn main() {
                     }
                     UserEvent::InspectorScrollToElement { path } => {
                         let script = format!(
-                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.scrollToElement('{}'); }}",
-                            path.replace("'", "\\'")
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.scrollToElement({}); }}",
+                            js_string(&path)
                         );
                         let _ = content_for_events.evaluate_script(&script);
                     }
@@ -3227,14 +3241,14 @@ fn main() {
                         let script = format!(r#"
                             (function() {{
                                 if (window.__hiwaveInspector) {{
-                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    const styles = window.__hiwaveInspector.getElementStyles({});
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_element_styles_result',
                                         styles: styles
                                     }}));
                                 }}
                             }})();
-                        "#, path.replace("\\", "\\\\").replace("'", "\\'"));
+                        "#, js_string(&path));
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::InspectorExpand { path } => {
@@ -3245,19 +3259,19 @@ fn main() {
                         // Open inspector and select the element
                         let _ = proxy.send_event(UserEvent::OpenInspector);
                         // Delay the selection to allow inspector to initialize
-                        let path_escaped = path.replace("'", "\\'");
+                        let path_literal = js_string(&path);
                         let script = format!(r#"
                             setTimeout(() => {{
                                 if (window.__hiwaveInspector) {{
-                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    const styles = window.__hiwaveInspector.getElementStyles({});
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_element_picked',
-                                        path: '{}',
+                                        path: {},
                                         styles: styles
                                     }}));
                                 }}
                             }}, 200);
-                        "#, path_escaped, path_escaped);
+                        "#, path_literal, path_literal);
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     // Console events
@@ -3281,11 +3295,11 @@ fn main() {
                             return;
                         }
                         // Execute JavaScript in content webview
-                        let escaped_code = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
+                        let code_literal = js_string(&code);
                         let script = format!(r#"
                             (function() {{
                                 try {{
-                                    const result = eval('{}');
+                                    const result = eval({});
                                     const serialized = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_console_message',
@@ -3310,7 +3324,7 @@ fn main() {
                                     }}));
                                 }}
                             }})();
-                        "#, escaped_code);
+                        "#, code_literal);
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::ExpandShelf => {
@@ -4984,6 +4998,16 @@ mod ipc_shape_tests {
         assert!(odd.starts_with("unknown: "), "{odd}");
     }
 
+    /// A page's title or URL reaches the chrome's script as one string literal, whatever it holds.
+    #[test]
+    fn a_page_title_reaches_the_chrome_script_as_one_string_literal() {
+        for title in ["it's", "ends in a backslash \\", "a\\'); window.__flag = 1; //", "two\nlines\r\u{2028}"] {
+            let script = super::chrome_update_script("updateTitle", title);
+            let literal = serde_json::to_string(title).unwrap();
+            assert_eq!(script, format!("if(window.hiwaveChrome) {{ hiwaveChrome.updateTitle({literal}); }}"), "{title:?}");
+        }
+    }
+
     /// A path with quotes, a backslash or line breaks reaches the script as one string literal.
     #[test]
     fn the_picked_path_is_one_string_literal() {
@@ -5291,5 +5315,54 @@ mod engine_test_turn_pin_tests {
             }
         }
         assert!(missing.is_empty(), "build an engine without the turn: {missing:?}");
+    }
+}
+
+
+/// Text a page controls (its title and URL, an element path, console input) reaches a script the app
+/// builds only as a `js_string` literal; and the inspector data a content page posts is read into the
+/// shape the injected scripts send before it is forwarded (`ipc::inspector_payload`), as upstream.
+#[cfg(all(test, not(feature = "native-linux")))]
+mod script_string_tests {
+    const MAIN_RS: &str = include_str!("main.rs");
+
+    /// main.rs without its test modules.
+    fn app_code() -> &'static str {
+        &MAIN_RS[..MAIN_RS.find("\n#[cfg(test)]\nmod ").expect("the first test module")]
+    }
+
+    #[test]
+    fn no_script_is_built_by_escaping_quotes_by_hand() {
+        let code = app_code();
+        for (n, line) in code.lines().enumerate() {
+            assert!(!line.contains(r#".replace("'", "\\'")"#), "main.rs:{}: {}", n + 1, line.trim());
+            assert!(!line.contains("('{}')"), "main.rs:{}: {}", n + 1, line.trim());
+        }
+    }
+
+    fn content_handler() -> &'static str {
+        let start = MAIN_RS.find("let content_ipc: std::rc::Rc<dyn Fn(&str)>").expect("the content view's IPC handler");
+        let rest = &MAIN_RS[start..];
+        &rest[..rest.find("\n    });").expect("the end of the content handler")]
+    }
+
+    fn arm(name: &str) -> &'static str {
+        let handler = content_handler();
+        let at = handler.find(&format!("IpcMessage::{name} ")).unwrap_or_else(|| panic!("the {name} arm"));
+        let rest = &handler[at..];
+        let end = rest[1..].find("IpcMessage::").map(|i| i + 1).unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn inspector_data_from_a_content_page_is_read_before_it_is_forwarded() {
+        for (name, reader) in [
+            ("InspectorDomTreeResult", "inspector_payload::dom_tree("),
+            ("InspectorElementStylesResult", "inspector_payload::element_styles("),
+            ("InspectorElementPicked", "inspector_payload::element_styles("),
+            ("InspectorConsoleMessage", "inspector_payload::console_entry("),
+        ] {
+            assert!(arm(name).contains(reader), "{name} must go through {reader}");
+        }
     }
 }
