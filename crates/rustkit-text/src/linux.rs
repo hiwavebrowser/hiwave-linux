@@ -1087,6 +1087,29 @@ mod weight_tests {
         assert_eq!(sfnt_bytes(b"wOF2junk"), b"wOF2junk".to_vec());
     }
 
+    /// Chrome 148 on Linux picks a fallback face by Emoji_Presentation, not by block: the shield
+    /// (U+1F6E1), the wastebasket (U+1F5D1) and the gear (U+2699) default to TEXT presentation and
+    /// take a text face (Noto Sans Symbols2, Noto Sans Symbols2, DejaVu Sans; measured with
+    /// CSS.getPlatformFontsForNode 2026-11-19), while the no-entry sign (U+1F6AB) is emoji.
+    #[test]
+    fn a_text_presentation_symbol_takes_a_text_face_not_the_color_emoji_one() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let missing: Vec<&str> = ["Noto Color Emoji", "Noto Sans Symbols2", "DejaVu Sans"]
+            .into_iter()
+            .filter(|f| b.resolve_family([*f]) != *f)
+            .collect();
+        if !missing.is_empty() {
+            eprintln!("skipped: fonts not installed: {missing:?}");
+            return;
+        }
+        let primary = b.resolve_family(["Liberation Sans"]);
+        let d = desc(&primary, 14.0, 400);
+        assert_eq!(b.source_descriptor('\u{1F6E1}', &d).family, "Noto Sans Symbols2", "shield");
+        assert_eq!(b.source_descriptor('\u{1F5D1}', &d).family, "Noto Sans Symbols2", "wastebasket");
+        assert_eq!(b.source_descriptor('\u{2699}', &d).family, "DejaVu Sans", "gear");
+        assert_eq!(b.source_descriptor('\u{1F6AB}', &d).family, "Noto Color Emoji", "no-entry is emoji");
+    }
+
     #[test]
     fn an_emoji_has_an_advance_and_color_artwork_when_the_font_is_installed() {
         let mut b = LinuxTextBackend::new().unwrap();
