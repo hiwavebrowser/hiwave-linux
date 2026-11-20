@@ -871,6 +871,31 @@ fn content_new_tab_url_allowed(url: Option<&str>) -> bool {
     }
 }
 
+/// May a page navigate the content view to `url`? The browser's own pages (`hiwave:`) open only from
+/// the browser's UI: a page that navigates to one is refused, as Chrome refuses a page's
+/// navigation to chrome:// ("Not allowed to load local resource").
+pub(crate) fn page_navigation_allowed(url: &str) -> bool {
+    let _ = url;
+    true
+}
+
+/// What the content view opens at startup for the restored active tab's URL.
+#[cfg(not(feature = "native-linux"))]
+#[derive(Debug, PartialEq, Eq)]
+enum StartPage {
+    /// The start page the view was built with (the new-tab page, or a browser page it has no loader for).
+    Keep,
+    About,
+    Report,
+    /// A web page, loaded by URL.
+    Url,
+}
+
+#[cfg(not(feature = "native-linux"))]
+fn start_page(url: &str) -> StartPage {
+    if is_new_tab_url(url) { StartPage::Keep } else { StartPage::Url }
+}
+
 #[cfg(not(feature = "native-linux"))]
 fn is_new_tab_url(url: &str) -> bool {
     url == "about:blank" || url == NEW_TAB_URL || url.starts_with("data:text/html")
@@ -4987,6 +5012,53 @@ mod content_ipc_scope_2_tests {
         let tab = handler.find("IpcMessage::CreateTab").expect("the new tab it opens");
         let check = handler.find("content_new_tab_url_allowed(Some(").unwrap_or(usize::MAX);
         assert!(check < tab, "the new-window handler opens a tab without checking its URL");
+    }
+
+    /// A page's navigation to a browser page is refused whatever its case or leading blanks; web,
+    /// blank and data URLs are not this check's business.
+    #[test]
+    fn a_page_cannot_navigate_to_the_browsers_own_pages() {
+        for bad in ["hiwave://report", "hiwave://about", "HIWAVE://About", "  hiwave://report", "\t\nhiwave:newtab", "hiwave:x"] {
+            assert!(!super::page_navigation_allowed(bad), "{bad:?}");
+        }
+        for ok in ["https://example.com/", "http://a.test/hiwave://x", "about:blank", "data:text/html,x", "file:///tmp/a.html"] {
+            assert!(super::page_navigation_allowed(ok), "{ok:?}");
+        }
+    }
+
+    /// A tab restored on About or Report reopens through the browser's own loader (not load_url,
+    /// which the page-navigation check refuses); other browser URLs keep the start page.
+    #[test]
+    fn a_restored_browser_page_opens_through_the_browsers_own_loader() {
+        use super::{start_page, StartPage::*};
+        assert_eq!(start_page("hiwave://newtab"), Keep);
+        assert_eq!(start_page("about:blank"), Keep);
+        assert_eq!(start_page("hiwave://about"), About);
+        assert_eq!(start_page("hiwave://report"), Report);
+        assert_eq!(start_page("hiwave://settings"), Keep);
+        assert_eq!(start_page("https://example.com/"), Url);
+    }
+
+    /// Each door a page navigates through checks first: the WebKit view's navigation handler (which
+    /// no longer serves About or Report itself), and (below) the RustKit view's script and link
+    /// navigations, which otherwise reach the browser's own Navigate.
+    #[test]
+    fn the_webkit_views_navigation_handler_checks_the_url_first() {
+        let start = MAIN_RS.find(".with_navigation_handler(move |url| {").expect("the navigation handler");
+        let handler = &MAIN_RS[start..];
+        let handler = &handler[..handler.find(".with_on_page_load_handler(").expect("its end")];
+        let check = handler.find("page_navigation_allowed(&url)").unwrap_or(usize::MAX);
+        assert!(check < handler.find("is_new_tab_url(&url)").expect("the new-tab arm"), "navigation handler");
+        assert!(!handler.contains("LoadAboutPage") && !handler.contains("LoadReportPage"), "the handler serves a browser page");
+    }
+
+    #[test]
+    fn the_rustkit_views_page_navigations_check_the_url_first() {
+        let pump = include_str!("rustkit_content.rs");
+        let taken = pump.find("take_script_navigation()").expect("the RustKit view's page navigations");
+        let pump = &pump[taken..];
+        let check = pump.find("page_navigation_allowed(&url)").unwrap_or(usize::MAX);
+        assert!(check < pump.find("UserEvent::Navigate(url)").expect("its Navigate"), "RustKit page navigations");
     }
 
     #[test]
