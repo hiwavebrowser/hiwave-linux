@@ -1,0 +1,163 @@
+{
+  "width": 1600,
+  "height": 1000,
+  "diffPercent": 0.04575,
+  "totalDiffPixels": 1600000,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "unknown": 94.66231250000003,
+    "form_control": 1.127875
+  },
+  "topContributors": [
+    {
+      "selector": "html > body.focus-mode",
+      "tag": "body",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1600,
+        "height": 1000
+      },
+      "diff_pixels": 1399684,
+      "contribution_percent": 87.48025,
+      "element_diff_percent": 87.48025,
+      "corner_ratio": 0.0001028803644251131,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#tabs",
+      "tag": "div",
+      "rect": {
+        "x": 156.0625,
+        "y": 3,
+        "width": 1399.9375,
+        "height": 37
+      },
+      "diff_pixels": 34056,
+      "contribution_percent": 2.1285,
+      "element_diff_percent": 65.74810892860806,
+      "corner_ratio": 0.01127554615926709,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 164,
+        "y": 49.5,
+        "width": 1319.328125,
+        "height": 36
+      },
+      "diff_pixels": 29438,
+      "contribution_percent": 1.839875,
+      "element_diff_percent": 61.98020088613075,
+      "corner_ratio": 0.020381819417079963,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 44,
+        "width": 1600,
+        "height": 48
+      },
+      "diff_pixels": 20958,
+      "contribution_percent": 1.309875,
+      "element_diff_percent": 27.2890625,
+      "corner_ratio": 0.013741769252791297,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#urlInput",
+      "tag": "input",
+      "rect": {
+        "x": 179,
+        "y": 60.5,
+        "width": 1289.328125,
+        "height": 14
+      },
+      "diff_pixels": 18046,
+      "contribution_percent": 1.127875,
+      "element_diff_percent": 99.97455069864391,
+      "corner_ratio": 0.018619084561675717,
+      "likely_cause": "form_control"
+    },
+    {
+      "selector": "#focusHint",
+      "tag": "div",
+      "rect": {
+        "x": 648.765625,
+        "y": 944,
+        "width": 302.46875,
+        "height": 36
+      },
+      "diff_pixels": 9018,
+      "contribution_percent": 0.5636249999999999,
+      "element_diff_percent": 82.81847298274614,
+      "corner_ratio": 0.06387225548902195,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.chrome-main:nth-of-type(5) > div.tab-bar:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1600,
+        "height": 44
+      },
+      "diff_pixels": 7776,
+      "contribution_percent": 0.486,
+      "element_diff_percent": 11.045454545454545,
+      "corner_ratio": 0.032407407407407406,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > aside.sidebar collapsed:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
+      "tag": "section",
+      "rect": {
+        "x": 0,
+        "y": 327,
+        "width": 24,
+        "height": 391
+      },
+      "diff_pixels": 5296,
+      "contribution_percent": 0.331,
+      "element_diff_percent": 56.43648763853367,
+      "corner_ratio": 0.10876132930513595,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#focusProgressBar",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1600,
+        "height": 3
+      },
+      "diff_pixels": 4344,
+      "contribution_percent": 0.2715,
+      "element_diff_percent": 90.5,
+      "corner_ratio": 0.008287292817679558,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#focusRevealZone",
+      "tag": "div",
+      "rect": {
+        "x": 480,
+        "y": 0,
+        "width": 640,
+        "height": 10
+      },
+      "diff_pixels": 4027,
+      "contribution_percent": 0.2516875,
+      "element_diff_percent": 62.92187500000001,
+      "corner_ratio": 0.032778743481499874,
+      "likely_cause": "unknown"
+    }
+  ]
+}

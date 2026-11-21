@@ -1,0 +1,163 @@
+{
+  "width": 1280,
+  "height": 800,
+  "diffPercent": 0.23701171875000002,
+  "totalDiffPixels": 1024000,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "unknown": 88.32080078125003,
+    "form_control": 1.0240234375000001
+  },
+  "topContributors": [
+    {
+      "selector": "#chromeMain",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1060,
+        "height": 800
+      },
+      "diff_pixels": 704716,
+      "contribution_percent": 68.819921875,
+      "element_diff_percent": 83.10330188679245,
+      "corner_ratio": 0.00020433763388372054,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#rightDownloadsList",
+      "tag": "div",
+      "rect": {
+        "x": 1073,
+        "y": 191,
+        "width": 195,
+        "height": 597
+      },
+      "diff_pixels": 102051,
+      "contribution_percent": 9.96591796875,
+      "element_diff_percent": 87.66138384228836,
+      "corner_ratio": 0.005644236705176824,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > aside.right-sidebar:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 1061,
+        "y": 143,
+        "width": 219,
+        "height": 657
+      },
+      "diff_pixels": 20448,
+      "contribution_percent": 1.996875,
+      "element_diff_percent": 14.211546881841496,
+      "corner_ratio": 0.028169014084507043,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#tabs",
+      "tag": "div",
+      "rect": {
+        "x": 156.0625,
+        "y": 3,
+        "width": 859.9375,
+        "height": 37
+      },
+      "diff_pixels": 18103,
+      "contribution_percent": 1.7678710937500002,
+      "element_diff_percent": 56.89602677755886,
+      "corner_ratio": 0.021211953819808872,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 164,
+        "y": 49.5,
+        "width": 779.328125,
+        "height": 36
+      },
+      "diff_pixels": 17558,
+      "contribution_percent": 1.7146484375,
+      "element_diff_percent": 62.582397141412315,
+      "corner_ratio": 0.03417245699965828,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 44,
+        "width": 1060,
+        "height": 48
+      },
+      "diff_pixels": 14478,
+      "contribution_percent": 1.4138671875,
+      "element_diff_percent": 28.455188679245285,
+      "corner_ratio": 0.01989225031081641,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#urlInput",
+      "tag": "input",
+      "rect": {
+        "x": 179,
+        "y": 60.5,
+        "width": 749.328125,
+        "height": 14
+      },
+      "diff_pixels": 10486,
+      "contribution_percent": 1.0240234375000001,
+      "element_diff_percent": 99.95621077215006,
+      "corner_ratio": 0.03204272363150868,
+      "likely_cause": "form_control"
+    },
+    {
+      "selector": "body > aside.right-sidebar:nth-of-type(2) > div.right-sidebar-header:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 1061,
+        "y": 0,
+        "width": 219,
+        "height": 49
+      },
+      "diff_pixels": 9693,
+      "contribution_percent": 0.94658203125,
+      "element_diff_percent": 90.32708974000559,
+      "corner_ratio": 0.059424326833797586,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#focusHint",
+      "tag": "div",
+      "rect": {
+        "x": 488.765625,
+        "y": 744,
+        "width": 302.46875,
+        "height": 36
+      },
+      "diff_pixels": 9018,
+      "contribution_percent": 0.8806640625000001,
+      "element_diff_percent": 82.81847298274614,
+      "corner_ratio": 0.06387225548902195,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.chrome-main:nth-of-type(5) > div.tab-bar:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1060,
+        "height": 44
+      },
+      "diff_pixels": 8340,
+      "contribution_percent": 0.814453125,
+      "element_diff_percent": 17.881646655231563,
+      "corner_ratio": 0.034532374100719423,
+      "likely_cause": "unknown"
+    }
+  ]
+}

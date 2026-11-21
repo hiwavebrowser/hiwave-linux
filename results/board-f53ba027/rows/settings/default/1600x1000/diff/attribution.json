@@ -1,0 +1,162 @@
+{
+  "width": 1600,
+  "height": 1000,
+  "diffPercent": 0.390125,
+  "totalDiffPixels": 1600000,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "unknown": 76.61250000000001
+  },
+  "topContributors": [
+    {
+      "selector": "html > body",
+      "tag": "body",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1600,
+        "height": 3063.578125
+      },
+      "diff_pixels": 922400,
+      "contribution_percent": 57.65,
+      "element_diff_percent": 18.8178651393132,
+      "corner_ratio": 0.00031222896790980055,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.container",
+      "tag": "div",
+      "rect": {
+        "x": 450,
+        "y": 32,
+        "width": 700,
+        "height": 2999.578125
+      },
+      "diff_pixels": 60200,
+      "contribution_percent": 3.7624999999999997,
+      "element_diff_percent": 2.8670698483640926,
+      "corner_ratio": 0,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.container > div.section:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 450,
+        "y": 118.390625,
+        "width": 700,
+        "height": 256.5625
+      },
+      "diff_pixels": 47240,
+      "contribution_percent": 2.9525,
+      "element_diff_percent": 26.303810683835042,
+      "corner_ratio": 0.012193056731583404,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.container > div.section:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 450,
+        "y": 390.953125,
+        "width": 700,
+        "height": 256.5625
+      },
+      "diff_pixels": 47240,
+      "contribution_percent": 2.9525,
+      "element_diff_percent": 26.303810683835042,
+      "corner_ratio": 0.012193056731583404,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.container > div.section:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 450,
+        "y": 663.515625,
+        "width": 700,
+        "height": 132.1875
+      },
+      "diff_pixels": 42240,
+      "contribution_percent": 2.64,
+      "element_diff_percent": 45.64944275582574,
+      "corner_ratio": 0.013636363636363636,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.container > div.section:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 450,
+        "y": 811.703125,
+        "width": 700,
+        "height": 539.3125
+      },
+      "diff_pixels": 31280,
+      "contribution_percent": 1.955,
+      "element_diff_percent": 8.285681174776087,
+      "corner_ratio": 0.009207161125319692,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.container > h1",
+      "tag": "h1",
+      "rect": {
+        "x": 450,
+        "y": 32,
+        "width": 700,
+        "height": 32
+      },
+      "diff_pixels": 22400,
+      "contribution_percent": 1.4000000000000001,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.025714285714285714,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.container > div.section:nth-of-type(4) > div.setting-row:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 470,
+        "y": 862.703125,
+        "width": 660,
+        "height": 62.1875
+      },
+      "diff_pixels": 18040,
+      "contribution_percent": 1.1275,
+      "element_diff_percent": 43.95309882747069,
+      "corner_ratio": 0.031929046563192905,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 470,
+        "y": 293.765625,
+        "width": 660,
+        "height": 61.1875
+      },
+      "diff_pixels": 17380,
+      "contribution_percent": 1.0862500000000002,
+      "element_diff_percent": 43.037112700034044,
+      "corner_ratio": 0.033141542002301495,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.container > div.section:nth-of-type(3) > div.setting-row:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 470,
+        "y": 714.515625,
+        "width": 660,
+        "height": 61.1875
+      },
+      "diff_pixels": 17380,
+      "contribution_percent": 1.0862500000000002,
+      "element_diff_percent": 43.037112700034044,
+      "corner_ratio": 0.033141542002301495,
+      "likely_cause": "unknown"
+    }
+  ]
+}

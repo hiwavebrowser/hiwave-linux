@@ -1,0 +1,36 @@
+{
+  "status": "ok",
+  "browser": "148.0.7778.216",
+  "browser_path": "/home/petec/repos/gate-runner/tools/cft/chrome-linux64/chrome",
+  "viewport": {
+    "width": 1280,
+    "height": 800
+  },
+  "page_errors": [
+    "Cannot read properties of null (reading 'appendChild')"
+  ],
+  "console_errors": [],
+  "action_results": [
+    {
+      "step": 0,
+      "type": "key",
+      "status": "ok",
+      "elapsed_ms": 8
+    }
+  ],
+  "ipc_calls": [
+    "get_sidebar_width",
+    "get_blocklist",
+    "set_sidebar_width",
+    "set_sidebar_width",
+    "get_shelf",
+    "toggle_focus_mode",
+    "set_sidebar_open"
+  ],
+  "animation_frames": {
+    "frames": 1,
+    "settled": true,
+    "capped": false
+  },
+  "fixture_errors": []
+}

@@ -1,0 +1,163 @@
+{
+  "width": 1280,
+  "height": 800,
+  "diffPercent": 0.19443359375000002,
+  "totalDiffPixels": 1024000,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "unknown": 92.02597656249999,
+    "form_control": 2.6833984375
+  },
+  "topContributors": [
+    {
+      "selector": "#console-output",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 66,
+        "width": 1280,
+        "height": 703
+      },
+      "diff_pixels": 761600,
+      "contribution_percent": 74.375,
+      "element_diff_percent": 84.63726884779517,
+      "corner_ratio": 0.00037815126050420167,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.console-panel active:nth-of-type(4) > div.console-toolbar:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 33,
+        "width": 1280,
+        "height": 33
+      },
+      "diff_pixels": 37230,
+      "contribution_percent": 3.6357421874999996,
+      "element_diff_percent": 88.13920454545455,
+      "corner_ratio": 0.0128928283642224,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 33
+      },
+      "diff_pixels": 33580,
+      "contribution_percent": 3.279296875,
+      "element_diff_percent": 79.49810606060606,
+      "corner_ratio": 0.015038713519952352,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#console-input",
+      "tag": "input",
+      "rect": {
+        "x": 23.234375,
+        "y": 774,
+        "width": 1248.765625,
+        "height": 22
+      },
+      "diff_pixels": 27478,
+      "contribution_percent": 2.6833984375,
+      "element_diff_percent": 100.01876853392726,
+      "corner_ratio": 0.01921537229783827,
+      "likely_cause": "form_control"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.console-panel active:nth-of-type(4) > div.console-output:nth-of-type(3) > div.console-entry log:nth-of-type(2) > span.console-entry-content:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 68.171875,
+        "y": 70,
+        "width": 1199.828125,
+        "height": 18
+      },
+      "diff_pixels": 21600,
+      "contribution_percent": 2.109375,
+      "element_diff_percent": 100.01432496841996,
+      "corner_ratio": 0.02,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.console-panel active:nth-of-type(4) > div.console-output:nth-of-type(3) > div.console-entry info:nth-of-type(3) > span.console-entry-content:nth-of-type(3)",
+      "tag": "span",
+      "rect": {
+        "x": 92.171875,
+        "y": 97,
+        "width": 1175.828125,
+        "height": 18
+      },
+      "diff_pixels": 21168,
+      "contribution_percent": 2.0671874999999997,
+      "element_diff_percent": 100.01461735744755,
+      "corner_ratio": 0.02040816326530612,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.console-panel active:nth-of-type(4) > div.console-output:nth-of-type(3) > div.console-entry warn:nth-of-type(4) > span.console-entry-content:nth-of-type(3)",
+      "tag": "span",
+      "rect": {
+        "x": 95.171875,
+        "y": 124,
+        "width": 1172.828125,
+        "height": 18
+      },
+      "diff_pixels": 21114,
+      "contribution_percent": 2.0619140625,
+      "element_diff_percent": 100.01465474747206,
+      "corner_ratio": 0.020460358056265986,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.console-panel active:nth-of-type(4) > div.console-output:nth-of-type(3) > div.console-entry error:nth-of-type(5) > span.console-entry-content:nth-of-type(3)",
+      "tag": "span",
+      "rect": {
+        "x": 95.171875,
+        "y": 151,
+        "width": 1172.828125,
+        "height": 18
+      },
+      "diff_pixels": 21114,
+      "contribution_percent": 2.0619140625,
+      "element_diff_percent": 100.01465474747206,
+      "corner_ratio": 0.020460358056265986,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.console-panel active:nth-of-type(4) > div.console-output:nth-of-type(3) > div.console-entry warn:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 120,
+        "width": 1280,
+        "height": 27
+      },
+      "diff_pixels": 12470,
+      "contribution_percent": 1.2177734375,
+      "element_diff_percent": 36.082175925925924,
+      "corner_ratio": 0.04619085805934242,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.console-panel active:nth-of-type(4) > div.console-output:nth-of-type(3) > div.console-entry error:nth-of-type(5)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 147,
+        "width": 1280,
+        "height": 27
+      },
+      "diff_pixels": 12470,
+      "contribution_percent": 1.2177734375,
+      "element_diff_percent": 36.082175925925924,
+      "corner_ratio": 0.04619085805934242,
+      "likely_cause": "unknown"
+    }
+  ]
+}

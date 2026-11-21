@@ -1,0 +1,163 @@
+{
+  "width": 1600,
+  "height": 1000,
+  "diffPercent": 0.060312500000000005,
+  "totalDiffPixels": 1600000,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "unknown": 95.90887500000001,
+    "form_control": 3.795
+  },
+  "topContributors": [
+    {
+      "selector": "#commandResults",
+      "tag": "div",
+      "rect": {
+        "x": 16,
+        "y": 107,
+        "width": 1568,
+        "height": 881
+      },
+      "diff_pixels": 1362886,
+      "contribution_percent": 85.180375,
+      "element_diff_percent": 98.65919409761634,
+      "corner_ratio": 0.0003169744204577639,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 41,
+        "width": 1600,
+        "height": 959
+      },
+      "diff_pixels": 87136,
+      "contribution_percent": 5.446,
+      "element_diff_percent": 5.678832116788321,
+      "corner_ratio": 0.006610356224752111,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.shelf-header:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1600,
+        "height": 41
+      },
+      "diff_pixels": 63711,
+      "contribution_percent": 3.9819375,
+      "element_diff_percent": 97.1204268292683,
+      "corner_ratio": 0.009040824975278994,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#commandInput",
+      "tag": "input",
+      "rect": {
+        "x": 53,
+        "y": 54,
+        "width": 1518,
+        "height": 40
+      },
+      "diff_pixels": 60720,
+      "contribution_percent": 3.795,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.009486166007905139,
+      "likely_cause": "form_control"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-results:nth-of-type(2) > div.command-item selected:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 16,
+        "y": 107,
+        "width": 220.5625,
+        "height": 42
+      },
+      "diff_pixels": 5397,
+      "contribution_percent": 0.33731249999999996,
+      "element_diff_percent": 58.26013034854066,
+      "corner_ratio": 0.1056142301278488,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 16,
+        "y": 53,
+        "width": 1568,
+        "height": 42
+      },
+      "diff_pixels": 4940,
+      "contribution_percent": 0.30874999999999997,
+      "element_diff_percent": 7.501214771622935,
+      "corner_ratio": 0.11659919028340081,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-results:nth-of-type(2) > div.command-item:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 240.5625,
+        "y": 107,
+        "width": 220.578125,
+        "height": 42
+      },
+      "diff_pixels": 4488,
+      "contribution_percent": 0.2805,
+      "element_diff_percent": 48.44412511763932,
+      "corner_ratio": 0.12566844919786097,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-results:nth-of-type(2) > div.command-item:nth-of-type(2) > div.command-item-left > span.command-item-name:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 251.5625,
+        "y": 116,
+        "width": 198.578125,
+        "height": 13
+      },
+      "diff_pixels": 2574,
+      "contribution_percent": 0.160875,
+      "element_diff_percent": 99.70886773152884,
+      "corner_ratio": 0.12121212121212122,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-results:nth-of-type(2) > div.command-item:nth-of-type(2) > div.command-item-left > span.command-item-category:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 251.5625,
+        "y": 130,
+        "width": 198.578125,
+        "height": 10
+      },
+      "diff_pixels": 1980,
+      "contribution_percent": 0.12375000000000001,
+      "element_diff_percent": 99.70886773152884,
+      "corner_ratio": 0.12121212121212122,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-results:nth-of-type(2) > div.command-item selected:nth-of-type(1) > div.command-item-left > span.command-item-name:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 27,
+        "y": 116,
+        "width": 110.3125,
+        "height": 13
+      },
+      "diff_pixels": 1430,
+      "contribution_percent": 0.089375,
+      "element_diff_percent": 99.71671388101983,
+      "corner_ratio": 0.21818181818181817,
+      "likely_cause": "unknown"
+    }
+  ]
+}

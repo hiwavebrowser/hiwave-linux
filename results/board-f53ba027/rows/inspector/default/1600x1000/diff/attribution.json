@@ -1,0 +1,162 @@
+{
+  "width": 1600,
+  "height": 1000,
+  "diffPercent": 0.22200000000000003,
+  "totalDiffPixels": 1600000,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "unknown": 58.73275
+  },
+  "topContributors": [
+    {
+      "selector": "#dom-tree-container",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 33,
+        "width": 1245,
+        "height": 967
+      },
+      "diff_pixels": 571455,
+      "contribution_percent": 35.7159375,
+      "element_diff_percent": 47.46639089968976,
+      "corner_ratio": 0.0008399611517967294,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#styles-container",
+      "tag": "div",
+      "rect": {
+        "x": 1250,
+        "y": 84,
+        "width": 350,
+        "height": 916
+      },
+      "diff_pixels": 148050,
+      "contribution_percent": 9.253124999999999,
+      "element_diff_percent": 46.17903930131004,
+      "corner_ratio": 0.0032421479229989866,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1600,
+        "height": 33
+      },
+      "diff_pixels": 42796,
+      "contribution_percent": 2.67475,
+      "element_diff_percent": 81.05303030303031,
+      "corner_ratio": 0.010655201420693523,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1) > div.box-model:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 1262,
+        "y": 121,
+        "width": 326,
+        "height": 197
+      },
+      "diff_pixels": 26162,
+      "contribution_percent": 1.6351250000000002,
+      "element_diff_percent": 40.7368191585438,
+      "corner_ratio": 0.022016665392554088,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(1) > div.dom-children:nth-of-type(2) > div.dom-node-line dom-closing-tag:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 83.375,
+        "width": 1245,
+        "height": 21.1875
+      },
+      "diff_pixels": 26034,
+      "contribution_percent": 1.6271250000000002,
+      "element_diff_percent": 98.69424601059103,
+      "corner_ratio": 0.01290619958515787,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node-line dom-closing-tag:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 358.8125,
+        "width": 1245,
+        "height": 21.1875
+      },
+      "diff_pixels": 25262,
+      "contribution_percent": 1.578875,
+      "element_diff_percent": 95.76761322576442,
+      "corner_ratio": 0.019950914416910773,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(3) > div.dom-children:nth-of-type(2) > div.dom-node-line dom-closing-tag:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 464.75,
+        "width": 1245,
+        "height": 21.1875
+      },
+      "diff_pixels": 25129,
+      "contribution_percent": 1.5705625,
+      "element_diff_percent": 95.2634135361505,
+      "corner_ratio": 0.020056508416570498,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(1) > div.dom-node-line:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 41,
+        "width": 1245,
+        "height": 21.1875
+      },
+      "diff_pixels": 24996,
+      "contribution_percent": 1.56225,
+      "element_diff_percent": 94.7592138465366,
+      "corner_ratio": 0.012481997119539127,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(1) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node-line dom-closing-tag:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 231.6875,
+        "width": 1245,
+        "height": 21.1875
+      },
+      "diff_pixels": 24996,
+      "contribution_percent": 1.56225,
+      "element_diff_percent": 94.7592138465366,
+      "corner_ratio": 0.020163226116178587,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node-line dom-closing-tag:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 485.9375,
+        "width": 1245,
+        "height": 21.1875
+      },
+      "diff_pixels": 24844,
+      "contribution_percent": 1.55275,
+      "element_diff_percent": 94.18298562983497,
+      "corner_ratio": 0.020286588311061022,
+      "likely_cause": "unknown"
+    }
+  ]
+}

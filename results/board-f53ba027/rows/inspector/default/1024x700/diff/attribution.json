@@ -1,0 +1,162 @@
+{
+  "width": 1024,
+  "height": 700,
+  "diffPercent": 0.49553571428571425,
+  "totalDiffPixels": 716800,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "unknown": 39.06752232142857
+  },
+  "topContributors": [
+    {
+      "selector": "#dom-tree-container",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 33,
+        "width": 669,
+        "height": 667
+      },
+      "diff_pixels": 106371,
+      "contribution_percent": 14.839704241071427,
+      "element_diff_percent": 23.838080959520237,
+      "corner_ratio": 0.004512508108413007,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "#styles-container",
+      "tag": "div",
+      "rect": {
+        "x": 674,
+        "y": 84,
+        "width": 350,
+        "height": 616
+      },
+      "diff_pixels": 43050,
+      "contribution_percent": 6.005859375,
+      "element_diff_percent": 19.967532467532468,
+      "corner_ratio": 0.011149825783972125,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1) > div.box-model:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 686,
+        "y": 121,
+        "width": 326,
+        "height": 197
+      },
+      "diff_pixels": 26162,
+      "contribution_percent": 3.649832589285714,
+      "element_diff_percent": 40.7368191585438,
+      "corner_ratio": 0.022016665392554088,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1024,
+        "height": 33
+      },
+      "diff_pixels": 23788,
+      "contribution_percent": 3.318638392857143,
+      "element_diff_percent": 70.39535984848484,
+      "corner_ratio": 0.019169329073482427,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 674,
+        "y": 327,
+        "width": 350,
+        "height": 258
+      },
+      "diff_pixels": 14016,
+      "contribution_percent": 1.9553571428571428,
+      "element_diff_percent": 15.52159468438538,
+      "corner_ratio": 0.0410958904109589,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 674,
+        "y": 92,
+        "width": 350,
+        "height": 235
+      },
+      "diff_pixels": 13790,
+      "contribution_percent": 1.923828125,
+      "element_diff_percent": 16.76595744680851,
+      "corner_ratio": 0.04176939811457578,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(1) > div.dom-children:nth-of-type(2) > div.dom-node-line dom-closing-tag:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 83.375,
+        "width": 669,
+        "height": 21.1875
+      },
+      "diff_pixels": 13362,
+      "contribution_percent": 1.8641183035714284,
+      "element_diff_percent": 94.26829106975144,
+      "corner_ratio": 0.025145936237090254,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel styles-panel:nth-of-type(3) > div.panel-content:nth-of-type(2) > div:nth-of-type(2) > div.styles-section:nth-of-type(1) > div.box-model:nth-of-type(2) > div.box-model-diagram",
+      "tag": "div",
+      "rect": {
+        "x": 738.78125,
+        "y": 133,
+        "width": 220.4375,
+        "height": 173
+      },
+      "diff_pixels": 13298,
+      "contribution_percent": 1.8551897321428572,
+      "element_diff_percent": 34.87022490416621,
+      "corner_ratio": 0.04331478417807189,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node-line dom-closing-tag:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 358.8125,
+        "width": 669,
+        "height": 21.1875
+      },
+      "diff_pixels": 13166,
+      "contribution_percent": 1.8367745535714286,
+      "element_diff_percent": 92.88552014850677,
+      "corner_ratio": 0.03828041926173477,
+      "likely_cause": "unknown"
+    },
+    {
+      "selector": "body > div.inspector-container > div.inspector-main:nth-of-type(2) > div.panel elements-panel:nth-of-type(1) > div.panel-content > div.dom-tree:nth-of-type(3) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(2) > div.dom-children:nth-of-type(2) > div.dom-node expanded:nth-of-type(3) > div.dom-children:nth-of-type(2) > div.dom-node-line dom-closing-tag:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 464.75,
+        "width": 669,
+        "height": 21.1875
+      },
+      "diff_pixels": 13033,
+      "contribution_percent": 1.8182198660714286,
+      "element_diff_percent": 91.94721130909075,
+      "corner_ratio": 0.03867106575615745,
+      "likely_cause": "unknown"
+    }
+  ]
+}
