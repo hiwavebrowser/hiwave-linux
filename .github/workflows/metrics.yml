@@ -40,6 +40,66 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
+  script-guards:
+    # The Python guards in scripts/tests/ ran on Linux only when someone ran them by hand, so a
+    # synced guard could break unseen: on 2026-11-21 three real-site guards were failing on
+    # develop (the tests had been synced, Linux's realsite_board.py had not). Same lane as
+    # hiwave-macos's script-guards: globbed, so a new guard joins by existing.
+    #
+    # On Linux some guards skip by design, and say so: the two that check hiwave-macos's
+    # parity.yml lanes (Linux has no parity.yml), parity_freeze without a pinned Chrome,
+    # timestable_board without a parity-capture build, wpt_tier1 without third_party/wpt,
+    # and a Windows-only drive-path case.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install guard deps
+        # pyyaml: two guards import it at module level (they then skip on Linux).
+        # numpy only in the reference step below, never here: the guards and the scripts
+        # must keep running without it.
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Run every instrument guard
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(scripts/tests/test_*.py)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No guard files matched. This is not a pass: the suite moved."
+            exit 1
+          fi
+          failed=0
+          for t in "${files[@]}"; do
+            echo "::group::$t"
+            if python3 "$t"; then echo "PASS $t"; else echo "FAIL $t"; failed=1; fi
+            echo "::endgroup::"
+          done
+          exit $failed
+
+      - name: Background fraction against its numpy reference
+        # As hiwave-macos: numpy only as a reference, in its own venv; REALSITE_NUMPY_REFERENCE=1
+        # turns a skip (numpy missing) into a failure.
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/numpy-ref"
+          "$RUNNER_TEMP/numpy-ref/bin/pip" install --disable-pip-version-check numpy
+          REALSITE_NUMPY_REFERENCE=1 "$RUNNER_TEMP/numpy-ref/bin/python" scripts/tests/test_realsite_background_fraction.py
+
   collect-metrics:
     runs-on: ubuntu-latest
     # 150, not 60: the first hosted run of the whole job (2026-11-10, #130) was cancelled at 60 min inside
