@@ -129,10 +129,22 @@ def load_ppm(path):
 
 
 def non_background_fraction(ppm_path):
-    """Fraction of pixels that differ (any channel > 8) from the dominant colour."""
-    import numpy as np
+    """Fraction of pixels that differ (any channel > 8) from the dominant colour.
 
+    The dominant colour is the most frequent; on a tie, the smallest packed RGB (numpy's unique
+    + argmax). Without numpy (the Linux gate box has none) the same value is computed in Python."""
     w, h, rgb = load_ppm(ppm_path)
+    try:
+        import numpy as np
+    except ModuleNotFoundError:
+        counts = {}
+        for i in range(0, w * h * 3, 3):
+            key = rgb[i : i + 3]
+            counts[key] = counts.get(key, 0) + 1
+        dom = min(counts, key=lambda k: (-counts[k], k))
+        off = sum(n for k, n in counts.items()
+                  if max(abs(k[0] - dom[0]), abs(k[1] - dom[1]), abs(k[2] - dom[2])) > 8)
+        return off / (w * h)
     px = np.frombuffer(rgb, dtype=np.uint8).reshape(h * w, 3)
     packed = (px[:, 0].astype(np.uint32) << 16) | (px[:, 1].astype(np.uint32) << 8) | px[:, 2]
     vals, counts = np.unique(packed, return_counts=True)
