@@ -88,7 +88,10 @@ const THROUGH: &[(&str, &str, &str)] = &[
     ("holds a float", "<div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"><div style=\"float:left;width:5px;height:5px\"></div></div><div id=n style=\"height:10px;\"></div>", "50 50 -"),
     ("percent margin", "<div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:1% 0\"></div><div id=n style=\"height:10px;\"></div>", "50 50 -"),
     ("relative with an offset", "<div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0;position:relative;top:5px\"></div><div id=n style=\"height:10px;\"></div>", "55 50 -"),
-    ("in an inline-block parent", "<div id=p style=\"display:inline-block;width:100px\"><div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div></div><div id=n style=\"height:10px;\"></div>", "50 54 50"),
+    ("in an inline-block parent", "<div id=p style=\"display:inline-block;width:100px\"><div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div></div><div id=n style=\"height:10px;\"></div>",
+        // Chrome 148 on Linux: 55 (the inline-block's line is 1px taller: Liberation Serif's
+        // descent is 4 after Blink's borrow; measured 2026-11-20, CfT 148.0.7778.216). macOS: 54.
+        if cfg!(target_os = "linux") { "50 55 50" } else { "50 54 50" }),
     ("in a flex item", "<div style=\"display:flex\"><div id=p style=\"width:100px\"><div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div><div id=n style=\"height:10px;\"></div></div></div>", "50 50 60"),
     ("a flex container child", "<div id=p style=\"display:flex;flex-direction:column\"><div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div><div id=n style=\"height:10px;\"></div></div>", "62 74 84"),
     ("in a table cell", "<table style=\"border-spacing:0\"><tr><td id=p style=\"padding:0\"><div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div><div id=n style=\"height:10px;\"></div></td></tr></table>", "50 50 60"),

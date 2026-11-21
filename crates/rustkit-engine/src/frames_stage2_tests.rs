@@ -455,9 +455,17 @@ window.boxes = function () { return ['a','b','c'].map(function (id) { var e = do
 </script></body>";
     let mut page = Page::load(true, page);
     page.turns_until("['a','b','c'].every(function (id) { return document.getElementById(id).contentWindow; })", Duration::from_secs(5));
+    // Chrome 148 on Linux puts c at y 159, not 158: the first line holds the frames on its
+    // baseline above the default serif's descent, 4 there after Blink's borrow (measured
+    // 2026-11-20, CfT 148.0.7778.216 on Linux). The numbers above are Chrome on macOS.
+    let want = if cfg!(target_os = "linux") {
+        r#"String("0,0,304,154,2px,300x150 | 304,70,204,84,2px,200x80 | 0,159,324,204,2px,320x200")"#
+    } else {
+        r#"String("0,0,304,154,2px,300x150 | 304,70,204,84,2px,200x80 | 0,158,324,204,2px,320x200")"#
+    };
     assert_eq!(
         page.js("boxes()"),
-        r#"String("0,0,304,154,2px,300x150 | 304,70,204,84,2px,200x80 | 0,158,324,204,2px,320x200")"#
+        want
     );
 }
 

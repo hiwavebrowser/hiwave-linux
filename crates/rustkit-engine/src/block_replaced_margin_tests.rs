@@ -59,7 +59,18 @@ fn check(label: &str) {
         .trim_start_matches("String(\"")
         .trim_end_matches("\")")
         .to_string();
-    let want = case["want"].as_str().unwrap();
+    // The receipt was measured by Chrome on macOS. Chrome 148 on Linux gives other numbers where
+    // a line box holds a replaced element: its default serif (Liberation Serif 16px) has descent
+    // 4, after Blink's borrow from a rounded-down descent, so such a line is 1px taller (measured
+    // 2026-11-20, CfT 148.0.7778.216 on Linux, the CI fonts and the board fonts alike).
+    #[cfg(target_os = "linux")]
+    let linux_want = match label {
+        "inline img (unchanged)" => Some("a=0/20 w=50/39 e=62/10 n=89/10"),
+        _ => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let linux_want: Option<&str> = None;
+    let want = linux_want.unwrap_or_else(|| case["want"].as_str().unwrap());
     let (g, w) = (rects(&got), rects(want));
     let same = g.len() == w.len()
         && g.iter()
