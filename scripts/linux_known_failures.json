@@ -96,6 +96,42 @@
     {
       "test": "rustkit_engine::media_load_tests::source_selection_skips_a_type_that_cannot_play",
       "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::a_failed_item_is_a_decode_error",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::a_new_frame_is_presented_with_no_build_and_no_layout",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::a_new_presentation_size_is_a_resize",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::a_video_gets_a_player_on_the_host_and_loses_it_with_its_resource",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::an_audio_element_gets_a_player_with_no_frames",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::an_unanswered_command_keeps_the_media_busy",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::the_first_frame_paints_as_chrome_paints_it",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::with_no_host_a_video_loads_its_metadata_and_nothing_more",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::replaced_float_avoid_tests::boxes_that_avoid_floats_are_placed_as_chrome_places_them",
+      "reason": "1 of 28 cases ('inline img with clear beside a float'): the image sits at x 130.23, Chrome 148 on Linux at 128 (measured 2026-11-20). The text before it is set in Liberation Sans because rustkit-css's INITIAL_FONT_FAMILY is 'sans-serif' off macOS; Chrome's initial font on Linux is its standard font, Times New Roman (Liberation Serif: 'text ' is 28, not 30.23). A shared-code fix, raised upstream; not an S26 regression (the test is new in batch 113)."
     }
   ]
 }
