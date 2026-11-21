@@ -1,24 +1,154 @@
 {
-  "timestamp": "2026-10-06T14:28:35.321118+00:00",
-  "commit": "5b47be7047f3a7dfc3a81554efa83b330d75ee5e",
+  "timestamp": "2026-11-21T07:00:58.951936+00:00",
+  "commit": "ca25a619d579431d4112753e42499bc4c67005e7",
   "branch": "master",
   "platform": "linux",
   "build": {
     "ok": true,
     "exit_code": 0,
-    "warnings": 40
+    "warnings": 73,
+    "seconds": 513
   },
   "tests": {
-    "ok": true,
-    "exit_code": 0,
-    "passed": 2388,
-    "failed": 0,
-    "ignored": 8,
-    "total": 2388
+    "ok": false,
+    "exit_code": 101,
+    "passed": 6528,
+    "failed": 33,
+    "ignored": 104,
+    "total": 6561,
+    "seconds": 2175,
+    "failed_unexpected": [],
+    "failed_known": [
+      "rustkit_engine::flex_aspect_ratio_tests::aspect_ratio_minimum_size_inherit_and_the_card_are_as_in_chrome",
+      "rustkit_engine::media_fetch_tests::a_new_src_cancels_the_old_fetch",
+      "rustkit_engine::media_fetch_tests::a_server_that_ignores_range_still_loads",
+      "rustkit_engine::media_fetch_tests::a_whole_body_past_the_cap_is_a_network_error",
+      "rustkit_engine::media_fetch_tests::media_is_fetched_by_range",
+      "rustkit_engine::media_fetch_tests::removing_a_video_cancels_its_fetch_and_frees_its_bytes",
+      "rustkit_engine::media_fetch_tests::the_metadata_fetches_only_what_it_reads",
+      "rustkit_engine::media_host_tests::a_failed_item_is_a_decode_error",
+      "rustkit_engine::media_host_tests::a_new_frame_is_presented_with_no_build_and_no_layout",
+      "rustkit_engine::media_host_tests::a_new_presentation_size_is_a_resize",
+      "rustkit_engine::media_host_tests::a_video_gets_a_player_on_the_host_and_loses_it_with_its_resource",
+      "rustkit_engine::media_host_tests::an_audio_element_gets_a_player_with_no_frames",
+      "rustkit_engine::media_host_tests::an_unanswered_command_keeps_the_media_busy",
+      "rustkit_engine::media_host_tests::the_first_frame_paints_as_chrome_paints_it",
+      "rustkit_engine::media_host_tests::with_no_host_a_video_loads_its_metadata_and_nothing_more",
+      "rustkit_engine::media_load_tests::a_small_videos_box_takes_its_size",
+      "rustkit_engine::media_load_tests::a_video_with_preload_auto_loads_its_metadata",
+      "rustkit_engine::media_load_tests::a_video_with_the_default_preload_loads_its_metadata",
+      "rustkit_engine::media_load_tests::a_videos_box_takes_its_ratio_after_metadata",
+      "rustkit_engine::media_load_tests::an_audio_element_loads_its_metadata",
+      "rustkit_engine::media_load_tests::bytes_that_are_not_media_are_an_error",
+      "rustkit_engine::media_load_tests::can_play_type_answers",
+      "rustkit_engine::media_load_tests::source_selection_skips_a_type_that_cannot_play",
+      "rustkit_engine::paint_only_web_font_tests::an_element_scroll_keeps_the_web_font_when_another_view_painted",
+      "rustkit_engine::paint_only_web_font_tests::static_text_keeps_its_web_font_across_paint_only_frames_when_another_view_paints",
+      "rustkit_engine::paint_only_web_font_tests::web_faces_hold_by_weight_when_another_view_on_the_thread_paints",
+      "rustkit_engine::paint_only_web_font_tests::web_faces_hold_while_another_thread_installs_its_own",
+      "rustkit_engine::replaced_float_avoid_tests::boxes_that_avoid_floats_are_placed_as_chrome_places_them",
+      "rustkit_engine::text_control_select_tests::a_click_places_the_caret_at_the_click_point",
+      "rustkit_layout::tests::inline_block_with_text_sits_on_its_last_line_baseline",
+      "rustkit_layout::tests::test_an_emoji_label_lifts_a_styled_buttons_line",
+      "rustkit_layout::tests::test_negative_half_leading_inline_keeps_the_line_baseline",
+      "rustkit_renderer::layer_cost_tests::a_frame_past_the_glyph_atlas_matches_the_submit_per_pass_path"
+    ],
+    "known_now_passing": [],
+    "unexplained_exit": false
   },
   "per_crate": {
+    "argument_list_stop": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "array_length_reset": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "array_length_shapes": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "array_like_length_limits": {
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    "arraybuffer_detach_key": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "arraybuffer_transfer": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "arrow_this_capture": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "canvas_shim_opcodes": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "class_element_eval": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "class_field_tdz": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "code_block_flags": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "compiled_moves": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "const_comma_newline": {
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
     "corpus_tests": {
-      "passed": 49,
+      "passed": 50,
+      "failed": 0,
+      "ignored": 0
+    },
+    "cyclic_to_primitive": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "dropped_realm": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "entity_tokenizer": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 1
+    },
+    "eval_order": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "eval_var_per_call": {
+      "passed": 2,
       "failed": 0,
       "ignored": 0
     },
@@ -27,13 +157,28 @@
       "failed": 0,
       "ignored": 0
     },
+    "float_index_keys": {
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    "float_index_keys_allocs": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
     "gc_weak_cycle": {
       "passed": 1,
       "failed": 0,
       "ignored": 0
     },
+    "global_lexical_scope": {
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0
+    },
     "hiwave": {
-      "passed": 25,
+      "passed": 234,
       "failed": 0,
       "ignored": 0
     },
@@ -63,7 +208,7 @@
       "ignored": 0
     },
     "hiwave_shell": {
-      "passed": 2,
+      "passed": 9,
       "failed": 0,
       "ignored": 0
     },
@@ -73,11 +218,21 @@
       "ignored": 0
     },
     "hiwave_shield": {
-      "passed": 6,
+      "passed": 25,
       "failed": 0,
       "ignored": 0
     },
     "hiwave_shield (doc)": {
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    "hiwave_shield_intercept": {
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0
+    },
+    "hiwave_shield_intercept (doc)": {
       "passed": 0,
       "failed": 0,
       "ignored": 0
@@ -97,13 +252,78 @@
       "failed": 0,
       "ignored": 0
     },
+    "html_parse_throughput": {
+      "passed": 0,
+      "failed": 0,
+      "ignored": 2
+    },
+    "ic_exotic_get": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "ic_holder": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "ic_set_dedupe": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "import_source_phase": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "index_fast_paths": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "index_fast_paths_allocs": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
     "integration_tests": {
       "passed": 27,
       "failed": 0,
       "ignored": 0
     },
+    "json_array_stop": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "kept_function": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
     "let_of": {
       "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    "main_thread_stack": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "module_parse_depth": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "native_loop_limits": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "native_recursion": {
+      "passed": 2,
       "failed": 0,
       "ignored": 0
     },
@@ -113,7 +333,22 @@
       "ignored": 0
     },
     "parity_capture": {
-      "passed": 7,
+      "passed": 98,
+      "failed": 0,
+      "ignored": 0
+    },
+    "png_decode": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 2
+    },
+    "regex_literal_compile": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "regexp_input_release": {
+      "passed": 2,
       "failed": 0,
       "ignored": 0
     },
@@ -121,6 +356,11 @@
       "passed": 4,
       "failed": 0,
       "ignored": 0
+    },
+    "rule_throughput": {
+      "passed": 0,
+      "failed": 0,
+      "ignored": 1
     },
     "rustkit_a11y": {
       "passed": 13,
@@ -153,9 +393,9 @@
       "ignored": 1
     },
     "rustkit_bindings": {
-      "passed": 271,
+      "passed": 795,
       "failed": 0,
-      "ignored": 0
+      "ignored": 7
     },
     "rustkit_bindings (doc)": {
       "passed": 0,
@@ -163,7 +403,7 @@
       "ignored": 0
     },
     "rustkit_canvas": {
-      "passed": 12,
+      "passed": 48,
       "failed": 0,
       "ignored": 0
     },
@@ -203,7 +443,7 @@
       "ignored": 0
     },
     "rustkit_core": {
-      "passed": 30,
+      "passed": 31,
       "failed": 0,
       "ignored": 0
     },
@@ -213,7 +453,7 @@
       "ignored": 0
     },
     "rustkit_css": {
-      "passed": 83,
+      "passed": 172,
       "failed": 0,
       "ignored": 0
     },
@@ -223,7 +463,7 @@
       "ignored": 0
     },
     "rustkit_cssparser": {
-      "passed": 22,
+      "passed": 33,
       "failed": 0,
       "ignored": 0
     },
@@ -233,9 +473,9 @@
       "ignored": 0
     },
     "rustkit_dom": {
-      "passed": 65,
+      "passed": 115,
       "failed": 0,
-      "ignored": 0
+      "ignored": 1
     },
     "rustkit_dom (doc)": {
       "passed": 0,
@@ -243,9 +483,9 @@
       "ignored": 0
     },
     "rustkit_engine": {
-      "passed": 535,
-      "failed": 0,
-      "ignored": 0
+      "passed": 2784,
+      "failed": 29,
+      "ignored": 64
     },
     "rustkit_engine (doc)": {
       "passed": 0,
@@ -253,7 +493,7 @@
       "ignored": 0
     },
     "rustkit_html": {
-      "passed": 40,
+      "passed": 52,
       "failed": 0,
       "ignored": 0
     },
@@ -263,7 +503,7 @@
       "ignored": 2
     },
     "rustkit_http": {
-      "passed": 24,
+      "passed": 36,
       "failed": 0,
       "ignored": 0
     },
@@ -283,7 +523,7 @@
       "ignored": 0
     },
     "rustkit_image": {
-      "passed": 19,
+      "passed": 27,
       "failed": 0,
       "ignored": 0
     },
@@ -293,7 +533,7 @@
       "ignored": 0
     },
     "rustkit_js": {
-      "passed": 36,
+      "passed": 97,
       "failed": 0,
       "ignored": 0
     },
@@ -303,9 +543,9 @@
       "ignored": 0
     },
     "rustkit_layout": {
-      "passed": 582,
-      "failed": 0,
-      "ignored": 3
+      "passed": 965,
+      "failed": 3,
+      "ignored": 17
     },
     "rustkit_layout (doc)": {
       "passed": 0,
@@ -313,7 +553,7 @@
       "ignored": 1
     },
     "rustkit_media": {
-      "passed": 13,
+      "passed": 16,
       "failed": 0,
       "ignored": 0
     },
@@ -323,7 +563,7 @@
       "ignored": 0
     },
     "rustkit_net": {
-      "passed": 95,
+      "passed": 111,
       "failed": 0,
       "ignored": 0
     },
@@ -333,9 +573,9 @@
       "ignored": 0
     },
     "rustkit_renderer": {
-      "passed": 109,
-      "failed": 0,
-      "ignored": 0
+      "passed": 182,
+      "failed": 1,
+      "ignored": 3
     },
     "rustkit_renderer (doc)": {
       "passed": 0,
@@ -343,7 +583,7 @@
       "ignored": 0
     },
     "rustkit_svg": {
-      "passed": 30,
+      "passed": 51,
       "failed": 0,
       "ignored": 0
     },
@@ -373,7 +613,7 @@
       "ignored": 1
     },
     "rustkit_text": {
-      "passed": 79,
+      "passed": 86,
       "failed": 0,
       "ignored": 0
     },
@@ -388,7 +628,7 @@
       "ignored": 0
     },
     "rustkit_viewhost": {
-      "passed": 4,
+      "passed": 70,
       "failed": 0,
       "ignored": 0
     },
@@ -408,12 +648,107 @@
       "ignored": 0
     },
     "rustkit_worker": {
-      "passed": 13,
+      "passed": 14,
       "failed": 0,
       "ignored": 0
     },
     "rustkit_worker (doc)": {
       "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    "scope_name_index": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "sort_fuzz": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "sort_numeric_difference": {
+      "passed": 3,
+      "failed": 0,
+      "ignored": 1
+    },
+    "sort_numeric_difference_stop": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "sort_v8_order": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "stack_overflow_catchable": {
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    "string_length_limit": {
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    "string_length_limit_more": {
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    "super_set": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "switch_tdz": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "table_tree_tests": {
+      "passed": 23,
+      "failed": 0,
+      "ignored": 0
+    },
+    "tdz_assign": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "update_conversion": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "using_bindings": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "vm_interrupt": {
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    "vm_interrupt_promises": {
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0
+    },
+    "vm_stats": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "vm_stop_finally": {
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0
+    },
+    "watchdog_turns": {
+      "passed": 11,
       "failed": 0,
       "ignored": 0
     },
@@ -431,26 +766,32 @@
       "passed": 1,
       "failed": 0,
       "ignored": 0
+    },
+    "wpt_origin": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
     }
   },
   "crates_with_no_tests": [
     "fallback_face_line_height",
     "hiwave_core",
     "hiwave_smoke",
+    "html_parse_throughput",
     "normal_line_height_probe",
+    "rule_throughput",
     "rustkit_unit_tests"
   ],
   "reachability": {
-    "computed_style_fields": 129,
-    "read_by_layout": 104,
-    "writable_by_applier": 114,
-    "unreachable_count": 5,
+    "computed_style_fields": 172,
+    "read_by_layout": 143,
+    "writable_by_applier": 161,
+    "unreachable_count": 4,
     "unreachable_fields": [
-      "backdrop_filter",
       "direction",
       "font_stretch",
-      "object_position",
-      "text_decoration_thickness"
+      "text_decoration_thickness",
+      "writing_mode"
     ],
     "caveat": "Regex over source, not a type-checked analysis. A field written only through an alias this pattern does not match would be a FALSE POSITIVE - confirm any new entry by grepping the field individually before reporting it as a gap.",
     "applier_body_fallback": false,
