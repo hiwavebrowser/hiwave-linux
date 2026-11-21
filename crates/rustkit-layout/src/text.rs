@@ -2388,12 +2388,44 @@ impl TextShaper {
             };
             let advances = backend.advance_widths(text, &descriptor).ok()?;
             let lines = backend.line_metrics(&descriptor).ok()?;
-            Some((advances, lines))
+            // The union of the extents (ascent, descent, line gap) of the fallback faces this run
+            // draws characters from, as on macOS: Blink unites every used fallback face into the
+            // line box under `line-height: normal` (NGInlineBoxState::AccumulateUsedFonts).
+            let mut fallback: Option<(f32, f32, f32)> = None;
+            let chars: Vec<char> = text.chars().collect();
+            for (i, &c) in chars.iter().enumerate() {
+                if c.is_whitespace() || matches!(c as u32, 0x200B..=0x200D | 0xFE00..=0xFE0F | 0x2060) {
+                    continue;
+                }
+                // The selector after the character decides its face, as for its advance.
+                let variation = rustkit_text::Variation::after(chars.get(i + 1).copied());
+                let src = backend.source_descriptor_varied(c, variation, &descriptor);
+                if src.family == descriptor.family {
+                    continue;
+                }
+                if let Ok((a, d, g)) = backend.line_metrics(&src) {
+                    fallback = Some(match fallback {
+                        Some((fa, fd, fg)) => (fa.max(a), fd.max(d), fg.max(g)),
+                        None => (a, d, g),
+                    });
+                }
+            }
+            Some((advances, lines, fallback))
         });
 
-        let Some((advances, (ascent, descent, gap))) = measured else {
+        let Some((advances, (mut ascent, mut descent, mut gap), fallback)) = measured else {
             return self.shape_stub(text, font_chain, weight, style, stretch, size);
         };
+        if let Some((fb_ascent, fb_descent, fb_gap)) = fallback {
+            // Blink gives each face ITS OWN half-leading (half its rounded line gap) before
+            // uniting, so the primary face's gap never rides on a taller fallback face; the run
+            // then carries no gap of its own (the macOS shaper's rule).
+            let primary_half = gap.round() / 2.0;
+            let fallback_half = fb_gap.round() / 2.0;
+            ascent = (ascent + primary_half).max(fb_ascent + fallback_half);
+            descent = (descent + primary_half).max(fb_descent + fallback_half);
+            gap = 0.0;
+        }
 
         let mut glyphs = Vec::with_capacity(advances.len());
         let mut x_offset: f32 = 0.0;

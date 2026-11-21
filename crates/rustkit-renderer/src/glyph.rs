@@ -162,6 +162,17 @@ mod windows_paint_tests {
     }
 }
 
+impl FaceKey {
+    /// The variation selector after the character, when the key carries one (`Auto`); a recorded
+    /// face is drawn as recorded.
+    pub fn variation(&self) -> rustkit_text::Variation {
+        match self {
+            FaceKey::Auto(v) => *v,
+            FaceKey::Recorded(_) => rustkit_text::Variation::None,
+        }
+    }
+}
+
 impl Default for FaceKey {
     fn default() -> Self {
         FaceKey::Auto(rustkit_text::Variation::None)
@@ -880,7 +891,7 @@ impl GlyphCache {
                 style: rustkit_text::FontStyle::Normal,
                 size: key.font_size as f32 / 10.0,
             };
-            backend.rasterize_color_glyph(key.codepoint, &descriptor)
+            backend.rasterize_color_glyph_varied(key.codepoint, key.face.variation(), &descriptor)
         });
         #[cfg(windows)]
         let raster = rasterize_glyph_directwrite_color(key, key.font_size as f32 / 10.0);
@@ -1071,8 +1082,9 @@ impl GlyphCache {
                         },
                         size: font_size,
                     };
-                    match backend.rasterize_glyph_at_phase(
+                    match backend.rasterize_glyph_at_phase_varied(
                         key.codepoint,
+                        key.face.variation(),
                         &descriptor,
                         key.subpixel_phase,
                         SUBPIXEL_QUANTIZE,
@@ -1815,6 +1827,31 @@ fn rasterize_glyph_directwrite_color(
         let bearing_x = x0 as f32 - origin.X;
         let bearing_y = (origin.Y + baseline_in_layout) - y0 as f32;
         Some((rgba, width, height, advance, bearing_x, bearing_y))
+    }
+}
+
+/// Linux paints a character from the face the selector after it asks for (U+FE0F colour,
+/// U+FE0E text), as layout measures it: the glyph key carries that variation (so a bare
+/// character's cached "no colour artwork" cannot stand for the same character with U+FE0F), and
+/// both Linux rasterizers take it.
+#[cfg(all(test, target_os = "linux"))]
+mod linux_variation_tests {
+    const GLYPH_RS: &str = include_str!("glyph.rs");
+    const LIB_RS: &str = include_str!("lib.rs");
+
+    #[test]
+    fn the_linux_glyph_key_carries_the_variation_selector() {
+        assert!(
+            LIB_RS.contains("#[cfg(target_os = \"linux\")]\n            let face = FaceKey::Auto(rustkit_text::Variation::after(next));"),
+            "the Linux glyph key does not carry the selector after the character"
+        );
+    }
+
+    #[test]
+    fn both_linux_rasterizers_take_the_variation() {
+        let code = &GLYPH_RS[..GLYPH_RS.find("mod linux_variation_tests").expect("this module")];
+        assert!(code.contains("backend.rasterize_color_glyph_varied("), "the colour path");
+        assert!(code.contains("backend.rasterize_glyph_at_phase_varied("), "the mask path");
     }
 }
 
