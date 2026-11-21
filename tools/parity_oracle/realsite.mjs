@@ -1,10 +1,11 @@
 /**
  * realsite.mjs - Chrome side of the real-site board (scripts/realsite_board.py)
  *
- *   node realsite.mjs chrome <url> <out.png> <out-text.json> [width height settleMs]
+ *   node realsite.mjs chrome <url> <out.png> <out-text.json> [width height settleMs [out.har]]
  *     Load a live URL in pinned Chrome (PARITY_CHROME_PATH) with the oracle's
  *     deterministic launch options, let it settle, screenshot the first
- *     viewport and record the text Chrome shows in that viewport.
+ *     viewport and record the text Chrome shows in that viewport. With
+ *     out.har, also record the load as a HAR with embedded bodies.
  *
  *   node realsite.mjs diff <chrome.png> <other.png|.ppm> [diff.png]
  *     Pixel diff with the campaign's pixelmatch settings (compare_pixels.mjs).
@@ -53,35 +54,28 @@ function collectViewportText() {
   return out.join(' ');
 }
 
-async function captureChrome(url, pngPath, textPath, width, height, settleMs) {
+async function captureChrome(url, pngPath, textPath, width, height, settleMs, harPath = null) {
   const started = Date.now();
-  // Headed (Pete, A1, 2026-09-26): the HeadlessChrome identity gets some
-  // oracle pages blocked (x "Access denied", carvana Cloudflare). This is
-  // Chrome identifying as itself, not evasion. The window sits off-screen.
-  // REALSITE_ORACLE_HEADLESS=1 restores headless for before/after readings.
-  const headless = process.env.REALSITE_ORACLE_HEADLESS === '1';
-  const launch = getDeterministicLaunchOptions();
-  launch.headless = headless;
-  // The pin: this tree's deterministic.mjs predates PARITY_CHROME_PATH, and
-  // Playwright's bundled Chromium drifts from the pinned Chrome for Testing.
-  if (process.env.PARITY_CHROME_PATH) launch.executablePath = process.env.PARITY_CHROME_PATH;
-  if (!headless) {
-    launch.args = [...launch.args, '--window-position=-2400,0', `--window-size=${width},${height}`];
-  }
+  // Headless unless the board opted in to headed under the real-window lock (A1); see realsite_launch.mjs.
+  const launch = oracleLaunchOptions(width, height);
   const browser = await chromium.launch(launch);
-  const result = { url, status: 'ok', error: null, nav_error: null, oracle_headless: headless };
+  const result = { url, status: 'ok', error: null, nav_error: null, oracle_headless: launch.headless };
+  let harContext = null;
   try {
+    // The oracle's user agent, when the board pins one (Linux runs have no display to run headed on):
+    // REALSITE_ORACLE_UA sends an explicit UA (e.g. the product's honest one, so both arms are
+    // served the same page); REALSITE_ORACLE_HEADED_UA=1 sends what this same Chrome sends headed:
+    // its own navigator.userAgent with the "Headless" marker dropped, nothing else. Neither changes
+    // webdriver or anything else about the browser; no challenge solving.
+    let ua = process.env.REALSITE_ORACLE_UA || undefined;
+    if (!ua && launch.headless && process.env.REALSITE_ORACLE_HEADED_UA === '1') {
+      const probe = await browser.newPage();
+      ua = (await probe.evaluate(() => navigator.userAgent)).replace('HeadlessChrome/', 'Chrome/');
+      await probe.close();
+    }
+    if (ua) result.oracle_user_agent = ua;
     // colorScheme is pinned: left unset, headless Chrome followed the seat's
     // OS appearance and served Google's dark theme, which RustKit never gets.
-    // Headless Chrome announces itself as "HeadlessChrome"; the headed
-    // binary announces plain Chrome. With no display to run headed on, send
-    // what the headed pinned binary sends (same version, same platform).
-    // REALSITE_ORACLE_UA pins an explicit UA (e.g. the product's honest one)
-    // so Chrome and RustKit are served the same page; it wins over the above.
-    const ua = process.env.REALSITE_ORACLE_UA
-      || (headless && process.env.REALSITE_ORACLE_HEADED_UA === '1'
-        ? `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`
-        : undefined);
     const context = await browser.newContext({
       ...(ua ? { userAgent: ua } : {}),
       viewport: { width, height },
@@ -92,10 +86,17 @@ async function captureChrome(url, pngPath, textPath, width, height, settleMs) {
       // the client hint header, which still followed the OS (one of two
       // launches in a run came back dark).
       extraHTTPHeaders: { 'Sec-CH-Prefers-Color-Scheme': 'light' },
+      // QB-ARCHIVE-INPUT: the load's requests and bodies, for an offline replay of the site
+      // (written when the context closes; realsite_har.py strips secrets, slims and compresses
+      // it). Minimal mode keeps only what routing from a HAR uses: no cookie arrays, sizes,
+      // timings or page records.
+      ...(harPath ? { recordHar: { path: harPath, mode: 'minimal', content: 'embed' } } : {}),
     });
+    harContext = context;
     const page = await context.newPage();
     // Top-level document status, recorded even when goto throws: an error
     // status is Chrome showing its own error page, not the site (x's 403).
+    // realsite_board.py's oracle_blocked() reads it.
     page.on('response', (r) => {
       if (r.request().isNavigationRequest() && r.frame() === page.mainFrame()) {
         result.http_status = r.status();
@@ -120,6 +121,14 @@ async function captureChrome(url, pngPath, textPath, width, height, settleMs) {
     result.status = 'error';
     result.error = String(e.message || e).split('\n')[0];
   } finally {
+    if (harPath && harContext) {
+      try {
+        await harContext.close();
+        result.har_path = harPath;
+      } catch (e) {
+        result.har_error = String(e.message || e).split('\n')[0];
+      }
+    }
     await browser.close();
   }
   result.elapsed_ms = Date.now() - started;
@@ -333,8 +342,8 @@ async function main() {
   const [mode, ...rest] = process.argv.slice(2);
   let result;
   if (mode === 'chrome') {
-    const [url, png, textJson, w = '1280', h = '800', settle = '5000'] = rest;
-    result = await captureChrome(url, png, textJson, Number(w), Number(h), Number(settle));
+    const [url, png, textJson, w = '1280', h = '800', settle = '5000', har = ''] = rest;
+    result = await captureChrome(url, png, textJson, Number(w), Number(h), Number(settle), har || null);
   } else if (mode === 'actions') {
     const [url, actionsArg, outDir = '.', w = '1280', h = '800', settle = '5000'] = rest;
     result = await runActionsChrome(url, actionsArg, outDir, Number(w), Number(h), Number(settle));

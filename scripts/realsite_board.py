@@ -47,16 +47,23 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import realsite_har  # noqa: E402  (QB-ARCHIVE-INPUT)
+
 REPO = Path(__file__).resolve().parent.parent
-SITES_FILE = REPO / "websuite" / "realsite-top20.json"
-# --board wide: the 80-site list, scored as its OWN number (out of 240) with its
-# own trend file. It never feeds the 60-point board the trench is measured on.
-BOARDS = {
-    "top20": (SITES_FILE, "trend.csv"),
-    "wide": (REPO / "websuite" / "realsite-top80.json", "trend-wide.csv"),
-}
+DEFAULT_SITES_FILE = REPO / "websuite" / "realsite-top20.json"
+HOLDOUT_SITES_FILE = REPO / "websuite" / "realsite-holdout20.json"
+SITES_FILE = DEFAULT_SITES_FILE
 ORACLE = REPO / "tools" / "parity_oracle" / "realsite.mjs"
-DEFAULT_CHROME = REPO / ".browsers" / "chrome" / "chrome-linux64" / "chrome"
+if sys.platform.startswith("linux"):
+    # Linux: the pinned Chrome for Testing unpacked in the checkout (PARITY_CHROME_PATH wins).
+    DEFAULT_CHROME = REPO / ".browsers" / "chrome" / "chrome-linux64" / "chrome"
+else:
+    DEFAULT_CHROME = (
+        Path.home()
+        / "Repos/hiwave/hiwave-macos/.browsers/chrome/mac_arm-148.0.7778.216"
+        / "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+    )
 PINNED_CHROME_VERSION = "148.0.7778.216"
 
 LOAD_TIMEOUT_MS = 30000
@@ -81,20 +88,14 @@ def words(text):
     return {w.casefold() for w in WORD_RE.findall(text or "")}
 
 
-def run_json(cmd, timeout, env=None, stderr_path=None):
-    """Run a command that prints one JSON object on its last stdout line.
-    With stderr_path, its stderr (the engine's log) is kept there."""
+def run_json(cmd, timeout, env=None):
+    """Run a command that prints one JSON object on its last stdout line."""
     try:
         p = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, env=env, cwd=REPO
         )
-    except subprocess.TimeoutExpired as e:
-        if stderr_path and e.stderr:
-            Path(stderr_path).write_bytes(e.stderr if isinstance(e.stderr, bytes)
-                                          else e.stderr.encode())
+    except subprocess.TimeoutExpired:
         return None, "killed after %ds" % timeout, None
-    if stderr_path:
-        Path(stderr_path).write_text(p.stderr or "")
     lines = [l for l in p.stdout.splitlines() if l.strip().startswith("{")]
     if not lines:
         tail = (p.stderr or p.stdout).strip().splitlines()[-3:]
@@ -129,21 +130,21 @@ def load_ppm(path):
 
 def non_background_fraction(ppm_path):
     """Fraction of pixels that differ (any channel > 8) from the dominant colour."""
-    from PIL import Image
+    import numpy as np
 
-    img = Image.open(ppm_path).convert("RGB")
-    total = img.width * img.height
-    colors = img.getcolors(maxcolors=total) or []
-    if not colors:
-        return 0.0
-    _, dom = max(colors)
-    near = sum(n for n, c in colors if max(abs(c[i] - dom[i]) for i in range(3)) <= 8)
-    return float(1.0 - near / total)
+    w, h, rgb = load_ppm(ppm_path)
+    px = np.frombuffer(rgb, dtype=np.uint8).reshape(h * w, 3)
+    packed = (px[:, 0].astype(np.uint32) << 16) | (px[:, 1].astype(np.uint32) << 8) | px[:, 2]
+    vals, counts = np.unique(packed, return_counts=True)
+    dom = int(vals[counts.argmax()])
+    bg = np.array([(dom >> 16) & 255, (dom >> 8) & 255, dom & 255], dtype=np.int16)
+    diff = np.abs(px.astype(np.int16) - bg).max(axis=1)
+    return float((diff > 8).mean())
 
 
 def rustkit_viewport_text(display_list_path, width, height):
     """Concatenate display-list text runs that fall inside the first viewport."""
-    dl = json.loads(Path(display_list_path).read_text())
+    dl = json.loads(Path(display_list_path).read_text(encoding="utf-8", errors="replace"))
     cmds = dl.get("commands") if isinstance(dl, dict) else dl
     runs = []
 
@@ -168,8 +169,12 @@ def rustkit_viewport_text(display_list_path, width, height):
     return " ".join(runs)
 
 
-# The honest Linux HiWave UA (rustkit_http::default_user_agent); never Chrome's.
-PRODUCT_UA = "Mozilla/5.0 (X11; Linux x86_64) HiWave/1.0 RustKit/1.0"
+if sys.platform.startswith("linux"):
+    # The honest Linux HiWave UA: rustkit_http::default_user_agent() on Linux, never Chrome's.
+    PRODUCT_UA = "Mozilla/5.0 (X11; Linux x86_64) HiWave/1.0 RustKit/1.0"
+else:
+    PRODUCT_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+                  "(KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0")
 
 
 def probe_access(url):
@@ -206,10 +211,11 @@ def probe_access(url):
     return {"status": status, "vendor": vendor, "blocked": blocked}
 
 
-def chrome_capture(url, png, text_json, width, height, env):
+def chrome_capture(url, png, text_json, width, height, env, har_path=None):
     res, err, _ = run_json(
         ["node", str(ORACLE), "chrome", url, str(png), str(text_json),
-         str(width), str(height), str(CHROME_SETTLE_MS)],
+         str(width), str(height), str(CHROME_SETTLE_MS)]
+        + ([str(har_path)] if har_path else []),
         timeout=120,
         env=env,
     )
@@ -223,7 +229,8 @@ def oracle_blocked(c):
 
     A capture that "succeeded" on Chrome's own error page (x, 2026-09-26:
     "Access to x.com was denied", HTTP 403) is not an oracle for the site;
-    scoring against it credits RustKit for matching an error page.
+    scoring against it credits or fails RustKit against an error page.
+    Ported from atlas/trench-realsite (T19).
     """
     if c.get("status") != "ok":
         return None
@@ -233,6 +240,225 @@ def oracle_blocked(c):
     if isinstance(st, int) and st >= 400:
         return "top-level document HTTP %d" % st
     return None
+
+
+def hid_idle_seconds():
+    """Seconds since the last keyboard/mouse input on this seat, or None."""
+    try:
+        r = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r'"HIDIdleTime" = (\d+)', r.stdout)
+    return int(m.group(1)) / 1e9 if m else None
+
+
+def _pid_alive(pid):
+    """Whether process `pid` is running. os.kill(pid, 0) is the POSIX probe; on
+    Windows signal 0 is CTRL_C_EVENT, not a probe, so ask the process handle."""
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _pid_alive_windows(pid):
+    import ctypes
+    from ctypes import wintypes
+
+    # SYNCHRONIZE lets the handle be waited on; a process's handle is signalled once it has
+    # exited, so a zero-timeout wait is exact (an exit code equal to STILL_ACTIVE, 259, is not).
+    SYNCHRONIZE, PROCESS_QUERY_LIMITED_INFORMATION = 0x00100000, 0x1000
+    WAIT_TIMEOUT, ERROR_ACCESS_DENIED = 0x102, 5
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # No such process; a process we may not open exists, as PermissionError does above.
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+class OracleLockBusy(RuntimeError):
+    pass
+
+
+class RealWindowLock:
+    """mkdir lock with a pid file; a lock whose pid is dead is recovered
+    (rename-then-mkdir, so two recoverers never both hold it).
+
+    A lock without a pid file (the shell recipe's bare mkdir) is never
+    treated as stale: its holder is waited for like any other.
+    """
+
+    def __init__(self, path=None, wait_s=REALWINDOW_LOCK_WAIT_S, poll_s=REALWINDOW_LOCK_POLL_S,
+                 sleep=time.sleep, clock=time.monotonic):
+        self.path = Path(path) if path else REALWINDOW_LOCK
+        self.wait_s, self.poll_s, self.sleep, self.clock = wait_s, poll_s, sleep, clock
+        self.held = False
+
+    def holder(self):
+        try:
+            return int((self.path / "pid").read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    def _mkdir(self):
+        try:
+            self.path.mkdir()
+        except FileExistsError:
+            return False
+        (self.path / "pid").write_text(str(os.getpid()))
+        self.held = True
+        return True
+
+    def _try(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self._mkdir():
+            return True
+        pid = self.holder()
+        if pid is not None and pid != os.getpid() and not _pid_alive(pid):
+            return self._recover(pid)
+        return False
+
+    def _recover(self, dead_pid):
+        """Take over a lock whose holder `dead_pid` is gone; at most one runner wins.
+
+        The stale directory is renamed to a unique name first. rename() of one
+        source succeeds for exactly one caller; a second recoverer gets ENOENT
+        and goes back to waiting. Only then is the lock mkdir'd (still the
+        arbiter if a fresh runner races in). If what we renamed away turns out
+        not to be the dead holder's lock (another runner recovered and re-took
+        it between our pid read and our rename), it is put back untouched.
+        """
+        stale = self.path.with_name("%s.stale-%d-%d-%d" % (
+            self.path.name, dead_pid, time.time_ns(), os.getpid()))
+        try:
+            os.rename(self.path, stale)
+        except OSError:  # ENOENT: another recoverer renamed it first
+            return False
+        try:
+            got = int((stale / "pid").read_text().strip())
+        except (OSError, ValueError):
+            got = None
+        if got != dead_pid:
+            # Not the dead lock: a live holder's. Restore it unless the path was
+            # re-taken meanwhile (then the live holder keeps its directory under
+            # the stale name and we leave it alone rather than delete it).
+            if not os.path.lexists(self.path):
+                try:
+                    os.rename(stale, self.path)
+                except OSError:
+                    pass
+            return False
+        shutil.rmtree(stale, ignore_errors=True)
+        return self._mkdir()
+
+    def acquire(self):
+        deadline = self.clock() + self.wait_s
+        while True:
+            if self._try():
+                return True
+            if self.clock() >= deadline:
+                return False
+            self.sleep(self.poll_s)
+
+    def release(self):
+        if not self.held:
+            return
+        self.held = False
+        if self.holder() == os.getpid():
+            shutil.rmtree(self.path, ignore_errors=True)
+
+
+class OracleSession:
+    """Decides headless vs headed for the Chrome oracle and holds the lock.
+
+    Headless unless headed was asked for. Headed also needs the seat idle
+    for HEADED_MIN_IDLE_S (else headless, with the reason logged and in the
+    summary) and the real-window lock (else OracleLockBusy: the run stops,
+    it never goes headed unlocked). The lock is released on every exit path
+    (context exit, SIGTERM/SIGHUP via SystemExit) and as soon as the seat
+    becomes active mid-run, after which the rest of the run is headless.
+    """
+
+    def __init__(self, want_headed, lock_wait_s=REALWINDOW_LOCK_WAIT_S, idle_fn=hid_idle_seconds,
+                 log=print, sleep=time.sleep):
+        self.want_headed = bool(want_headed)
+        self.lock_wait_s, self.idle_fn, self.log, self.sleep = lock_wait_s, idle_fn, log, sleep
+        self.headed = False
+        self.headed_any = False
+        self.lock = None
+        self.reason = "headless (default; --oracle-headed to opt in)"
+
+    def _idle_ok(self):
+        idle = self.idle_fn()
+        return idle is not None and idle >= HEADED_MIN_IDLE_S, idle
+
+    def __enter__(self):
+        if not self.want_headed:
+            return self
+        ok, idle = self._idle_ok()
+        if not ok:
+            self.reason = "headless: seat in use (HID idle %s s < %d s)" % (
+                "unknown" if idle is None else "%.0f" % idle, HEADED_MIN_IDLE_S)
+            self.log("oracle: " + self.reason)
+            return self
+        self.lock = RealWindowLock(wait_s=self.lock_wait_s, sleep=self.sleep)
+        if not self.lock.acquire():
+            raise OracleLockBusy(
+                "ORACLE BLOCKED: real-window lock %s busy (holder pid %s) after %ds; "
+                "headed oracle not run (drop --oracle-headed for a headless run)"
+                % (self.lock.path, self.lock.holder() or "unknown", self.lock_wait_s))
+        self.headed = self.headed_any = True
+        self.reason = "headed: HID idle %.0f s, holding %s" % (idle, self.lock.path)
+        self.log("oracle: " + self.reason)
+        return self
+
+    def recheck(self, site_id):
+        """Before each site: if the seat became active, drop to headless."""
+        if not self.headed:
+            return
+        ok, idle = self._idle_ok()
+        if ok:
+            return
+        self.headed = False
+        self.lock.release()
+        self.reason = "headless from %s on: seat became active (HID idle %s s)" % (
+            site_id, "unknown" if idle is None else "%.0f" % idle)
+        self.log("oracle: " + self.reason)
+
+    def apply(self, env):
+        """Set the oracle env for the next capture (strips a stray headed request)."""
+        env = dict(env)
+        for k in ("REALSITE_ORACLE_HEADED", "REALSITE_ORACLE_HEADLESS", "REALSITE_REALWINDOW_LOCK",
+                  "REALSITE_LOCK_OWNER"):
+            env.pop(k, None)
+        if self.headed:
+            env["REALSITE_ORACLE_HEADED"] = "1"
+            env["REALSITE_REALWINDOW_LOCK"] = str(self.lock.path)
+            # The launcher goes headed only if the lock's pid file names this owner.
+            env["REALSITE_LOCK_OWNER"] = str(os.getpid())
+        else:
+            env["REALSITE_ORACLE_HEADLESS"] = "1"
+        return env
+
+    def __exit__(self, *exc):
+        if self.lock:
+            self.lock.release()
+        return False
 
 
 def pixel_diff(a, b, diff_png, env):
@@ -252,15 +478,22 @@ def score_site(site, capture_bin, outdir, width, height, env):
     d.mkdir(parents=True, exist_ok=True)
     rec = {"id": sid, "url": url}
 
-    # Chrome twice (self-noise), then RustKit once.
+    # QB-ARCHIVE-INPUT: what each side received, kept for an offline replay (realsite_har.py).
+    archive = realsite_har.archive_enabled()
+    chrome_raw, rustkit_raw = d / "chrome.raw.har", d / "rustkit.raw.har"
+
+    # Chrome twice (self-noise), then RustKit once. Capture a (the oracle unless it fails)
+    # records its load.
     chrome = []
     for tag in ("a", "b"):
         c = chrome_capture(url, d / f"chrome-{tag}.png", d / f"chrome-{tag}-text.json",
-                           width, height, env)
+                           width, height, env,
+                           har_path=chrome_raw if (archive and tag == "a") else None)
         chrome.append(c)
     rec["chrome"] = chrome
     # The oracle is whichever Chrome capture succeeded (screenshots of heavy
     # pages occasionally time out under swiftshader); self-noise needs both.
+    # A capture of Chrome's own error/403 page is no oracle (oracle_blocked).
     for c in chrome:
         why = oracle_blocked(c)
         if why:
@@ -273,18 +506,24 @@ def score_site(site, capture_bin, outdir, width, height, env):
     rec["oracle_capture"] = oracle if chrome_ok else None
 
     rk_frame, rk_dl = d / "rustkit.ppm", d / "rustkit-display-list.json"
+    rk_scripts = d / "rustkit-scripts.json"
     started = time.time()
     rk, rk_err, rk_code = run_json(
         [str(capture_bin), "--url", url, "--width", str(width), "--height", str(height),
          "--timeout-ms", str(LOAD_TIMEOUT_MS), "--dump-frame", str(rk_frame),
-         "--dump-display-list", str(rk_dl), "--verbose"],
+         "--dump-display-list", str(rk_dl), "--dump-scripts", str(rk_scripts)]
+        + (["--dump-har", str(rustkit_raw)] if archive else []),
         timeout=LOAD_TIMEOUT_MS // 1000 + 15,
-        # The engine's info log, timestamped: where a slow load spent its 30s.
-        stderr_path=d / "rustkit-stderr.log",
     )
     rec["rustkit"] = rk if rk is not None else {"status": "crash", "error": rk_err,
                                                 "exit_code": rk_code}
     rec["rustkit"]["wall_ms"] = int((time.time() - started) * 1000)
+    if archive:
+        cap = realsite_har.cap_bytes()
+        rec["inputs"] = {
+            "rustkit": realsite_har.archive_inputs(d, "rustkit", rustkit_raw, cap),
+            "chrome": realsite_har.archive_inputs(d, "chrome", chrome_raw, cap),
+        }
 
     # LOADS
     loads, loads_why = False, None
@@ -301,13 +540,7 @@ def score_site(site, capture_bin, outdir, width, height, env):
             loads = True
     access = probe_access(url)
     rec["access"] = access
-    # A blocked site scores LOADS=0 (PLAN-realsite.md, "Access blocks") even
-    # when RustKit paints something: that something is the vendor's challenge
-    # page, which Chrome gets too, so it would also "look right" (chatgpt,
-    # 20260925T1925Z-subdl: 2 points for matching Cloudflare's interstitial).
-    if access["blocked"]:
-        if loads:
-            loads, loads_why = False, "painted the challenge page"
+    if not loads and access["blocked"]:
         loads_why = "blocked:%s (HTTP %s) — %s" % (access["vendor"], access["status"], loads_why)
     rec["loads"] = {"pass": loads, "why": loads_why}
 
@@ -318,7 +551,7 @@ def score_site(site, capture_bin, outdir, width, height, env):
             chrome[0].get("oracle_blocked") or chrome[0].get("error"))
         readable["oracle_failed"] = True
     else:
-        cw = words(json.loads((d / f"chrome-{oracle}-text.json").read_text())["text"])
+        cw = words(json.loads((d / f"chrome-{oracle}-text.json").read_text(encoding="utf-8", errors="replace"))["text"])
         rw = set()
         if loads and rk_dl.exists():
             rw = words(rustkit_viewport_text(rk_dl, width, height))
@@ -360,7 +593,7 @@ def score_site(site, capture_bin, outdir, width, height, env):
     rec["looks_right"] = looks
 
     rec["points"] = int(loads) + int(readable["pass"]) + int(looks["pass"])
-    (outdir / f"{sid}.json").write_text(json.dumps(rec, indent=2))
+    (outdir / f"{sid}.json").write_text(json.dumps(rec, indent=2), encoding="utf-8")
     return rec
 
 
@@ -397,6 +630,8 @@ def summarize(rows, ts, width, height, all_ids, oracle=None):
     summary = {
         "ts": ts,
         "chrome": PINNED_CHROME_VERSION,
+        "oracle_headless": headless,
+        "oracle_reason": oracle.reason if oracle else "headless (default)",
         "viewport": [width, height],
         "sites": len(rows),
         "points": sum(r["points"] for r in rows),
@@ -408,16 +643,17 @@ def summarize(rows, ts, width, height, all_ids, oracle=None):
         "readable_unscored": [r["id"] for r in rows if r["readable"].get("unscored")],
         "oracle_failed": [r["id"] for r in rows if r["oracle_capture"] is None],
         # Both Chrome captures landed on an error page (a subset of oracle_failed).
-        "oracle_blocked": {r["id"]: r["chrome"][0]["oracle_blocked"] for r in rows
-                           if r["oracle_capture"] is None
+        "oracle_blocked": {r["id"]: " / ".join(dict.fromkeys(c["oracle_blocked"] for c in r["chrome"]))
+                           for r in rows
+                           if r["oracle_capture"] is None and r["chrome"]
                            and all(c.get("oracle_blocked") for c in r["chrome"])},
         "blocked": {r["id"]: "%s/%s" % (r["access"]["vendor"], r["access"]["status"])
                     for r in rows if r["access"]["blocked"]},
         "per_site": {r["id"]: r["points"] for r in rows},
         "settle_cut_short": settle_cut_short(rows),
     }
-    # n/scorable (PLAN A2): points on the sites the board can score at all,
-    # i.e. neither RustKit's access probe nor Chrome's oracle was blocked.
+    # n/scorable (A2): points on the sites the board can score at all, i.e.
+    # neither RustKit's access probe nor Chrome's oracle was blocked.
     # Reported alongside /60, never instead of it.
     scorable = [r for r in rows if not r["access"]["blocked"]
                 and r["id"] not in summary["oracle_blocked"]]
@@ -428,102 +664,85 @@ def summarize(rows, ts, width, height, all_ids, oracle=None):
     return summary
 
 
-def append_trend(summary, run_name, trend_name="trend.csv"):
-    """PLAN A6: one row in trench/realsite/<trend_name> per full run."""
-    trend = REPO / "trench" / "realsite" / trend_name
-    new = not trend.exists()
-    with trend.open("a") as f:
-        if new:
-            f.write("ts,run,points,max,loads,readable,looks_right,"
-                    "scorable_points,scorable_max,blocked,oracle_blocked\n")
-        f.write("%s,%s,%d,%d,%d,%d,%d,%d,%d,%s,%s\n" % (
-            summary["ts"], run_name, summary["points"], summary["max_points"],
-            summary["loads"], summary["readable"], summary["looks_right"],
-            summary["scorable_points"], summary["scorable_max"],
-            "|".join(sorted(summary["blocked"])), "|".join(sorted(summary["oracle_blocked"]))))
+def install_exit_signals(handler, sigmod=signal):
+    """SIGTERM and SIGHUP -> handler, for the signals this platform has (Windows has no SIGHUP)."""
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(sigmod, name, None)
+        if sig is not None:
+            sigmod.signal(sig, handler)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--site", action="append", help="only these site ids")
-    ap.add_argument("--board", choices=sorted(BOARDS), default="top20",
-                    help="top20 (the trench metric, /60) or wide (80 sites, /240, separate trend)")
+    ap.add_argument("--sites-file", help="sites JSON manifest (default websuite/realsite-top20.json)")
+    ap.add_argument("--holdout", action="store_true", help="score holdout suite (websuite/realsite-holdout20.json)")
+    ap.add_argument("--v2", action="store_true", help="run Scorer v2 diagnostics beside V1 board upon completion")
     ap.add_argument("--capture-bin", default=str(REPO / "target/release/parity-capture"))
     ap.add_argument("--out", help="run directory (default trench/realsite/runs/<ts>)")
-    ap.add_argument("--summarize", action="store_true",
-                    help="capture nothing; rebuild summary.json from the per-site JSONs "
-                         "already in --out (a run done in --site chunks)")
+    ap.add_argument("--oracle-headed", action="store_true",
+                    help="run the Chrome oracle headed, off-screen (A1; also REALSITE_ORACLE_HEADED=1). "
+                         "Needs HID idle >= %d s (else headless, reason logged) and holds "
+                         "~/.claude/realwindow.lock for the run" % HEADED_MIN_IDLE_S)
     ap.add_argument("--oracle-headless", action="store_true",
-                    help="run the Chrome oracle headless (the pre-A1 identity) for a before/after "
-                         "reading; the default is headed, off-screen")
-    ap.add_argument("--viewport", metavar="WxH",
-                    help="score at another size (PLAN 2026-09-27 16:20, elasticity): Chrome and "
-                         "RustKit both at WxH. A separate score with its own trend file "
-                         "(trend-WxH.csv), never part of the pinned-size /60")
+                    help="force the headless oracle (the default; kept for compatibility, wins over "
+                         "--oracle-headed / REALSITE_ORACLE_HEADED)")
+    ap.add_argument("--oracle-lock-wait", type=int, default=REALWINDOW_LOCK_WAIT_S,
+                    help="seconds to wait for a busy real-window lock before ORACLE BLOCKED "
+                         "(default %(default)s)")
     args = ap.parse_args()
-    if args.oracle_headless:
-        os.environ["REALSITE_ORACLE_HEADLESS"] = "1"
+    want_headed = ((args.oracle_headed or os.environ.get("REALSITE_ORACLE_HEADED") == "1")
+                   and not (args.oracle_headless or os.environ.get("REALSITE_ORACLE_HEADLESS") == "1"))
 
-    sites_file, trend_name = BOARDS[args.board]
-    cfg = json.loads(sites_file.read_text())
+    manifest_path = Path(args.sites_file) if args.sites_file else (HOLDOUT_SITES_FILE if args.holdout else DEFAULT_SITES_FILE)
+    cfg = json.loads(manifest_path.read_text(encoding="utf-8"))
     width, height = cfg["viewport"]["width"], cfg["viewport"]["height"]
-    size_suffix = ""
-    if args.viewport:
-        w, _, h = args.viewport.partition("x")
-        if (int(w), int(h)) != (width, height):
-            width, height = int(w), int(h)
-            size_suffix = "-%dx%d" % (width, height)
-            trend_name = trend_name.replace(".csv", size_suffix + ".csv")
     sites = cfg["sites"]
-    all_ids = [s["id"] for s in sites]
-    if args.summarize:
-        if not args.out:
-            sys.exit("--summarize needs --out")
-        outdir = Path(args.out)
-        rows = [json.loads((outdir / f"{i}.json").read_text()) for i in all_ids
-                if (outdir / f"{i}.json").exists()]
-        ts = outdir.name
-    else:
-        if args.site:
-            sites = [s for s in sites if s["id"] in set(args.site)]
-            if not sites:
-                sys.exit("no such site ids: %s" % args.site)
+    if args.site:
+        sites = [s for s in sites if s["id"] in set(args.site)]
+        if not sites:
+            sys.exit("no such site ids: %s" % args.site)
 
-        env = dict(os.environ)
-        chrome_path = env.get("PARITY_CHROME_PATH") or str(DEFAULT_CHROME)
-        problems = []
-        if not Path(chrome_path).exists():
-            problems.append("pinned Chrome not found: %s" % chrome_path)
-        if not Path(args.capture_bin).exists():
-            problems.append("parity-capture not built: %s" % args.capture_bin)
-        if not shutil.which("node"):
-            problems.append("node not on PATH")
-        if problems:
-            sys.exit("INSTRUMENT BROKEN: " + "; ".join(problems))
-        env["PARITY_CHROME_PATH"] = chrome_path
+    env = dict(os.environ)
+    chrome_path = env.get("PARITY_CHROME_PATH") or str(DEFAULT_CHROME)
+    problems = []
+    if not Path(chrome_path).exists():
+        problems.append("pinned Chrome not found: %s" % chrome_path)
+    if not Path(args.capture_bin).exists():
+        problems.append("parity-capture not built: %s" % args.capture_bin)
+    if not shutil.which("node"):
+        problems.append("node not on PATH")
+    if problems:
+        sys.exit("INSTRUMENT BROKEN: " + "; ".join(problems))
+    env["PARITY_CHROME_PATH"] = chrome_path
 
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        outdir = Path(args.out) if args.out else REPO / "trench" / "realsite" / "runs" / (ts + ("-wide" if args.board == "wide" else "") + size_suffix)
-        outdir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    outdir = Path(args.out) if args.out else REPO / "trench" / "realsite" / "runs" / ts
+    outdir.mkdir(parents=True, exist_ok=True)
 
-        rows = []
-        for s in sites:
-            r = score_site(s, Path(args.capture_bin), outdir, width, height, env)
-            print(fmt_row(r), flush=True)
-            rows.append(r)
+    def _signal_exit(signum, _frame):
+        raise SystemExit(128 + signum)  # unwinds through OracleSession: lock released
+
+    install_exit_signals(_signal_exit)
+
+    rows = []
+    try:
+        with OracleSession(want_headed, lock_wait_s=args.oracle_lock_wait) as oracle:
+            for s in sites:
+                oracle.recheck(s["id"])
+                r = score_site(s, Path(args.capture_bin), outdir, width, height, oracle.apply(env))
+                print(fmt_row(r), flush=True)
+                rows.append(r)
+    except OracleLockBusy as e:
+        sys.exit(str(e))
 
     versions = {c.get("browser_version") for r in rows for c in r["chrome"] if c.get("browser_version")}
     if versions and versions != {PINNED_CHROME_VERSION}:
         sys.exit("INSTRUMENT BROKEN: oracle ran Chrome %s, pinned is %s" % (
             sorted(versions), PINNED_CHROME_VERSION))
 
-    summary = summarize(rows, ts, width, height, all_ids)
-    (outdir / "summary.json").write_text(json.dumps(summary, indent=2))
-    if summary["full_run"]:
-        append_trend(summary, outdir.name, trend_name)
-    if args.summarize:
-        for r in rows:
-            print(fmt_row(r))
+    summary = summarize(rows, ts, width, height, [s["id"] for s in sites], oracle=oracle)
+    (outdir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print("-" * 78)
     print("POINTS %d/%d   loads %d  readable %d  looks-right %d   unstable: %s   oracle failed: %s" % (
         summary["points"], summary["max_points"], summary["loads"], summary["readable"],
@@ -534,9 +753,19 @@ def main():
           + ("   (timing-bound: not comparable run to run)" if summary["settle_cut_short"] else ""))
     print("ORACLE BLOCKED %s" % (
         ", ".join("%s (%s)" % kv for kv in summary["oracle_blocked"].items()) or "none"))
-    print("SCORABLE %d/%d on %d sites" % (
-        summary["scorable_points"], summary["scorable_max"], summary["scorable_sites"]))
+    print("SCORABLE %d/%d on %d sites (%s)   oracle: %s" % (
+        summary["scorable_points"], summary["scorable_max"], summary["scorable_sites"],
+        "full run" if summary["full_run"] else "partial run", summary["oracle_reason"]))
     print("run: %s" % outdir.relative_to(REPO) if outdir.is_relative_to(REPO) else outdir)
+
+    if args.v2:
+        try:
+            import scorer_v2
+            summary_v2 = scorer_v2.score_run_v2(outdir)
+            print()
+            print(scorer_v2.format_table(summary_v2))
+        except Exception as e:
+            print(f"Warning: Scorer v2 diagnostics failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
