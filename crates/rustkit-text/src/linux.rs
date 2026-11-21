@@ -237,6 +237,59 @@ impl LinuxTextBackend {
     }
 }
 
+/// A face's ascent and descent in pixels as Blink rounds them on Linux
+/// (FontMetrics::AscentDescentWithHacks): each rounded, then, when the descent was rounded DOWN,
+/// one pixel moved from the ascent to the descent so the glyph's descent is not clipped. Measured
+/// against Chrome 148's canvas fontBoundingBox: Liberation Sans 16px 14.48 / 3.39 -> 13 / 4,
+/// Noto Color Emoji 14px 12.99 / 3.42 -> 12 / 4.
+fn blink_ascent_descent(ascent: f32, descent: f32) -> (f32, f32) {
+    let (mut a, mut d) = (ascent.round(), descent.round());
+    if d < descent && a >= 1.0 {
+        a -= 1.0;
+        d += 1.0;
+    }
+    (a, d)
+}
+
+extern "C" {
+    fn FT_Load_Sfnt_Table(
+        face: freetype::ffi::FT_Face,
+        tag: freetype::ffi::FT_ULong,
+        offset: freetype::ffi::FT_Long,
+        buffer: *mut u8,
+        length: *mut freetype::ffi::FT_ULong,
+    ) -> freetype::ffi::FT_Error;
+}
+
+/// The raw bytes of `face`'s sfnt table `tag`, if it has one.
+fn sfnt_table(face: &freetype::Face, tag: &[u8; 4]) -> Option<Vec<u8>> {
+    let raw = face.raw() as *const freetype::ffi::FT_FaceRec as freetype::ffi::FT_Face;
+    let tag = u32::from_be_bytes(*tag) as freetype::ffi::FT_ULong;
+    let mut len: freetype::ffi::FT_ULong = 0;
+    // SAFETY: the face is live for the call; a null buffer asks for the table's length only.
+    if unsafe { FT_Load_Sfnt_Table(raw, tag, 0, std::ptr::null_mut(), &mut len) } != 0 || len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; len as usize];
+    // SAFETY: `buf` holds `len` bytes, the length FreeType reported for this table.
+    if unsafe { FT_Load_Sfnt_Table(raw, tag, 0, buf.as_mut_ptr(), &mut len) } != 0 {
+        return None;
+    }
+    Some(buf)
+}
+
+/// (units per em, hhea ascender, hhea descender, hhea line gap), in font units.
+fn hhea_metrics(face: &freetype::Face) -> Option<(f32, f32, f32, f32)> {
+    let head = sfnt_table(face, b"head")?;
+    let hhea = sfnt_table(face, b"hhea")?;
+    let be16 = |b: &[u8], at: usize| -> Option<i16> { Some(i16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?])) };
+    let upem = u16::from_be_bytes([*head.get(18)?, *head.get(19)?]) as f32;
+    if upem <= 0.0 {
+        return None;
+    }
+    Some((upem, be16(&hhea, 4)? as f32, be16(&hhea, 6)? as f32, be16(&hhea, 8)? as f32))
+}
+
 /// Shape `run` and write each cluster's advance onto its first char.
 /// Ligatures are off so the one-glyph-per-char painting stays consistent.
 fn shape_run(hb: &HbFace, run: &[char], size: f32, out: &mut [f32]) {
@@ -596,14 +649,20 @@ impl LinuxTextBackend {
     pub fn line_metrics(&mut self, descriptor: &FontDescriptor) -> Result<(f32, f32, f32), TextError> {
         let face = self.get_face(descriptor)?;
         if face.has_fixed_sizes() && !face.is_scalable() {
-            // A bitmap-strike face (Noto Color Emoji) has no design units: its extents are the
-            // selected strike's size metrics (26.6 pixels), scaled to the size like its advances.
+            // A bitmap-strike face (Noto Color Emoji): FreeType reports it no design units, but
+            // Chrome measures it from its hhea table like any face (Noto Color Emoji: 1900 / -500
+            // per 2048 em). Read hhea and head directly; the strike's size metrics only if they
+            // cannot be read.
+            if let Some((upem, hhea_ascent, hhea_descent, hhea_gap)) = hhea_metrics(face) {
+                let scale = descriptor.size / upem;
+                let (ascent, descent) = blink_ascent_descent(hhea_ascent * scale, hhea_descent.abs() * scale);
+                return Ok((ascent, descent, (hhea_gap * scale).max(0.0).round()));
+            }
             let m = face
                 .size_metrics()
                 .ok_or_else(|| TextError::ShapingFailed("strike face has no size metrics".into()))?;
             let scale = fixed_strike_scale(face, descriptor.size);
-            let ascent = (m.ascender as f32 / 64.0 * scale).round();
-            let descent = (m.descender as f32 / 64.0 * scale).abs().round();
+            let (ascent, descent) = blink_ascent_descent(m.ascender as f32 / 64.0 * scale, (m.descender as f32 / 64.0 * scale).abs());
             let gap = (((m.height - (m.ascender - m.descender)) as f32) / 64.0 * scale).max(0.0).round();
             return Ok((ascent, descent, gap));
         }
@@ -612,8 +671,7 @@ impl LinuxTextBackend {
             return Err(TextError::ShapingFailed("face reports no units_per_EM".into()));
         }
         let scale = descriptor.size / upem;
-        let ascent = (face.ascender() as f32 * scale).round();
-        let descent = (face.descender() as f32 * scale).abs().round();
+        let (ascent, descent) = blink_ascent_descent(face.ascender() as f32 * scale, (face.descender() as f32 * scale).abs());
         let gap = ((face.height() as f32 - (face.ascender() as f32 - face.descender() as f32)) * scale)
             .max(0.0)
             .round();
@@ -1245,6 +1303,43 @@ mod weight_tests {
         let bare: f32 = b.advance_widths("\u{23F1}", &d).unwrap().iter().sum();
         assert!((vs16 - package).abs() < 0.01, "stopwatch+VS16 {vs16} vs package {package}");
         assert!((bare - package).abs() > 1.0, "the bare stopwatch is the text glyph: {bare} vs {package}");
+    }
+
+    /// Chrome 148 on Linux's font ascent / descent (canvas fontBoundingBox, 2026-11-20): hhea
+    /// scaled to the size and rounded, then Blink's AscentDescentWithHacks borrow: a descent rounded
+    /// DOWN takes one pixel from the ascent. Liberation Sans (hhea 1854 / -434, upem 2048).
+    #[test]
+    fn line_metrics_round_as_blink_and_borrow_for_a_rounded_down_descent() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let family = b.resolve_family(["Liberation Sans"]);
+        if family != "Liberation Sans" {
+            eprintln!("skipped: Liberation Sans not installed");
+            return;
+        }
+        let chrome = [(10.0, 8.0, 3.0), (12.0, 11.0, 3.0), (13.0, 12.0, 3.0), (14.0, 13.0, 3.0), (16.0, 13.0, 4.0),
+            (18.0, 16.0, 4.0), (20.0, 17.0, 5.0), (24.0, 21.0, 6.0), (32.0, 29.0, 7.0), (48.0, 42.0, 11.0)];
+        for (size, ascent, descent) in chrome {
+            let (a, d, _) = b.line_metrics(&desc(&family, size, 400)).unwrap();
+            assert_eq!((a, d), (ascent, descent), "Liberation Sans {size}px");
+        }
+    }
+
+    /// The same for the bitmap-strike emoji face: its hhea (1900 / -500, upem 2048), not the
+    /// strike's size metrics, as Chrome 148 measures it (canvas fontBoundingBox, 2026-11-20).
+    #[test]
+    fn a_bitmap_emoji_face_takes_its_hhea_metrics() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let family = b.resolve_family(["Noto Color Emoji"]);
+        if family != "Noto Color Emoji" {
+            eprintln!("skipped: Noto Color Emoji not installed");
+            return;
+        }
+        let chrome = [(10.0, 8.0, 3.0), (12.0, 11.0, 3.0), (13.0, 11.0, 4.0), (14.0, 12.0, 4.0), (16.0, 15.0, 4.0),
+            (18.0, 16.0, 5.0), (20.0, 19.0, 5.0), (24.0, 22.0, 6.0), (32.0, 30.0, 8.0), (48.0, 45.0, 12.0)];
+        for (size, ascent, descent) in chrome {
+            let (a, d, _) = b.line_metrics(&desc(&family, size, 400)).unwrap();
+            assert_eq!((a, d), (ascent, descent), "Noto Color Emoji {size}px");
+        }
     }
 
     #[test]

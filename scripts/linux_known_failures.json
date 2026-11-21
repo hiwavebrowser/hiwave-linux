@@ -3,7 +3,7 @@
   "known": [
     {
       "test": "rustkit_layout::tests::test_an_emoji_label_lifts_a_styled_buttons_line",
-      "reason": "Pinned on Chrome for macOS (Apple Color Emoji lifts the label's line, button 32 -> 39). Chrome 148 on Linux measures this button 33 (Noto Color Emoji lifts Arial 14px's line 16 -> 17) and 32 without the emoji. RustKit on Linux unites fallback faces into the line since LINUX-BOARD-GEOMETRY (b) (Noto Sans Symbols2: 24, as Chrome), but takes Noto Color Emoji's strike metrics (13 + 3 at 14px) where Chrome's line is 17: the button is 32 on Linux, 1px under Chrome's 33. An open item with data."
+      "reason": "Pinned on Chrome for macOS (Apple Color Emoji lifts the label's line, button 32 -> 39). Chrome 148 on Linux measures this button 33 (Noto Color Emoji lifts Arial 14px's line 16 -> 17), and RustKit on Linux now builds 33 too (fallback faces united into the line; Noto Color Emoji measured from its hhea with Blink's rounding). The test's 39 is the macOS number; a Linux pin would be 33."
     },
     {
       "test": "rustkit_layout::tests::test_negative_half_leading_inline_keeps_the_line_baseline",
