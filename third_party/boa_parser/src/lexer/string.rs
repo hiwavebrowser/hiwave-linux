@@ -1,10 +1,9 @@
 //! Boa's lexing for ECMAScript string literals.
 
-use crate::lexer::{token::EscapeSequence, Cursor, Error, Token, TokenKind, Tokenizer};
+use crate::lexer::{Cursor, Error, Token, TokenKind, Tokenizer, token::EscapeSequence};
 use crate::source::ReadChar;
-use boa_ast::{Position, Span};
+use boa_ast::{LinearSpan, Position, PositionGroup, Span};
 use boa_interner::Interner;
-use boa_profiler::Profiler;
 use std::io::{self, ErrorKind};
 
 /// String literal lexing.
@@ -46,10 +45,6 @@ pub(crate) enum StringTerminator {
 pub(crate) trait UTF16CodeUnitsBuffer {
     /// Encodes the code point to UTF-16 code units and push to the buffer.
     fn push_code_point(&mut self, code_point: u32);
-
-    /// Decodes the buffer into a String and replace the invalid data with the replacement character (U+FFFD).
-    #[allow(dead_code)]
-    fn to_string_lossy(&self) -> String;
 }
 
 impl UTF16CodeUnitsBuffer for Vec<u16> {
@@ -69,30 +64,29 @@ impl UTF16CodeUnitsBuffer for Vec<u16> {
         self.push(cu1);
         self.push(cu2);
     }
-
-    fn to_string_lossy(&self) -> String {
-        String::from_utf16_lossy(self.as_slice())
-    }
 }
 
 impl<R> Tokenizer<R> for StringLiteral {
     fn lex(
         &mut self,
         cursor: &mut Cursor<R>,
-        start_pos: Position,
+        start_pos: PositionGroup,
         interner: &mut Interner,
     ) -> Result<Token, Error>
     where
         R: ReadChar,
     {
-        let _timer = Profiler::global().start_event("StringLiteral", "Lexing");
-
-        let (lit, span, escape_sequence) =
-            Self::take_string_characters(cursor, start_pos, self.terminator, cursor.strict())?;
+        let (lit, span, escape_sequence) = Self::take_string_characters(
+            cursor,
+            start_pos.position(),
+            self.terminator,
+            cursor.strict(),
+        )?;
 
         Ok(Token::new(
             TokenKind::string_literal(interner.get_or_intern(&lit[..]), escape_sequence),
             span,
+            LinearSpan::new(start_pos.linear_position(), cursor.linear_pos()),
         ))
     }
 }
@@ -131,9 +125,6 @@ impl StringLiteral {
                 Some(0x0027 /* ' */) if terminator == StringTerminator::SingleQuote => break,
                 Some(0x0022 /* " */) if terminator == StringTerminator::DoubleQuote => break,
                 Some(0x005C /* \ */) => {
-                    let _timer =
-                        Profiler::global().start_event("StringLiteral - escape sequence", "Lexing");
-
                     let (escape_value, escape) = Self::take_escape_sequence_or_line_continuation(
                         cursor,
                         ch_start_pos,
@@ -191,9 +182,7 @@ impl StringLiteral {
             0x0027 /* ' */ => (Some(0x0027 /* ' */), EscapeSequence::OTHER),
             0x005C /* \ */ => (Some(0x005C /* \ */), EscapeSequence::OTHER),
             0x0030 /* 0 */ if cursor
-                .peek_char()?
-                .filter(|c| (0x30..=0x39 /* 0..=9 */).contains(c))
-                .is_none() =>
+                .peek_char()?.as_ref().is_none_or(|c| !(0x30..=0x39 /* 0..=9 */).contains(c)) =>
                 (Some(0x0000 /* NULL */), EscapeSequence::OTHER),
             0x0078 /* x */ => {
                 (Some(Self::take_hex_escape_sequence(cursor, start_pos)?), EscapeSequence::OTHER)
@@ -374,19 +363,19 @@ impl StringLiteral {
 
         // Grammar: ZeroToThree OctalDigit
         // Grammar: FourToSeven OctalDigit
-        if let Some(c) = cursor.peek_char()? {
-            if (0x30..=0x37/* 0..=7 */).contains(&c) {
-                cursor.next_char()?;
-                code_point = (code_point * 8) + c - 0x30 /* 0 */;
+        if let Some(c) = cursor.peek_char()?
+            && (0x30..=0x37/* 0..=7 */).contains(&c)
+        {
+            cursor.next_char()?;
+            code_point = (code_point * 8) + c - 0x30 /* 0 */;
 
-                if (0x30..=0x33/* 0..=3 */).contains(&init_byte) {
-                    // Grammar: ZeroToThree OctalDigit OctalDigit
-                    if let Some(c) = cursor.peek_char()? {
-                        if (0x30..=0x37/* 0..=7 */).contains(&c) {
-                            cursor.next_char()?;
-                            code_point = (code_point * 8) + c - 0x30 /* 0 */;
-                        }
-                    }
+            if (0x30..=0x33/* 0..=3 */).contains(&init_byte) {
+                // Grammar: ZeroToThree OctalDigit OctalDigit
+                if let Some(c) = cursor.peek_char()?
+                    && (0x30..=0x37/* 0..=7 */).contains(&c)
+                {
+                    cursor.next_char()?;
+                    code_point = (code_point * 8) + c - 0x30 /* 0 */;
                 }
             }
         }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Cross-platform text shaping and font access for RustKit"
 authors = ["HiWave Team"]
-license = "MIT"
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 thiserror = "1.0"
@@ -20,7 +20,12 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_Graphics_DirectWrite",
+    "Win32_System_Registry",
+    # icu.dll's u_hasBinaryProperty, loaded at run time (Emoji_Presentation).
+    "Win32_System_LibraryLoader",
 ] }
+# The `#[implement]` macro (the web-font registry's own font file loader) names this crate.
+windows-core = "0.61"
 
 # macOS (Core Text)
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -29,12 +34,14 @@ core-graphics = "0.23"
 core-text = "20.1"
 foreign-types-shared = "0.3"
 
-# Linux (Fontconfig + FreeType)
+# Linux (Fontconfig + FreeType): the text backend (linux.rs), and the web-font registry, which
+# opens the faces it installs as FreeType memory faces (webfonts.rs, upstream since #1340).
 [target.'cfg(target_os = "linux")'.dependencies]
 fontconfig = "0.6"
 freetype-rs = "0.35"
 rustybuzz = "0.20"
 wuff = "0.2"
+unicode-properties = { version = "0.1", default-features = false, features = ["emoji"] }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

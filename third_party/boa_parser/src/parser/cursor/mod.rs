@@ -2,12 +2,12 @@
 mod buffered_lexer;
 
 use crate::{
+    Error,
     lexer::{InputElement, Lexer, Token, TokenKind},
     parser::{OrAbrupt, ParseResult},
     source::ReadChar,
-    Error,
 };
-use boa_ast::{Position, Punctuator};
+use boa_ast::{LinearPosition, PositionGroup, Punctuator, Spanned};
 use boa_interner::Interner;
 use buffered_lexer::BufferedLexer;
 
@@ -37,6 +37,9 @@ pub(super) struct Cursor<R> {
 
     /// Tracks the number of tagged templates that are currently being parsed.
     tagged_templates_count: u32,
+
+    /// Where the native stack stood when this cursor was made (HIWAVE PATCH, native recursion).
+    stack_origin: usize,
 }
 
 impl<R> Cursor<R>
@@ -51,7 +54,18 @@ where
             json_parse: false,
             identifier: 0,
             tagged_templates_count: 0,
+            stack_origin: crate::stack_addr(),
         }
+    }
+
+    /// HIWAVE PATCH (native recursion): fails once the parse has recursed too deep for the native
+    /// stack, as V8 does with a RangeError, instead of overflowing it.
+    #[inline]
+    pub(super) fn check_depth(&self) -> ParseResult<()> {
+        if crate::over_stack_budget(self.stack_origin) {
+            return Err(Error::stack_overflow());
+        }
+        Ok(())
     }
 
     /// Sets the goal symbol of the cursor to `Module`.
@@ -68,17 +82,20 @@ where
         self.buffered_lexer.set_goal(elm);
     }
 
+    /// Lexes the next tokens as a regex assuming that the starting '/' has already been consumed.
+    /// If `init_with_eq` is `true`, then assuming that the starting '/=' has already been consumed.
     pub(super) fn lex_regex(
         &mut self,
-        start: Position,
+        start: PositionGroup,
         interner: &mut Interner,
+        init_with_eq: bool,
     ) -> ParseResult<Token> {
-        self.buffered_lexer.lex_regex(start, interner)
+        self.buffered_lexer.lex_regex(start, interner, init_with_eq)
     }
 
     pub(super) fn lex_template(
         &mut self,
-        start: Position,
+        start: PositionGroup,
         interner: &mut Interner,
     ) -> ParseResult<Token> {
         self.buffered_lexer.lex_template(start, interner)
@@ -101,6 +118,7 @@ where
     }
 
     /// Peeks a future token, without consuming it or advancing the cursor.
+    /// This peeking **skips** line terminators.
     ///
     /// You can skip some tokens with the `skip_n` option.
     pub(super) fn peek(
@@ -109,6 +127,18 @@ where
         interner: &mut Interner,
     ) -> ParseResult<Option<&Token>> {
         self.buffered_lexer.peek(skip_n, true, interner)
+    }
+
+    /// Peeks a future token, without consuming it or advancing the cursor.
+    /// This peeking **does not skips** line terminators.
+    ///
+    /// You can skip some tokens with the `skip_n` option.
+    pub(super) fn peek_no_skip_line_term(
+        &mut self,
+        skip_n: usize,
+        interner: &mut Interner,
+    ) -> ParseResult<Option<&Token>> {
+        self.buffered_lexer.peek(skip_n, false, interner)
     }
 
     /// Gets the current strict mode for the cursor.
@@ -192,17 +222,15 @@ where
         &mut self,
         interner: &mut Interner,
     ) -> ParseResult<SemicolonResult<'_>> {
-        self.buffered_lexer.peek(0, false, interner)?.map_or(
-            Ok(SemicolonResult::Found(None)),
-            |tk| match tk.kind() {
+        self.peek_no_skip_line_term(0, interner)?
+            .map_or(Ok(SemicolonResult::Found(None)), |tk| match tk.kind() {
                 TokenKind::Punctuator(Punctuator::Semicolon | Punctuator::CloseBlock)
                 | TokenKind::LineTerminator => Ok(SemicolonResult::Found(Some(tk))),
                 _ => Ok(SemicolonResult::NotFound(tk)),
-            },
-        )
+            })
     }
 
-    /// Consumes the next token if it is a semicolon, or returns a `Errpr` if it's not.
+    /// Consumes the next token if it is a semicolon, or returns a `Error` if it's not.
     ///
     /// It will automatically insert a semicolon if needed, as specified in the [spec][spec].
     ///
@@ -234,7 +262,7 @@ where
     ///
     /// It expects that the token stream does not end here.
     ///
-    /// This is just syntatic sugar for a `.peek(skip_n)` call followed by a check that the result
+    /// This is just syntactic sugar for a `.peek(skip_n)` call followed by a check that the result
     /// is not a line terminator or `None`.
     pub(super) fn peek_expect_no_lineterminator(
         &mut self,
@@ -242,10 +270,7 @@ where
         context: &'static str,
         interner: &mut Interner,
     ) -> ParseResult<&Token> {
-        let tok = self
-            .buffered_lexer
-            .peek(skip_n, false, interner)
-            .or_abrupt()?;
+        let tok = self.peek_no_skip_line_term(skip_n, interner).or_abrupt()?;
 
         if tok.kind() == &TokenKind::LineTerminator {
             Err(Error::unexpected(
@@ -264,8 +289,7 @@ where
         skip_n: usize,
         interner: &mut Interner,
     ) -> ParseResult<Option<bool>> {
-        self.buffered_lexer
-            .peek(skip_n, false, interner)?
+        self.peek_no_skip_line_term(skip_n, interner)?
             .map_or(Ok(None), |t| {
                 Ok(Some(t.kind() == &TokenKind::LineTerminator))
             })
@@ -284,14 +308,22 @@ where
     where
         K: Into<TokenKind>,
     {
-        Ok(if let Some(token) = self.peek(0, interner)? {
-            if token.kind() == &kind.into() {
-                self.next(interner)?
-            } else {
-                None
-            }
+        if let Some(token) = self.peek(0, interner)?
+            && token.kind() == &kind.into()
+        {
+            self.next(interner)
         } else {
-            None
-        })
+            Ok(None)
+        }
+    }
+
+    /// Gets current linear position in the source code.
+    #[inline]
+    pub(super) fn linear_pos(&self) -> LinearPosition {
+        self.buffered_lexer.linear_pos()
+    }
+
+    pub(super) fn take_source(&mut self) -> boa_ast::SourceText {
+        self.buffered_lexer.take_source()
     }
 }

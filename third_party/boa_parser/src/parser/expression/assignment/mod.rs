@@ -14,27 +14,29 @@ mod exponentiation;
 mod r#yield;
 
 use crate::{
+    Error,
     lexer::{Error as LexError, InputElement, TokenKind},
     parser::{
-        expression::assignment::{
-            arrow_function::{ArrowFunction, ConciseBody},
-            async_arrow_function::AsyncArrowFunction,
-            conditional::ConditionalExpression,
-            r#yield::YieldExpression,
+        AllowAwait, AllowIn, AllowYield, Cursor, OrAbrupt, ParseResult, TokenParser,
+        expression::{
+            FormalParameterListOrExpression,
+            assignment::{
+                arrow_function::{ArrowFunction, ConciseBody},
+                async_arrow_function::AsyncArrowFunction,
+                conditional::ConditionalExpression,
+                r#yield::YieldExpression,
+            },
         },
-        name_in_lexically_declared_names, AllowAwait, AllowIn, AllowYield, Cursor, OrAbrupt,
-        ParseResult, TokenParser,
+        name_in_lexically_declared_names,
     },
     source::ReadChar,
-    Error,
 };
 use boa_ast::{
+    Expression, Keyword, Punctuator, Span, Spanned,
     expression::operator::assign::{Assign, AssignOp, AssignTarget},
-    operations::{bound_names, contains, lexically_declared_names, ContainsSymbol},
-    Expression, Keyword, Punctuator,
+    operations::{ContainsSymbol, bound_names, contains, lexically_declared_names},
 };
 use boa_interner::Interner;
-use boa_profiler::Profiler;
 
 pub(super) use exponentiation::ExponentiationExpression;
 
@@ -86,14 +88,14 @@ where
     type Output = Expression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Expression> {
-        let _timer = Profiler::global().start_event("AssignmentExpression", "Parsing");
+        cursor.check_depth()?; // HIWAVE PATCH (native recursion)
         cursor.set_goal(InputElement::RegExp);
 
         match cursor.peek(0, interner).or_abrupt()?.kind() {
             // [+Yield]YieldExpression[?In, ?Await]
             TokenKind::Keyword((Keyword::Yield, _)) if self.allow_yield.0 => {
                 return YieldExpression::new(self.allow_in, self.allow_await)
-                    .parse(cursor, interner)
+                    .parse(cursor, interner);
             }
             // ArrowFunction[?In, ?Yield, ?Await] -> ArrowParameters[?Yield, ?Await] -> BindingIdentifier[?Yield, ?Await]
             TokenKind::IdentifierName(_)
@@ -107,18 +109,12 @@ where
                 } else {
                     1
                 };
-                if let Ok(tok) =
-                    cursor.peek_expect_no_lineterminator(skip_n, "assignment expression", interner)
+                if let Some(tok) = cursor.peek_no_skip_line_term(skip_n, interner)?
+                    && tok.kind() == &TokenKind::Punctuator(Punctuator::Arrow)
                 {
-                    if tok.kind() == &TokenKind::Punctuator(Punctuator::Arrow) {
-                        return ArrowFunction::new(
-                            self.allow_in,
-                            self.allow_yield,
-                            self.allow_await,
-                        )
+                    return ArrowFunction::new(self.allow_in, self.allow_yield, self.allow_await)
                         .parse(cursor, interner)
                         .map(Expression::ArrowFunction);
-                    }
                 }
             }
             //  AsyncArrowFunction[?In, ?Yield, ?Await]
@@ -156,70 +152,88 @@ where
 
         cursor.set_goal(InputElement::Div);
 
-        let position = cursor.peek(0, interner).or_abrupt()?.span().start();
-        let mut lhs = ConditionalExpression::new(self.allow_in, self.allow_yield, self.allow_await)
+        let peek_token = cursor.peek(0, interner).or_abrupt()?;
+        let position = peek_token.span().start();
+        let start_linear_span = peek_token.linear_span();
+        let lhs = ConditionalExpression::new(self.allow_in, self.allow_yield, self.allow_await)
             .parse(cursor, interner)?;
 
         // If the left hand side is a parameter list, we must parse an arrow function.
-        if let Expression::FormalParameterList(parameters) = lhs {
-            cursor.peek_expect_no_lineterminator(0, "arrow function", interner)?;
+        let mut lhs = match lhs {
+            FormalParameterListOrExpression::FormalParameterList {
+                fpl: parameters, ..
+            } => {
+                cursor.peek_expect_no_lineterminator(0, "arrow function", interner)?;
 
-            cursor.expect(
-                TokenKind::Punctuator(Punctuator::Arrow),
-                "arrow function",
-                interner,
-            )?;
-            let arrow = cursor.arrow();
-            cursor.set_arrow(true);
-            let body = ConciseBody::new(self.allow_in).parse(cursor, interner)?;
-            cursor.set_arrow(arrow);
+                cursor.expect(
+                    TokenKind::Punctuator(Punctuator::Arrow),
+                    "arrow function",
+                    interner,
+                )?;
+                let arrow = cursor.arrow();
+                cursor.set_arrow(true);
+                let body = ConciseBody::new(self.allow_in).parse(cursor, interner)?;
+                cursor.set_arrow(arrow);
 
-            // Early Error: ArrowFormalParameters are UniqueFormalParameters.
-            if parameters.has_duplicates() {
-                return Err(Error::lex(LexError::Syntax(
-                    "Duplicate parameter name not allowed in this context".into(),
+                // Early Error: ArrowFormalParameters are UniqueFormalParameters.
+                if parameters.has_duplicates() {
+                    return Err(Error::lex(LexError::Syntax(
+                        "Duplicate parameter name not allowed in this context".into(),
+                        position,
+                    )));
+                }
+
+                // Early Error: It is a Syntax Error if ArrowParameters Contains YieldExpression is true.
+                if contains(&parameters, ContainsSymbol::YieldExpression) {
+                    return Err(Error::lex(LexError::Syntax(
+                        "Yield expression not allowed in this context".into(),
+                        position,
+                    )));
+                }
+
+                // Early Error: It is a Syntax Error if ArrowParameters Contains AwaitExpression is true.
+                if contains(&parameters, ContainsSymbol::AwaitExpression) {
+                    return Err(Error::lex(LexError::Syntax(
+                        "Await expression not allowed in this context".into(),
+                        position,
+                    )));
+                }
+
+                // Early Error: It is a Syntax Error if ConciseBodyContainsUseStrict of ConciseBody is true
+                // and IsSimpleParameterList of ArrowParameters is false.
+                if body.strict() && !parameters.is_simple() {
+                    return Err(Error::lex(LexError::Syntax(
+                        "Illegal 'use strict' directive in function with non-simple parameter list"
+                            .into(),
+                        position,
+                    )));
+                }
+
+                // It is a Syntax Error if any element of the BoundNames of ArrowParameters
+                // also occurs in the LexicallyDeclaredNames of ConciseBody.
+                // https://tc39.es/ecma262/#sec-arrow-function-definitions-static-semantics-early-errors
+                name_in_lexically_declared_names(
+                    &bound_names(&parameters),
+                    &lexically_declared_names(&body),
                     position,
-                )));
+                    interner,
+                )?;
+
+                let linear_pos_end = body.linear_pos_end();
+                let linear_span = start_linear_span.union(linear_pos_end);
+
+                let body_span_end = body.span().end();
+                return Ok(boa_ast::function::ArrowFunction::new(
+                    None,
+                    parameters,
+                    body,
+                    linear_span,
+                    Span::new(position, body_span_end),
+                )
+                .into());
             }
-
-            // Early Error: It is a Syntax Error if ArrowParameters Contains YieldExpression is true.
-            if contains(&parameters, ContainsSymbol::YieldExpression) {
-                return Err(Error::lex(LexError::Syntax(
-                    "Yield expression not allowed in this context".into(),
-                    position,
-                )));
-            }
-
-            // Early Error: It is a Syntax Error if ArrowParameters Contains AwaitExpression is true.
-            if contains(&parameters, ContainsSymbol::AwaitExpression) {
-                return Err(Error::lex(LexError::Syntax(
-                    "Await expression not allowed in this context".into(),
-                    position,
-                )));
-            }
-
-            // Early Error: It is a Syntax Error if ConciseBodyContainsUseStrict of ConciseBody is true
-            // and IsSimpleParameterList of ArrowParameters is false.
-            if body.strict() && !parameters.is_simple() {
-                return Err(Error::lex(LexError::Syntax(
-                    "Illegal 'use strict' directive in function with non-simple parameter list"
-                        .into(),
-                    position,
-                )));
-            }
-
-            // It is a Syntax Error if any element of the BoundNames of ArrowParameters
-            // also occurs in the LexicallyDeclaredNames of ConciseBody.
-            // https://tc39.es/ecma262/#sec-arrow-function-definitions-static-semantics-early-errors
-            name_in_lexically_declared_names(
-                &bound_names(&parameters),
-                &lexically_declared_names(&body),
-                position,
-                interner,
-            )?;
-
-            return Ok(boa_ast::function::ArrowFunction::new(None, parameters, body).into());
-        }
+            FormalParameterListOrExpression::Expression(expression) => expression,
+        };
 
         // Review if we are trying to assign to an invalid left hand side expression.
         if let Some(tok) = cursor.peek(0, interner)?.cloned() {
@@ -255,13 +269,12 @@ where
                         let assignop = p.as_assign_op().expect("assignop disappeared");
 
                         let mut rhs = self.parse(cursor, interner)?;
-                        if assignop == AssignOp::BoolAnd
+                        if (assignop == AssignOp::BoolAnd
                             || assignop == AssignOp::BoolOr
-                            || assignop == AssignOp::Coalesce
+                            || assignop == AssignOp::Coalesce)
+                            && let AssignTarget::Identifier(ident) = target
                         {
-                            if let AssignTarget::Identifier(ident) = target {
-                                rhs.set_anonymous_function_definition_name(&ident);
-                            }
+                            rhs.set_anonymous_function_definition_name(&ident);
                         }
                         lhs = Assign::new(assignop, target, rhs).into();
                     } else {

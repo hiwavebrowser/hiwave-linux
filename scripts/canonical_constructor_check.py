@@ -88,9 +88,53 @@ def strip_test_modules(src: str) -> str:
     return "".join(out)
 
 
+# `#[cfg(test)] mod name;` / `#[cfg(all(test, ..))] mod name;` declares a test module whose BODY lives in
+# another file. `strip_test_modules` only removes brace-delimited modules, so those files were scanned as
+# production: every macOS-style `foo_tests.rs` using `ComputedStyle::default()` (which the docstring above
+# explicitly allows in tests) failed the check on every Linux PR (2026-11-09, 18 hits, all in test files).
+_TEST_MOD_DECL = re.compile(
+    r"#\[cfg\((?:all\(|any\()?[^\]]*\btest\b[^\]]*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_0-9]+)\s*;"
+)
+_INNER_TEST_CFG = re.compile(r"^\s*#!\[cfg\([^\]]*\btest\b[^\]]*\]", re.M)
+
+
+def test_files() -> set[Path]:
+    """Files that are test code: declared `#[cfg(test)] mod x;`, `#![cfg(..test..)]` inside, under a
+    `tests/` directory, or nested below a test module's own directory."""
+    files: set[Path] = set()
+    for path in CRATES.rglob("*.rs"):
+        if "tests" in path.relative_to(CRATES).parts[:-1]:
+            files.add(path)
+            continue
+        text = path.read_text()
+        if _INNER_TEST_CFG.search(text[:2000]):
+            files.add(path)
+        # A module declared in `lib.rs`/`main.rs`/`mod.rs` lives beside it; in `foo.rs` under `foo/`.
+        base = path.parent if path.name in ("lib.rs", "main.rs", "mod.rs") else path.parent / path.stem
+        for m in _TEST_MOD_DECL.finditer(text):
+            for cand in (base / f"{m.group(1)}.rs", base / m.group(1) / "mod.rs"):
+                if cand.exists():
+                    files.add(cand)
+    # Everything nested under a test module's own directory (`close_tab_tests/tab_order_tests.rs`).
+    grown = True
+    while grown:
+        grown = False
+        for f in list(files):
+            sub = f.parent / f.stem
+            if sub.is_dir():
+                for child in sub.rglob("*.rs"):
+                    if child not in files:
+                        files.add(child)
+                        grown = True
+    return files
+
+
 def violations() -> list[tuple[str, int, str]]:
     found = []
+    tests = test_files()
     for path in sorted(CRATES.rglob("*.rs")):
+        if path in tests:
+            continue
         prod = strip_test_modules(path.read_text())
         # Re-derive line numbers against the ORIGINAL file so the report points
         # at somewhere a human can actually look.
@@ -100,6 +144,28 @@ def violations() -> list[tuple[str, int, str]]:
                 rel = path.relative_to(CRATES.parent).as_posix()
                 found.append((rel, lineno, line.strip()))
     return found
+
+
+def unbaselined(found, baseline) -> list[tuple[str, int, str]]:
+    """The findings the baseline does not cover, matched by (path, source text) and COUNT.
+
+    Not by (path, line): a line number in a 46k-line file that a macOS sync rewrites moves on every sync,
+    so a baselined use stopped matching the next time anything above it changed and the check went red for
+    a use nobody touched. The line in a baseline entry is informational. Counted, so a SECOND occurrence
+    of the same text in the same file is still new.
+    """
+    allowed: dict[tuple[str, str], int] = {}
+    for b in baseline:
+        key = (b[0], b[2].strip())
+        allowed[key] = allowed.get(key, 0) + 1
+    new = []
+    for rel, lineno, text in found:
+        key = (rel, text.strip())
+        if allowed.get(key, 0) > 0:
+            allowed[key] -= 1
+        else:
+            new.append((rel, lineno, text))
+    return new
 
 
 def is_self_checking() -> bool:
@@ -141,7 +207,7 @@ def main() -> int:
         baseline = {tuple(x) for x in json.loads(BASELINE.read_text())["allowed"]}
 
     found = violations()
-    new = [v for v in found if (v[0], v[1]) not in {(b[0], b[1]) for b in baseline}]
+    new = unbaselined(found, baseline)
 
     print(f"ComputedStyle::default() in production code: {len(found)}")
     if not new:

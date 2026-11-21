@@ -41,6 +41,20 @@ impl Error {
     {
         Self::Syntax(err.into(), pos.into())
     }
+
+    /// Creates an "unexpected" syntax error (found X, with message).
+    #[inline]
+    pub(crate) fn unexpected<F, M, P>(found: F, message: M, pos: P) -> Self
+    where
+        F: fmt::Display,
+        M: Into<Box<str>>,
+        P: Into<Position>,
+    {
+        Self::Syntax(
+            format!("unexpected {found}, {}", message.into().as_ref()).into(),
+            pos.into(),
+        )
+    }
 }
 
 impl fmt::Display for Error {
@@ -90,7 +104,7 @@ mod tests {
 
     #[test]
     fn io() {
-        let custom_error = io::Error::new(io::ErrorKind::Other, "I/O error");
+        let custom_error = io::Error::other("I/O error");
         let err = custom_error.into();
         if let Error::IO(err) = err {
             assert_eq!(err.to_string(), "I/O error");
@@ -98,7 +112,7 @@ mod tests {
             unreachable!()
         }
 
-        let custom_error = io::Error::new(io::ErrorKind::Other, "I/O error");
+        let custom_error = io::Error::other("I/O error");
         let err: Error = custom_error.into();
         assert_eq!(err.to_string(), "I/O error");
         err.source().map_or_else(

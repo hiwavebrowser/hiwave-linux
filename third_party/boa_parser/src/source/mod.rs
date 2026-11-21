@@ -6,8 +6,8 @@ use std::{
     path::Path,
 };
 
-pub use utf16::UTF16Input;
 pub use utf8::UTF8Input;
+pub use utf16::UTF16Input;
 
 mod utf16;
 mod utf8;
@@ -51,7 +51,8 @@ impl<'input> Source<'static, UTF16Input<'input>> {
     ///
     /// ```
     /// # use boa_parser::Source;
-    /// let utf16: Vec<u16> = "var array = [5, 4, 3, 2, 1];".encode_utf16().collect();
+    /// let utf16: Vec<u16> =
+    ///     "var array = [5, 4, 3, 2, 1];".encode_utf16().collect();
     /// let source = Source::from_utf16(&utf16);
     /// ```
     ///

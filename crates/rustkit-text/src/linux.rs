@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+// Contains code contributed under MPL-2.0 by an outside contributor; see NOTICE.
 //! Linux Text Backend using Fontconfig + FreeType
 //!
 //! This module provides text shaping and font access on Linux using
@@ -40,9 +42,9 @@ pub struct LinuxTextBackend {
     /// `webfonts::generation()` the caches were filled under; a change means a
     /// family name may now resolve to a different face.
     webfont_generation: u64,
-    /// Char -> installed family that covers it, for chars the requested face
-    /// lacks (None = nothing installed covers it).
-    fallback_cache: HashMap<char, Option<String>>,
+    /// (char, emoji presentation) -> installed family that covers it, for chars the requested
+    /// face lacks (None = nothing installed covers it).
+    fallback_cache: HashMap<(char, bool), Option<String>>,
     /// Face key -> its variable-axis pin (None = no weight or optical-size axis).
     face_axes: HashMap<String, Option<AxisPin>>,
     /// Face key -> HarfBuzz face over the same bytes (None = unparsable).
@@ -235,6 +237,59 @@ impl LinuxTextBackend {
     }
 }
 
+/// A face's ascent and descent in pixels as Blink rounds them on Linux
+/// (FontMetrics::AscentDescentWithHacks): each rounded, then, when the descent was rounded DOWN,
+/// one pixel moved from the ascent to the descent so the glyph's descent is not clipped. Measured
+/// against Chrome 148's canvas fontBoundingBox: Liberation Sans 16px 14.48 / 3.39 -> 13 / 4,
+/// Noto Color Emoji 14px 12.99 / 3.42 -> 12 / 4.
+fn blink_ascent_descent(ascent: f32, descent: f32) -> (f32, f32) {
+    let (mut a, mut d) = (ascent.round(), descent.round());
+    if d < descent && a >= 1.0 {
+        a -= 1.0;
+        d += 1.0;
+    }
+    (a, d)
+}
+
+extern "C" {
+    fn FT_Load_Sfnt_Table(
+        face: freetype::ffi::FT_Face,
+        tag: freetype::ffi::FT_ULong,
+        offset: freetype::ffi::FT_Long,
+        buffer: *mut u8,
+        length: *mut freetype::ffi::FT_ULong,
+    ) -> freetype::ffi::FT_Error;
+}
+
+/// The raw bytes of `face`'s sfnt table `tag`, if it has one.
+fn sfnt_table(face: &freetype::Face, tag: &[u8; 4]) -> Option<Vec<u8>> {
+    let raw = face.raw() as *const freetype::ffi::FT_FaceRec as freetype::ffi::FT_Face;
+    let tag = u32::from_be_bytes(*tag) as freetype::ffi::FT_ULong;
+    let mut len: freetype::ffi::FT_ULong = 0;
+    // SAFETY: the face is live for the call; a null buffer asks for the table's length only.
+    if unsafe { FT_Load_Sfnt_Table(raw, tag, 0, std::ptr::null_mut(), &mut len) } != 0 || len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; len as usize];
+    // SAFETY: `buf` holds `len` bytes, the length FreeType reported for this table.
+    if unsafe { FT_Load_Sfnt_Table(raw, tag, 0, buf.as_mut_ptr(), &mut len) } != 0 {
+        return None;
+    }
+    Some(buf)
+}
+
+/// (units per em, hhea ascender, hhea descender, hhea line gap), in font units.
+fn hhea_metrics(face: &freetype::Face) -> Option<(f32, f32, f32, f32)> {
+    let head = sfnt_table(face, b"head")?;
+    let hhea = sfnt_table(face, b"hhea")?;
+    let be16 = |b: &[u8], at: usize| -> Option<i16> { Some(i16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?])) };
+    let upem = u16::from_be_bytes([*head.get(18)?, *head.get(19)?]) as f32;
+    if upem <= 0.0 {
+        return None;
+    }
+    Some((upem, be16(&hhea, 4)? as f32, be16(&hhea, 6)? as f32, be16(&hhea, 8)? as f32))
+}
+
 /// Shape `run` and write each cluster's advance onto its first char.
 /// Ligatures are off so the one-glyph-per-char painting stays consistent.
 fn shape_run(hb: &HbFace, run: &[char], size: f32, out: &mut [f32]) {
@@ -273,6 +328,19 @@ fn is_zero_width(ch: char) -> bool {
 pub fn is_emoji(ch: char) -> bool {
     matches!(ch as u32,
         0x1F300..=0x1FAFF | 0x1F000..=0x1F0FF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x1F1E6..=0x1F1FF)
+}
+
+/// Unicode's Emoji_Presentation property (emoji-data.txt): the character is drawn as an emoji by
+/// default. Chrome's fallback reads the same property (ICU); a symbol without it is text first.
+pub fn has_emoji_presentation(ch: char) -> bool {
+    use unicode_properties::{EmojiStatus, UnicodeEmoji};
+    matches!(
+        ch.emoji_status(),
+        EmojiStatus::EmojiPresentation
+            | EmojiStatus::EmojiPresentationAndModifierBase
+            | EmojiStatus::EmojiPresentationAndEmojiComponent
+            | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+    )
 }
 
 /// Pixels per strike pixel: how much a bitmap-strike font's glyphs shrink to
@@ -420,6 +488,19 @@ impl LinuxTextBackend {
         phase: u8,
         phases: u8,
     ) -> Result<RasterizedGlyph, TextError> {
+        self.rasterize_glyph_at_phase_varied(ch, crate::Variation::None, descriptor, phase, phases)
+    }
+
+    /// `rasterize_glyph_at_phase` from the face the selector after `ch` asks for, as layout
+    /// measured it (`source_descriptor_varied`).
+    pub fn rasterize_glyph_at_phase_varied(
+        &mut self,
+        ch: char,
+        variation: crate::Variation,
+        descriptor: &FontDescriptor,
+        phase: u8,
+        phases: u8,
+    ) -> Result<RasterizedGlyph, TextError> {
         if is_zero_width(ch) {
             return Ok(RasterizedGlyph {
                 bitmap: Vec::new(),
@@ -431,7 +512,7 @@ impl LinuxTextBackend {
                 ascent: 0.0,
             });
         }
-        let descriptor = &self.source_descriptor(ch, descriptor);
+        let descriptor = &self.source_descriptor_varied(ch, variation, descriptor);
         let face = self.get_face(descriptor)?;
         if face.has_fixed_sizes() && !face.is_scalable() {
             return Err(TextError::ShapingFailed(format!("{ch:?} is color-bitmap only")));
@@ -519,6 +600,16 @@ impl LinuxTextBackend {
                 // Chrome asks fontconfig for its default sans; the generic
                 // "sans-serif" pattern is that lookup here.
                 Some("sans-serif".to_string())
+            } else if matches!(lower.as_str(), "cursive" | "fantasy") {
+                // Chrome on Linux draws a bare cursive / fantasy (its named picks absent) in its
+                // standard font, Times New Roman: the metric-compatible Liberation Serif, as
+                // `serif` is. Not the sans-serif default a fontconfig miss would give.
+                Some(
+                    self.fontconfig
+                        .find("Times New Roman", None)
+                        .map(|_| "Times New Roman".to_string())
+                        .unwrap_or_else(|| "serif".to_string()),
+                )
             } else if lower == "helvetica" {
                 // Chrome resolves Helvetica to the same metric-compatible
                 // face as Arial (Liberation Sans), where a bare fontconfig
@@ -557,13 +648,30 @@ impl LinuxTextBackend {
     /// rounds them before summing into a line box.
     pub fn line_metrics(&mut self, descriptor: &FontDescriptor) -> Result<(f32, f32, f32), TextError> {
         let face = self.get_face(descriptor)?;
+        if face.has_fixed_sizes() && !face.is_scalable() {
+            // A bitmap-strike face (Noto Color Emoji): FreeType reports it no design units, but
+            // Chrome measures it from its hhea table like any face (Noto Color Emoji: 1900 / -500
+            // per 2048 em). Read hhea and head directly; the strike's size metrics only if they
+            // cannot be read.
+            if let Some((upem, hhea_ascent, hhea_descent, hhea_gap)) = hhea_metrics(face) {
+                let scale = descriptor.size / upem;
+                let (ascent, descent) = blink_ascent_descent(hhea_ascent * scale, hhea_descent.abs() * scale);
+                return Ok((ascent, descent, (hhea_gap * scale).max(0.0).round()));
+            }
+            let m = face
+                .size_metrics()
+                .ok_or_else(|| TextError::ShapingFailed("strike face has no size metrics".into()))?;
+            let scale = fixed_strike_scale(face, descriptor.size);
+            let (ascent, descent) = blink_ascent_descent(m.ascender as f32 / 64.0 * scale, (m.descender as f32 / 64.0 * scale).abs());
+            let gap = (((m.height - (m.ascender - m.descender)) as f32) / 64.0 * scale).max(0.0).round();
+            return Ok((ascent, descent, gap));
+        }
         let upem = face.em_size() as f32;
         if upem <= 0.0 {
             return Err(TextError::ShapingFailed("face reports no units_per_EM".into()));
         }
         let scale = descriptor.size / upem;
-        let ascent = (face.ascender() as f32 * scale).round();
-        let descent = (face.descender() as f32 * scale).abs().round();
+        let (ascent, descent) = blink_ascent_descent(face.ascender() as f32 * scale, (face.descender() as f32 * scale).abs());
         let gap = ((face.height() as f32 - (face.ascender() as f32 - face.descender() as f32)) * scale)
             .max(0.0)
             .round();
@@ -611,7 +719,7 @@ impl LinuxTextBackend {
                 i += 1;
                 continue;
             }
-            let src = self.source_descriptor(c, descriptor);
+            let src = self.source_descriptor_varied(c, crate::Variation::after(chars.get(i + 1).copied()), descriptor);
             let fixed = {
                 let face = self.get_face(&src)?;
                 face.has_fixed_sizes() && !face.is_scalable()
@@ -631,7 +739,7 @@ impl LinuxTextBackend {
             let mut j = i + 1;
             while j < chars.len()
                 && !is_zero_width(chars[j])
-                && self.source_descriptor(chars[j], descriptor).family == src.family
+                && self.source_descriptor_varied(chars[j], crate::Variation::after(chars.get(j + 1).copied()), descriptor).family == src.family
             {
                 j += 1;
             }
@@ -660,23 +768,41 @@ impl LinuxTextBackend {
             .unwrap_or(false)
     }
 
-    /// The descriptor whose face paints `ch`: the requested one when it has the
-    /// glyph, else the first installed fallback family that does (emoji go to
-    /// Noto Color Emoji), else the requested one (its .notdef).
-    pub fn source_descriptor(&mut self, ch: char, descriptor: &FontDescriptor) -> FontDescriptor {
+    /// `source_descriptor` for `ch` followed by the variation selector `variation` asks for
+    /// (`Variation::after(next char)`): U+FE0F asks for emoji presentation, U+FE0E for text.
+    pub fn source_descriptor_varied(
+        &mut self,
+        ch: char,
+        variation: crate::Variation,
+        descriptor: &FontDescriptor,
+    ) -> FontDescriptor {
         if self.has_glyph(descriptor, ch) {
+            // The primary face keeps a character it has, whatever the selector asks (not measured
+            // against Chrome for a primary face that has the glyph; left as it was).
             return descriptor.clone();
         }
-        if let Some(hit) = self.fallback_cache.get(&ch) {
+        // Emoji presentation: asked for by U+FE0F, refused by U+FE0E, else the character's own
+        // Emoji_Presentation, as Chrome (U+23F1 + U+FE0F: Noto Color Emoji; bare: Symbols2).
+        let emoji = match variation {
+            crate::Variation::Emoji => true,
+            crate::Variation::Text => false,
+            crate::Variation::None => is_emoji(ch) && has_emoji_presentation(ch),
+        };
+        if let Some(hit) = self.fallback_cache.get(&(ch, emoji)) {
             return match hit {
                 Some(family) => FontDescriptor { family: family.clone(), ..descriptor.clone() },
                 None => descriptor.clone(),
             };
         }
-        let candidates: &[&str] = if is_emoji(ch) {
-            &["Noto Color Emoji", "Noto Sans Symbols 2", "Noto Sans Symbols", "DejaVu Sans"]
+        // fontconfig's family name is "Noto Sans Symbols2" (no space): spelt with one, it never
+        // resolved. A symbol in an emoji block that defaults to TEXT presentation (U+1F6E1
+        // shield, U+2699 gear) tries the text faces first and the colour face last.
+        let candidates: &[&str] = if emoji {
+            &["Noto Color Emoji", "Noto Sans Symbols2", "Noto Sans Symbols", "DejaVu Sans"]
+        } else if is_emoji(ch) {
+            &["DejaVu Sans", "Noto Sans Symbols2", "Noto Sans Symbols", "Noto Color Emoji"]
         } else {
-            &["Noto Sans", "DejaVu Sans", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Sans Math", "Noto Sans CJK SC"]
+            &["Noto Sans", "DejaVu Sans", "Noto Sans Symbols", "Noto Sans Symbols2", "Noto Sans Math", "Noto Sans CJK SC"]
         };
         let mut found = None;
         for name in candidates {
@@ -690,11 +816,18 @@ impl LinuxTextBackend {
                 break;
             }
         }
-        self.fallback_cache.insert(ch, found.clone());
+        self.fallback_cache.insert((ch, emoji), found.clone());
         match found {
             Some(family) => FontDescriptor { family, ..descriptor.clone() },
             None => descriptor.clone(),
         }
+    }
+
+    /// The descriptor whose face paints `ch`: the requested one when it has the
+    /// glyph, else the first installed fallback family that does (emoji go to
+    /// Noto Color Emoji), else the requested one (its .notdef).
+    pub fn source_descriptor(&mut self, ch: char, descriptor: &FontDescriptor) -> FontDescriptor {
+        self.source_descriptor_varied(ch, crate::Variation::None, descriptor)
     }
 
     /// Rasterize a color-bitmap glyph (emoji) to premultiplied RGBA, scaled
@@ -707,7 +840,17 @@ impl LinuxTextBackend {
         ch: char,
         descriptor: &FontDescriptor,
     ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
-        let src = self.source_descriptor(ch, descriptor);
+        self.rasterize_color_glyph_varied(ch, crate::Variation::None, descriptor)
+    }
+
+    /// `rasterize_color_glyph` from the face the selector after `ch` asks for.
+    pub fn rasterize_color_glyph_varied(
+        &mut self,
+        ch: char,
+        variation: crate::Variation,
+        descriptor: &FontDescriptor,
+    ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+        let src = self.source_descriptor_varied(ch, variation, descriptor);
         let face = self.get_face(&src).ok()?;
         if !face.has_color() {
             return None;
@@ -991,6 +1134,18 @@ mod tests {
         assert_eq!(b.resolve_family([" \"serif\" "]), "serif");
     }
 
+    /// Chrome 148 on Linux draws a bare `cursive` or `fantasy` (none of its named picks installed)
+    /// with its standard font, Times New Roman, i.e. Liberation Serif: the same face as `serif`
+    /// (measured 2026-11-19 with CSS.getPlatformFontsForNode). Not the sans-serif default.
+    #[test]
+    fn cursive_and_fantasy_fall_back_to_the_standard_serif_font() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let standard = b.resolve_family(["Times New Roman"]);
+        assert_eq!(b.resolve_family(["cursive"]), standard);
+        assert_eq!(b.resolve_family(["fantasy"]), standard);
+        assert_eq!(b.resolve_family(["No Such Script Zzz", "cursive"]), standard);
+    }
+
     #[test]
     fn system_ui_is_the_fontconfig_default_and_helvetica_is_arial() {
         let mut b = LinuxTextBackend::new().unwrap();
@@ -1083,6 +1238,108 @@ mod weight_tests {
         let sfnt = vec![0u8, 1, 0, 0, 9, 9, 9, 9];
         assert_eq!(sfnt_bytes(&sfnt), sfnt);
         assert_eq!(sfnt_bytes(b"wOF2junk"), b"wOF2junk".to_vec());
+    }
+
+    /// Chrome 148 on Linux picks a fallback face by Emoji_Presentation, not by block: the shield
+    /// (U+1F6E1), the wastebasket (U+1F5D1) and the gear (U+2699) default to TEXT presentation and
+    /// take a text face (Noto Sans Symbols2, Noto Sans Symbols2, DejaVu Sans; measured with
+    /// CSS.getPlatformFontsForNode 2026-11-19), while the no-entry sign (U+1F6AB) is emoji.
+    #[test]
+    fn a_text_presentation_symbol_takes_a_text_face_not_the_color_emoji_one() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let missing: Vec<&str> = ["Noto Color Emoji", "Noto Sans Symbols2", "DejaVu Sans"]
+            .into_iter()
+            .filter(|f| b.resolve_family([*f]) != *f)
+            .collect();
+        if !missing.is_empty() {
+            eprintln!("skipped: fonts not installed: {missing:?}");
+            return;
+        }
+        let primary = b.resolve_family(["Liberation Sans"]);
+        let d = desc(&primary, 14.0, 400);
+        assert_eq!(b.source_descriptor('\u{1F6E1}', &d).family, "Noto Sans Symbols2", "shield");
+        assert_eq!(b.source_descriptor('\u{1F5D1}', &d).family, "Noto Sans Symbols2", "wastebasket");
+        assert_eq!(b.source_descriptor('\u{2699}', &d).family, "DejaVu Sans", "gear");
+        assert_eq!(b.source_descriptor('\u{1F6AB}', &d).family, "Noto Color Emoji", "no-entry is emoji");
+    }
+
+    /// A variation selector after the character decides its presentation, as in Chrome 148 on
+    /// Linux (CSS.getPlatformFontsForNode, 2026-11-20): U+23F1 STOPWATCH (text by default) with
+    /// U+FE0F is drawn from Noto Color Emoji; bare or with U+FE0E from Noto Sans Symbols2.
+    #[test]
+    fn a_variation_selector_decides_the_presentation() {
+        use crate::Variation;
+        let mut b = LinuxTextBackend::new().unwrap();
+        let missing: Vec<&str> = ["Noto Color Emoji", "Noto Sans Symbols2"]
+            .into_iter()
+            .filter(|f| b.resolve_family([*f]) != *f)
+            .collect();
+        if !missing.is_empty() {
+            eprintln!("skipped: fonts not installed: {missing:?}");
+            return;
+        }
+        let primary = b.resolve_family(["Liberation Sans"]);
+        let d = desc(&primary, 12.0, 600);
+        assert_eq!(b.source_descriptor_varied('\u{23F1}', Variation::Emoji, &d).family, "Noto Color Emoji", "stopwatch + VS16");
+        assert_eq!(b.source_descriptor_varied('\u{23F1}', Variation::None, &d).family, "Noto Sans Symbols2", "bare stopwatch");
+        assert_eq!(b.source_descriptor_varied('\u{23F1}', Variation::Text, &d).family, "Noto Sans Symbols2", "stopwatch + VS15");
+        // An emoji-presentation character asked for text keeps the text face when one has it.
+        assert_eq!(b.source_descriptor_varied('\u{1F4E6}', Variation::None, &d).family, "Noto Color Emoji", "package");
+    }
+
+    /// advance_widths reads the selector after each character: U+23F1 + U+FE0F advances like any
+    /// other colour emoji (the package, U+1F4E6, an emoji by default), not like the text glyph.
+    #[test]
+    fn advance_widths_follow_the_variation_selector() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        if b.resolve_family(["Noto Color Emoji"]) != "Noto Color Emoji" || b.resolve_family(["Noto Sans Symbols2"]) != "Noto Sans Symbols2" {
+            eprintln!("skipped: Noto Color Emoji or Noto Sans Symbols2 not installed");
+            return;
+        }
+        let primary = b.resolve_family(["Liberation Sans"]);
+        let d = desc(&primary, 12.0, 600);
+        let vs16: f32 = b.advance_widths("\u{23F1}\u{FE0F}", &d).unwrap().iter().sum();
+        let package: f32 = b.advance_widths("\u{1F4E6}", &d).unwrap().iter().sum();
+        let bare: f32 = b.advance_widths("\u{23F1}", &d).unwrap().iter().sum();
+        assert!((vs16 - package).abs() < 0.01, "stopwatch+VS16 {vs16} vs package {package}");
+        assert!((bare - package).abs() > 1.0, "the bare stopwatch is the text glyph: {bare} vs {package}");
+    }
+
+    /// Chrome 148 on Linux's font ascent / descent (canvas fontBoundingBox, 2026-11-20): hhea
+    /// scaled to the size and rounded, then Blink's AscentDescentWithHacks borrow: a descent rounded
+    /// DOWN takes one pixel from the ascent. Liberation Sans (hhea 1854 / -434, upem 2048).
+    #[test]
+    fn line_metrics_round_as_blink_and_borrow_for_a_rounded_down_descent() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let family = b.resolve_family(["Liberation Sans"]);
+        if family != "Liberation Sans" {
+            eprintln!("skipped: Liberation Sans not installed");
+            return;
+        }
+        let chrome = [(10.0, 8.0, 3.0), (12.0, 11.0, 3.0), (13.0, 12.0, 3.0), (14.0, 13.0, 3.0), (16.0, 13.0, 4.0),
+            (18.0, 16.0, 4.0), (20.0, 17.0, 5.0), (24.0, 21.0, 6.0), (32.0, 29.0, 7.0), (48.0, 42.0, 11.0)];
+        for (size, ascent, descent) in chrome {
+            let (a, d, _) = b.line_metrics(&desc(&family, size, 400)).unwrap();
+            assert_eq!((a, d), (ascent, descent), "Liberation Sans {size}px");
+        }
+    }
+
+    /// The same for the bitmap-strike emoji face: its hhea (1900 / -500, upem 2048), not the
+    /// strike's size metrics, as Chrome 148 measures it (canvas fontBoundingBox, 2026-11-20).
+    #[test]
+    fn a_bitmap_emoji_face_takes_its_hhea_metrics() {
+        let mut b = LinuxTextBackend::new().unwrap();
+        let family = b.resolve_family(["Noto Color Emoji"]);
+        if family != "Noto Color Emoji" {
+            eprintln!("skipped: Noto Color Emoji not installed");
+            return;
+        }
+        let chrome = [(10.0, 8.0, 3.0), (12.0, 11.0, 3.0), (13.0, 11.0, 4.0), (14.0, 12.0, 4.0), (16.0, 15.0, 4.0),
+            (18.0, 16.0, 5.0), (20.0, 19.0, 5.0), (24.0, 22.0, 6.0), (32.0, 30.0, 8.0), (48.0, 45.0, 12.0)];
+        for (size, ascent, descent) in chrome {
+            let (a, d, _) = b.line_metrics(&desc(&family, size, 400)).unwrap();
+            assert_eq!((a, d), (ascent, descent), "Noto Color Emoji {size}px");
+        }
     }
 
     #[test]

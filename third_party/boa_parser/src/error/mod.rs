@@ -16,7 +16,6 @@ pub(crate) trait ErrorContext {
     fn set_context(self, context: &'static str) -> Self;
 
     /// Gets the context of the error, if any.
-    #[allow(dead_code)]
     fn context(&self) -> Option<&'static str>;
 }
 
@@ -26,7 +25,29 @@ impl<T> ErrorContext for ParseResult<T> {
     }
 
     fn context(&self) -> Option<&'static str> {
-        self.as_ref().err().and_then(Error::context)
+        self.as_ref().err().and_then(ErrorContext::context)
+    }
+}
+
+impl ErrorContext for Error {
+    fn set_context(self, new_context: &'static str) -> Self {
+        match self {
+            Self::Expected {
+                expected,
+                found,
+                span,
+                ..
+            } => Self::expected(expected, found, span, new_context),
+            e => e,
+        }
+    }
+
+    fn context(&self) -> Option<&'static str> {
+        if let Self::Expected { context, .. } = self {
+            Some(context)
+        } else {
+            None
+        }
     }
 }
 
@@ -76,6 +97,12 @@ pub enum Error {
         err: LexError,
     },
 
+    /// A scope analysis error.
+    ScopeAnalysis {
+        /// The error that occurred during scope analysis.
+        err: &'static str,
+    },
+
     /// Catch all General Error
     General {
         /// The error message.
@@ -86,27 +113,20 @@ pub enum Error {
     },
 }
 
+/// The message of the error a too-deep parse fails with (HIWAVE PATCH, native recursion).
+pub const STACK_OVERFLOW_MESSAGE: &str = "Maximum call stack size exceeded";
+
 impl Error {
-    /// Changes the context of the error, if any.
-    fn set_context(self, new_context: &'static str) -> Self {
-        match self {
-            Self::Expected {
-                expected,
-                found,
-                span,
-                ..
-            } => Self::expected(expected, found, span, new_context),
-            e => e,
-        }
+    /// The parse recursed past the native stack budget (HIWAVE PATCH, native recursion). An engine
+    /// reports it as a `RangeError`, as V8 does.
+    pub(crate) fn stack_overflow() -> Self {
+        Self::general(STACK_OVERFLOW_MESSAGE, Position::new(1, 1))
     }
 
-    /// Gets the context of the error, if any.
-    const fn context(&self) -> Option<&'static str> {
-        if let Self::Expected { context, .. } = self {
-            Some(context)
-        } else {
-            None
-        }
+    /// Whether this is the too-deep-parse error (HIWAVE PATCH, native recursion).
+    #[must_use]
+    pub fn is_stack_overflow(&self) -> bool {
+        matches!(self, Self::General { message, .. } if &**message == STACK_OVERFLOW_MESSAGE)
     }
 
     /// Creates an `Expected` parsing error.
@@ -139,14 +159,20 @@ impl Error {
         }
     }
 
+    /// Creates a `ScopeAnalysis` parsing error.
+    pub(crate) fn scope_analysis(err: &'static str) -> Self {
+        Self::ScopeAnalysis { err }
+    }
+
     /// Creates a "general" parsing error.
-    pub(crate) fn general<S>(message: S, position: Position) -> Self
+    pub(crate) fn general<S, P>(message: S, position: P) -> Self
     where
         S: Into<Box<str>>,
+        P: Into<Position>,
     {
         Self::General {
             message: message.into(),
-            position,
+            position: position.into(),
         }
     }
 
@@ -184,7 +210,7 @@ impl fmt::Display for Error {
                 expected,
                 found,
                 span,
-                context,
+                ..
             } => {
                 write!(f, "expected ")?;
                 match &**expected {
@@ -203,12 +229,21 @@ impl fmt::Display for Error {
                         }
                     }
                 }
-                write!(
-                    f,
-                    ", got '{found}' in {context} at line {}, col {}",
-                    span.start().line_number(),
-                    span.start().column_number()
-                )
+                if let Some(context) = self.context() {
+                    write!(
+                        f,
+                        ", got '{found}' in {context} at line {}, col {}",
+                        span.start().line_number(),
+                        span.start().column_number()
+                    )
+                } else {
+                    write!(
+                        f,
+                        ", got '{found}' at line {}, col {}",
+                        span.start().line_number(),
+                        span.start().column_number()
+                    )
+                }
             }
             Self::Unexpected {
                 found,
@@ -228,6 +263,9 @@ impl fmt::Display for Error {
                 position.column_number()
             ),
             Self::Lex { err } => err.fmt(f),
+            Self::ScopeAnalysis { err } => write!(f, "invalid scope analysis: {err}"),
         }
     }
 }
+
+impl std::error::Error for Error {}

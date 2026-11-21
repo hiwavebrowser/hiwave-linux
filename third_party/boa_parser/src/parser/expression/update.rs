@@ -6,26 +6,25 @@
 //! [spec]: https://tc39.es/ecma262/#sec-update-expressions
 
 use crate::{
+    Error,
     lexer::{Error as LexError, TokenKind},
     parser::{
-        expression::{
-            check_strict_arguments_or_eval, left_hand_side::LeftHandSideExpression,
-            unary::UnaryExpression,
-        },
         AllowAwait, AllowYield, Cursor, OrAbrupt, ParseResult, TokenParser,
+        expression::{
+            FormalParameterListOrExpression, check_strict_arguments_or_eval,
+            left_hand_side::LeftHandSideExpression, unary::UnaryExpression,
+        },
     },
     source::ReadChar,
-    Error,
 };
 use boa_ast::{
+    Expression, Position, Punctuator, Span, Spanned,
     expression::operator::{
-        update::{UpdateOp, UpdateTarget},
         Update,
+        update::{UpdateOp, UpdateTarget},
     },
-    Expression, Position, Punctuator,
 };
 use boa_interner::Interner;
-use boa_profiler::Profiler;
 
 /// Parses an update expression.
 ///
@@ -83,11 +82,9 @@ impl<R> TokenParser<R> for UpdateExpression
 where
     R: ReadChar,
 {
-    type Output = Expression;
+    type Output = FormalParameterListOrExpression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let _timer = Profiler::global().start_event("UpdateExpression", "Parsing");
-
         let tok = cursor.peek(0, interner).or_abrupt()?;
         let position = tok.span().start();
         match tok.kind() {
@@ -97,7 +94,9 @@ where
                     .expect("Punctuator::Inc token disappeared");
 
                 let target = UnaryExpression::new(self.allow_yield, self.allow_await)
-                    .parse(cursor, interner)?;
+                    .parse(cursor, interner)?
+                    .try_into_expression()?;
+                let target_span_end = target.span().end();
 
                 // https://tc39.es/ecma262/#sec-update-expressions-static-semantics-early-errors
                 return (as_simple(&target, position, cursor.strict())?).map_or_else(
@@ -107,7 +106,14 @@ where
                             position,
                         )))
                     },
-                    |target| Ok(Update::new(UpdateOp::IncrementPre, target).into()),
+                    |target| {
+                        Ok(Update::new(
+                            UpdateOp::IncrementPre,
+                            target,
+                            Span::new(position, target_span_end),
+                        )
+                        .into())
+                    },
                 );
             }
             TokenKind::Punctuator(Punctuator::Dec) => {
@@ -116,7 +122,9 @@ where
                     .expect("Punctuator::Dec token disappeared");
 
                 let target = UnaryExpression::new(self.allow_yield, self.allow_await)
-                    .parse(cursor, interner)?;
+                    .parse(cursor, interner)?
+                    .try_into_expression()?;
+                let target_span_end = target.span().end();
 
                 // https://tc39.es/ecma262/#sec-update-expressions-static-semantics-early-errors
                 return (as_simple(&target, position, cursor.strict())?).map_or_else(
@@ -126,7 +134,14 @@ where
                             position,
                         )))
                     },
-                    |target| Ok(Update::new(UpdateOp::DecrementPre, target).into()),
+                    |target| {
+                        Ok(Update::new(
+                            UpdateOp::DecrementPre,
+                            target,
+                            Span::new(position, target_span_end),
+                        )
+                        .into())
+                    },
                 );
             }
             _ => {}
@@ -134,13 +149,18 @@ where
 
         let lhs = LeftHandSideExpression::new(self.allow_yield, self.allow_await)
             .parse(cursor, interner)?;
+        let FormalParameterListOrExpression::Expression(lhs) = lhs else {
+            return Ok(lhs);
+        };
+        let lhs_span_start = lhs.span().start();
 
         if cursor.peek_is_line_terminator(0, interner)?.unwrap_or(true) {
-            return Ok(lhs);
+            return Ok(lhs.into());
         }
 
         if let Some(tok) = cursor.peek(0, interner)? {
             let token_start = tok.span().start();
+            let token_end = tok.span().end();
             match tok.kind() {
                 TokenKind::Punctuator(Punctuator::Inc) => {
                     cursor
@@ -155,7 +175,14 @@ where
                                 token_start,
                             )))
                         },
-                        |target| Ok(Update::new(UpdateOp::IncrementPost, target).into()),
+                        |target| {
+                            Ok(Update::new(
+                                UpdateOp::IncrementPost,
+                                target,
+                                Span::new(lhs_span_start, token_end),
+                            )
+                            .into())
+                        },
                     );
                 }
                 TokenKind::Punctuator(Punctuator::Dec) => {
@@ -171,13 +198,20 @@ where
                                 token_start,
                             )))
                         },
-                        |target| Ok(Update::new(UpdateOp::DecrementPost, target).into()),
+                        |target| {
+                            Ok(Update::new(
+                                UpdateOp::DecrementPost,
+                                target,
+                                Span::new(lhs_span_start, token_end),
+                            )
+                            .into())
+                        },
                     );
                 }
                 _ => {}
             }
         }
 
-        Ok(lhs)
+        Ok(lhs.into())
     }
 }

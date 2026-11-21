@@ -1,7 +1,7 @@
 // XMLHttpRequest, built on the script-network bridge (web_net_bridge.js).
 //
 // This file has no network access of its own: send() queues a request on
-// window.__rustkit_net and waits for the engine to deliver the outcome, after
+// __rk.net and waits for the engine to deliver the outcome, after
 // the request has been vetted and fetched under the page's FetchPolicy (the
 // one allow/deny layer). It is installed only after the bridge, so a page the
 // engine did not enable the bridge on has no XMLHttpRequest at all.
@@ -12,7 +12,7 @@
 // 'document' / responseXML are not supported (the response is null); no
 // cookies (the policy sends none).
 (function (g) {
-    var net = g.__rustkit_net;
+    var net = __rk.net;
     if (!net || typeof g.XMLHttpRequest === 'function') return;
 
     var UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
@@ -25,21 +25,20 @@
         var e = new Error(message); e.name = name; return e;
     }
     function report(e) {
-        try { if (g.__rustkit_errors) g.__rustkit_errors.push(String(e)); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
 
     // ---- bytes <-> base64
-    function toBase64(bytes) {
-        var s = '';
-        for (var i = 0; i < bytes.length; i += 4096) {
-            s += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 4096, bytes.length)));
-        }
-        return g.btoa(s);
-    }
-    function fromBase64(b64) {
-        var s = g.atob(b64 || ''), out = new Uint8Array(s.length);
-        for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-        return out;
+    function toBase64(bytes) { return __rk.base64Encode(bytes); }
+    function fromBase64(b64) { return __rk.base64Decode(b64 || '') || new Uint8Array(0); }
+    // A delivered response's body: the bytes the bridge took from the
+    // host, or (a result built by hand) its base64.
+    function bodyBytes(r) { return r.bytes instanceof Uint8Array ? r.bytes : fromBase64(r.body_b64); }
+    // What stands behind a blob URL for this document (the host's store,
+    // which answers only the origin that made it): { bytes, type } or null.
+    function blobBehind(url) {
+        var found = __rk.blobGet(__realm, String(url).split('#')[0]);
+        return found ? { bytes: new Uint8Array(found[0]), type: found[1] } : null;
     }
     function utf8(str) { return new g.TextEncoder().encode(str); }
 
@@ -160,6 +159,14 @@
         if (s.responseType !== '' && s.responseType !== 'document') {
             throw domError("Failed to read the 'responseXML' property from 'XMLHttpRequest': The value is only accessible if the object's 'responseType' is '' or 'document' (was '" + s.responseType + "').", 'InvalidStateError');
         }
+        // Only a response that is a document (XML or HTML) would have been
+        // parsed into one: anything else is null in every browser too.
+        if (s.state === DONE && s.bytes) {
+            var type = String(s.mime || headerValue(s, 'content-type') || '').split(';')[0].trim().toLowerCase();
+            if (s.responseType === 'document' ? /(^text\/html$)|xml$/.test(type) : /xml$/.test(type)) {
+                __rk.unsupported('XMLHttpRequest', 'responseXML');
+            }
+        }
         return null;
     });
     Object.defineProperty(XMLHttpRequest.prototype, 'responseType', {
@@ -244,6 +251,7 @@
         try { abs = new g.URL(String(url), g.document && g.document.baseURI ? g.document.baseURI : g.location.href).href; }
         catch (_) { throw domError("Failed to execute 'open' on 'XMLHttpRequest': Invalid URL", 'SyntaxError'); }
         if (async !== undefined && !async) {
+            __rk.unsupported('XMLHttpRequest', 'open(async=false)');
             throw domError("Failed to execute 'open' on 'XMLHttpRequest': synchronous requests are not supported", 'NotSupportedError');
         }
         // open() restarts: abandon anything in flight without events.
@@ -388,7 +396,7 @@
         s.statusText = r.status_text || '';
         s.responseURL = r.url || s.url;
         s.resHeaders = (r.headers || []).map(function (h) { return [String(h[0]).toLowerCase(), String(h[1])]; });
-        s.bytes = fromBase64(r.body_b64);
+        s.bytes = bodyBytes(r);
         s.cache = undefined;
         if (r.kind === 'opaque' || r.kind === 'opaqueredirect') { s.status = 0; s.statusText = ''; s.resHeaders = []; s.bytes = new Uint8Array(0); }
         if (hasBody) {
@@ -464,7 +472,7 @@
     // Shared with the other surfaces built on the bridge (fetch): body
     // encoding and the byte/base64 helpers.
     Object.defineProperty(net, 'util', {
-        value: { toBase64: toBase64, fromBase64: fromBase64, utf8: utf8, encodeBody: encodeBody, domError: domError, report: report }
+        value: { toBase64: toBase64, fromBase64: fromBase64, bodyBytes: bodyBytes, blob: blobBehind, utf8: utf8, encodeBody: encodeBody, domError: domError, report: report }
     });
 
     function def(name, value) {

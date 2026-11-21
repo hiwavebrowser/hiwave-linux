@@ -1,15 +1,15 @@
 //! Tests for the lexer.
 
 use crate::lexer::{
+    Cursor, Error, Interner, Lexer, Punctuator, TokenKind,
     template::TemplateString,
     token::{ContainsEscapeSequence, EscapeSequence, Numeric},
-    Cursor, Error, Interner, Lexer, Position, Punctuator, Span, TokenKind,
 };
 use crate::source::ReadChar;
-use boa_ast::Keyword;
+use boa_ast::{Keyword, Position, Span, Spanned};
 use boa_interner::Sym;
 use boa_macros::utf16;
-use std::str;
+use strum::IntoEnumIterator;
 
 fn span(start: (u32, u32), end: (u32, u32)) -> Span {
     Span::new(Position::new(start.0, start.1), Position::new(end.0, end.1))
@@ -254,6 +254,32 @@ fn check_punctuators() {
 }
 
 #[test]
+fn check_punctuator_at_the_end() {
+    // Use strum's `EnumIter` to auto-iterate all `Punctuator` variants,
+    // skipping those that the lexer cannot handle at the end of `var a = b <punct>`:
+    //   - `Assign`: already consumed by `=` in `var a = b`
+    //   - `AssignDiv`: `/=` is treated as an unclosed regular expression
+    let last_expected =
+        Punctuator::iter().filter(|p| !matches!(p, Punctuator::Assign | Punctuator::AssignDiv));
+
+    for last in last_expected {
+        let s = format!("var a = b {}", last.as_str());
+        let mut lexer = Lexer::from(s.as_bytes());
+        let interner = &mut Interner::default();
+
+        let expected = [
+            TokenKind::Keyword((Keyword::Var, false)),
+            TokenKind::identifier(interner.get_or_intern_static("a", utf16!("a"))),
+            TokenKind::Punctuator(Punctuator::Assign),
+            TokenKind::identifier(interner.get_or_intern_static("b", utf16!("b"))),
+            TokenKind::Punctuator(last),
+        ];
+
+        expect_tokens(&mut lexer, &expected, interner);
+    }
+}
+
+#[test]
 fn check_keywords() {
     // https://tc39.es/ecma262/#sec-keywords
     let s = "await break case catch class const continue debugger default delete \
@@ -463,7 +489,7 @@ fn check_decrement_advances_lexer_2_places() {
         &TokenKind::Punctuator(Punctuator::Dec)
     );
     // Decrementing means adding 2 characters '--', the lexer should consume it as a single token
-    // and move the curser forward by 2, meaning the next token should be a semicolon
+    // and move the cursor forward by 2, meaning the next token should be a semicolon
 
     assert_eq!(
         lexer.next(interner).unwrap().unwrap().kind(),
@@ -783,48 +809,83 @@ fn addition_no_spaces_e_number() {
 }
 
 #[test]
-fn take_while_ascii_pred_simple() {
-    let mut cur = Cursor::from(&b"abcdefghijk"[..]);
+fn take_array_alphabetic_simple() {
+    let mut cur = Cursor::from(&b"abc0defghijk"[..]);
 
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: [u32; 8] = [0; 8];
 
-    cur.take_while_ascii_pred(&mut buf, &|c| c == 'a' || c == 'b' || c == 'c')
-        .unwrap();
+    let n = cur.take_array_alphabetic(&mut buf).unwrap();
 
-    assert_eq!(str::from_utf8(buf.as_slice()).unwrap(), "abc");
+    assert_eq!(
+        buf.iter()
+            .filter(|c| **c != 0)
+            .filter_map(|c| char::from_u32(*c))
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &['a', 'b', 'c']
+    );
+    assert_eq!(n, 3);
 }
 
 #[test]
-fn take_while_ascii_pred_immediate_stop() {
-    let mut cur = Cursor::from(&b"abcdefghijk"[..]);
+fn take_array_alphabetic_immediate_stop() {
+    let mut cur = Cursor::from(&b"0abcdefghijk"[..]);
 
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: [u32; 8] = [0; 8];
 
-    cur.take_while_ascii_pred(&mut buf, &|_| false).unwrap();
+    let n = cur.take_array_alphabetic(&mut buf).unwrap();
 
-    assert_eq!(str::from_utf8(buf.as_slice()).unwrap(), "");
+    assert!(buf.iter().all(|c| *c == 0));
+    assert_eq!(n, 0);
 }
 
 #[test]
-fn take_while_ascii_pred_entire_str() {
+fn take_array_alphabetic_entire_str() {
     let mut cur = Cursor::from(&b"abcdefghijk"[..]);
 
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: [u32; 16] = [0; 16];
 
-    cur.take_while_ascii_pred(&mut buf, &|_| true).unwrap();
+    let n = cur.take_array_alphabetic(&mut buf).unwrap();
 
-    assert_eq!(str::from_utf8(buf.as_slice()).unwrap(), "abcdefghijk");
+    assert_eq!(
+        buf.iter()
+            .filter(|c| **c != 0)
+            .filter_map(|c| char::from_u32(*c))
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+    );
+    assert_eq!(n, 11);
 }
 
 #[test]
-fn take_while_ascii_pred_non_ascii_stop() {
-    let mut cur = Cursor::from("abcde😀fghijk".as_bytes());
+fn take_array_alphabetic_non_stop() {
+    let mut cur = Cursor::from("abcde".as_bytes());
 
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: [u32; 16] = [0; 16];
+    let n = cur.take_array_alphabetic(&mut buf).unwrap();
 
-    cur.take_while_ascii_pred(&mut buf, &|_| true).unwrap();
+    assert_eq!(buf.iter().filter(|c| **c != 0).count(), 5);
+    assert_eq!(n, 5);
+}
 
-    assert_eq!(str::from_utf8(buf.as_slice()).unwrap(), "abcde");
+#[test]
+fn take_array_alphabetic_stop() {
+    let mut cur = Cursor::from("abcde".as_bytes());
+
+    let mut buf: [u32; 4] = [0; 4];
+    let n = cur.take_array_alphabetic(&mut buf).unwrap();
+
+    assert_eq!(buf.iter().filter(|c| **c != 0).count(), 4);
+    assert_eq!(
+        buf.iter()
+            .filter(|c| **c != 0)
+            .filter_map(|c| char::from_u32(*c))
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &['a', 'b', 'c', 'd']
+    );
+    assert_eq!(n, 5);
 }
 
 #[test]
@@ -880,11 +941,11 @@ fn string_codepoint_with_no_braces() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "Need to assert if this test is valid"]
 fn illegal_code_point_following_numeric_literal() {
     // Checks as per https://tc39.es/ecma262/#sec-literals-numeric-literals that a NumericLiteral cannot
     // be immediately followed by an IdentifierStart where the IdentifierStart
-    let mut lexer = Lexer::from(&br"17.4\u{2764}"[..]);
+    let mut lexer = Lexer::from("17.4\u{2764}".as_bytes());
     let interner = &mut Interner::default();
 
     assert!(

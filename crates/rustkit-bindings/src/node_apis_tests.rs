@@ -55,6 +55,36 @@ fn attributes_is_a_live_named_node_map_of_attrs() {
     );
 }
 
+/// React 19 resets a host singleton (`<html>`, `<head>`, `<body>`) on a
+/// client render after a hydration error with
+/// `for (l = n.attributes; l.length;) n.removeAttributeNode(l[0])`. Without
+/// `removeAttributeNode` it throws "not a callable function" and yahoo's
+/// body is left empty (DOM §4.9).
+#[test]
+fn remove_attribute_node_takes_the_attr_out_and_keeps_its_value() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var m = document.getElementById('main'), r = []; \
+             var c = m.getAttributeNode('class'), got = m.removeAttributeNode(c); \
+             r.push(got === c, m.hasAttribute('class'), c.value, String(c.ownerElement), m.attributes.length); \
+             try { m.removeAttributeNode(c); r.push('no throw'); } catch (e) { r.push(e.name); } \
+             var q = document.getElementById('q'); q.setAttribute('type', 'text'); \
+             try { m.removeAttributeNode(q.getAttributeNode('type')); r.push('no throw'); } catch (e) { r.push(e.name); } \
+             r.push(q.getAttribute('type')); \
+             m.setAttribute('class', 'again'); r.push(m.getAttributeNode('class') !== c, c.value); \
+             for (var l = m.attributes; l.length;) m.removeAttributeNode(l[0]); \
+             r.push(m.attributes.length, m.getAttributeNames().length); \
+             var d = document.createElement('div'); d.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', 'v'); \
+             var ns = d.attributes.removeNamedItemNS('http://www.w3.org/1999/xlink', 'href'); r.push(ns.value, d.attributes.length); \
+             try { d.attributes.removeNamedItemNS('http://www.w3.org/1999/xlink', 'href'); r.push('no throw'); } catch (e) { r.push(e.name); } \
+             r.join(',')"
+        ),
+        "true,false,box,null,2,NotFoundError,NotFoundError,text,true,box,0,0,v,0,NotFoundError"
+    );
+}
+
 #[test]
 fn active_element_follows_focus_and_blur() {
     let b = bound();
@@ -136,5 +166,38 @@ fn create_event_makes_uninitialised_events_for_init_and_dispatch() {
         ),
         "\"\",true,false,false,InvalidStateError,true,true,true,true,true,true,true,\
          NotSupportedError,ping:true:false::ping:false:true:7"
+    );
+}
+
+/// `initEvent` / `initCustomEvent` must not rewrite a live event. Before the
+/// `eventPhase !== 0` guard, a listener that re-inited its event changed the
+/// type mid-dispatch and broke later listeners on the same path.
+#[test]
+fn init_event_during_dispatch_does_nothing() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var r = [], d = document.getElementById('main'); \
+             d.addEventListener('keep', function (e) { \
+               e.initEvent('mutated', false, true); \
+               r.push(e.type, e.bubbles, e.cancelable, e.eventPhase !== 0); \
+             }); \
+             var e = document.createEvent('Event'); e.initEvent('keep', true, false); \
+             d.dispatchEvent(e); \
+             d.addEventListener('cust', function (e) { \
+               e.initCustomEvent('nope', false, true, 99); \
+               r.push(e.type, e.bubbles, e.cancelable, e.detail); \
+             }); \
+             var c = document.createEvent('CustomEvent'); \
+             c.initCustomEvent('cust', true, false, 3); \
+             d.dispatchEvent(c); \
+             c.initCustomEvent('after', false, true); \
+             r.push(c.type, c.cancelable, String(c.detail)); \
+             r.join('|')"
+        ),
+        // During dispatch the inits are ignored; after dispatch they apply,
+        // and a missing detail argument becomes null.
+        "keep|true|false|true|cust|true|false|3|after|true|null"
     );
 }

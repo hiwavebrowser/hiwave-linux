@@ -91,6 +91,37 @@ def _fn_spans(src: str) -> list[tuple[str, int, int, bool]]:
     return out
 
 
+def _is_pattern(src: str, m: "re.Match[str]") -> bool:
+    """True when `DisplayCommand::X {..}` at `m` is a PATTERN, not a construction.
+
+    A `match` arm, an or-pattern, an `if let`/`let` target or a `matches!` argument names a variant to
+    TAKE APART. Counting it as a construction made `tint_mask_commands` (which matches FillRect, Line,
+    Polyline, StrokePolygon and StrokeRect to recolour them) look like the only place those five are
+    built, and that function is reachable only from the engine, so the check called five live commands
+    dead (2026-11-09, red on every Linux PR after macOS #997). The commands are built elsewhere (the
+    SVG path), not in layout.
+
+    Decided by what FOLLOWS the variant's own braces: `=>` (arm), `|` (or-pattern), a single `=`
+    (`let PAT = value`), or `if` (arm guard) make it a pattern; so does a preceding `matches!(`.
+    """
+    open_at = m.end() - 1
+    close_of = {"{": "}", "(": ")"}[src[open_at]]
+    depth, k = 0, open_at
+    while k < len(src):
+        if src[k] == src[open_at]:
+            depth += 1
+        elif src[k] == close_of:
+            depth -= 1
+            if depth == 0:
+                break
+        k += 1
+    after = src[k + 1:k + 40].lstrip()
+    if after.startswith("=>") or after.startswith("|") or re.match(r"=(?!=)", after) or re.match(r"if\b", after):
+        return True
+    line_start = src.rfind("\n", 0, m.start()) + 1
+    return "matches!(" in src[line_start:m.start()]
+
+
 def analyse() -> dict:
     variants: dict[str, list[tuple[str, bool]]] = {}
     for path in sorted(LAYOUT.glob("*.rs")):
@@ -101,6 +132,8 @@ def analyse() -> dict:
         prod = _production_source(src)
         spans = _fn_spans(prod)
         for m in re.finditer(r"DisplayCommand::([A-Z][A-Za-z0-9]*)\s*[{(]", prod):
+            if _is_pattern(prod, m):
+                continue
             v = m.group(1)
             owner = next(
                 ((n, dead) for n, s, e, dead in spans if s <= m.start() <= e), ("<top-level>", False)

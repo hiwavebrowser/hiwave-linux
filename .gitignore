@@ -9,6 +9,9 @@
 # Rust build artifacts
 target/
 
+# Node modules
+node_modules/
+
 # IDE
 .vscode/
 .idea/
@@ -42,6 +45,22 @@ deps/wincairo/*
 # AI Orchestrator artifacts (large generated files)
 .ai/artifacts/
 .ai/cache/
+.ai/reports/
+.ai/logs/
+.ai/*
+
+# Tools (ignore all except parity_oracle, real_window, element_diff, inspector, latency, stress and media_fixtures)
+tools/*
+!tools/parity_oracle/
+!tools/real_window/
+!tools/element_diff/
+!tools/inspector/
+!tools/latency/
+!tools/stress/
+!tools/media_fixtures/
+tools/element_diff/out/
+tools/inspector/out/
+tools/real_window/out/
 
 # AI Orchestrator tool and roadmap are tracked
 # tools/ai-orchestrator/ - TRACKED
@@ -49,8 +68,22 @@ deps/wincairo/*
 # .ai/work_orders/ - TRACKED
 # .ai/reports/ - TRACKED
 
-# Internal planning docs
-docs/plans/
+# Parity testing artifacts (large captures)
+parity-history/
+parity-results/
+parity-baseline/captures/
+parity-baseline/failure_packets/
+# Per-run parity and WPT outputs (2026-09-23). Every run rewrites these, so
+# committing them in PRs made every merge conflict with every other open PR.
+# The numbers go in the PR body; master's history lives on the
+# `metrics-history` branch (parity-metrics.yml).
+parity-baseline/diffs/
+parity-baseline/parity_test_results*.json
+parity-baseline/oracle_results.json
+trench/wpt/last-run.json
+progress_report.json
+/PARITY_PROGRESS.md
+parity-baseline/workorders/
 
 docs/unshared/*
 
@@ -61,3 +94,16 @@ docs/unshared/*
 # accident twice via `git add -A`; ignored so it cannot happen again.
 __pycache__/
 *.pyc
+*.pyo
+
+# Generated capture output (scripts/multisurface_canary.sh, scripts/builtins_capture.sh).
+multisurface-captures/
+builtins-captures/*.layout.json
+websuite/captures/*.ppm
+/scratch_*/
+# Batch/agent scratch inside a checkout (batch 24 landed 452 of these by accident).
+/scratch/
+
+# test262 working copy at the commit in trench/test262/PIN. Rebuild with scripts/test262_sync.sh;
+# do not vendor the suite into this repo.
+third_party/test262

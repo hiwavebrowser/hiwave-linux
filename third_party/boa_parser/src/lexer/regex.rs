@@ -1,14 +1,15 @@
 //! Boa's lexing for ECMAScript regex literals.
 
-use crate::lexer::{Cursor, Error, Span, Token, TokenKind, Tokenizer};
+use crate::lexer::{Cursor, Error, Token, TokenKind, Tokenizer};
 use crate::source::ReadChar;
 use bitflags::bitflags;
-use boa_ast::Position;
-use boa_interner::{Interner, Sym};
-use boa_profiler::Profiler;
-use regress::{Flags, Regex};
+use boa_ast::PositionGroup;
+use boa_interner::Interner;
+use regress::Flags;
 use std::fmt::{Display, Write};
 use std::str::{self, FromStr};
+
+const MAXIMUM_REGEX_FLAGS: usize = 8;
 
 /// Regex literal lexing.
 ///
@@ -23,21 +24,34 @@ use std::str::{self, FromStr};
 /// [spec]: https://tc39.es/ecma262/#sec-literals-regular-expression-literals
 /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Regular_Expressions
 #[derive(Debug, Clone, Copy)]
-pub(super) struct RegexLiteral;
+pub(super) struct RegexLiteral {
+    // If there is more cases than only `/=`
+    // then use `Option<u8>` or (more correct) `Option<enum>`
+    init_with_eq: bool,
+}
+
+impl RegexLiteral {
+    /// `init_with_eq` is '=' after `/` already consumed?
+    pub(super) fn new(init_with_eq: bool) -> Self {
+        Self { init_with_eq }
+    }
+}
 
 impl<R> Tokenizer<R> for RegexLiteral {
     fn lex(
         &mut self,
         cursor: &mut Cursor<R>,
-        start_pos: Position,
+        start_pos: PositionGroup,
         interner: &mut Interner,
     ) -> Result<Token, Error>
     where
         R: ReadChar,
     {
-        let _timer = Profiler::global().start_event("RegexLiteral", "Lexing");
-
         let mut body = Vec::new();
+        if self.init_with_eq {
+            body.push(u32::from(b'='));
+        }
+
         let mut is_class_char = false;
 
         // Lex RegularExpressionBody.
@@ -102,14 +116,20 @@ impl<R> Tokenizer<R> for RegexLiteral {
             }
         }
 
-        let mut flags = Vec::new();
-        let flags_start = cursor.pos();
-        cursor.take_while_ascii_pred(&mut flags, &char::is_alphabetic)?;
+        let mut flags: [u32; MAXIMUM_REGEX_FLAGS] = [0; MAXIMUM_REGEX_FLAGS];
+        let n = cursor.take_array_alphabetic(&mut flags)?;
+        if n > MAXIMUM_REGEX_FLAGS {
+            // There can only be a maximum of 8 flags.
+            return Err(Error::syntax(
+                "Invalid regular expression: too many flags",
+                start_pos,
+            ));
+        }
+        let flags: RegExpFlags =
+            RegExpFlags::try_from(&flags[..n]).map_err(|e| Error::syntax(e, start_pos))?;
 
-        // SAFETY: We have already checked that the bytes are valid UTF-8.
-        let flags_str = unsafe { str::from_utf8_unchecked(flags.as_slice()) };
-
-        let mut body_utf16 = Vec::new();
+        // We have a vague hint of the size of this vector in the best case scenario.
+        let mut body_utf16 = Vec::with_capacity(body.len());
 
         // We convert the body to UTF-16 since it may contain code points that are not valid UTF-8.
         // We already know that the body is valid UTF-16. Casting is fine.
@@ -127,19 +147,26 @@ impl<R> Tokenizer<R> for RegexLiteral {
             }
         }
 
-        if let Err(error) = Regex::from_unicode(body.into_iter(), flags_str) {
-            return Err(Error::Syntax(
-                format!("Invalid regular expression literal: {error}").into(),
-                start_pos,
-            ));
-        }
+        // Only try to parse and validate, do not optimize/compile.
+        drop(
+            regress::backends::try_parse(body.into_iter(), flags.into()).map_err(|error| {
+                Error::syntax(
+                    format!("Invalid regular expression literal: {error}"),
+                    start_pos,
+                )
+            })?,
+        );
 
-        Ok(Token::new(
+        let mut flags_buf = [0u8; MAXIMUM_REGEX_FLAGS];
+        let flags_str = flags.write_to_buf(&mut flags_buf);
+
+        Ok(Token::new_by_position_group(
             TokenKind::regular_expression_literal(
                 interner.get_or_intern(body_utf16.as_slice()),
-                parse_regex_flags(flags_str, flags_start, interner)?,
+                interner.get_or_intern(flags_str),
             ),
-            Span::new(start_pos, cursor.pos()),
+            start_pos,
+            cursor.pos_group(),
         ))
     }
 }
@@ -173,6 +200,41 @@ bitflags! {
 
         /// Whether or not UnicodeSets features are enabled.
         const UNICODE_SETS = 0b1000_0000;
+    }
+}
+
+impl TryFrom<&[u32]> for RegExpFlags {
+    type Error = String;
+
+    fn try_from(value: &[u32]) -> Result<Self, Self::Error> {
+        let mut flags = Self::default();
+        for c in value {
+            let c = char::from_u32(*c)
+                .ok_or_else(|| format!("Invalid regular expression flag: {c}"))?;
+
+            let new_flag = match c {
+                'g' => Self::GLOBAL,
+                'i' => Self::IGNORE_CASE,
+                'm' => Self::MULTILINE,
+                's' => Self::DOT_ALL,
+                'u' => Self::UNICODE,
+                'y' => Self::STICKY,
+                'd' => Self::HAS_INDICES,
+                'v' => Self::UNICODE_SETS,
+                _ => return Err(format!("invalid regular expression flag {c}")),
+            };
+
+            if flags.contains(new_flag) {
+                return Err(format!("repeated regular expression flag {c}"));
+            }
+            flags.insert(new_flag);
+        }
+
+        if flags.contains(Self::UNICODE) && flags.contains(Self::UNICODE_SETS) {
+            return Err("cannot use both 'u' and 'v' flags".into());
+        }
+
+        Ok(flags)
     }
 }
 
@@ -211,10 +273,47 @@ impl FromStr for RegExpFlags {
     }
 }
 
-fn parse_regex_flags(s: &str, start: Position, interner: &mut Interner) -> Result<Sym, Error> {
-    match RegExpFlags::from_str(s) {
-        Err(message) => Err(Error::Syntax(message.into(), start)),
-        Ok(flags) => Ok(interner.get_or_intern(flags.to_string().as_str())),
+impl RegExpFlags {
+    /// Writes the flags string to a buffer and returns it as `&str`.
+    /// Avoids heap allocation when interning regex flags during lexing.
+    /// The buffer must be at least 8 bytes (maximum number of flags).
+    #[inline]
+    pub fn write_to_buf<'a>(&self, buf: &'a mut [u8; MAXIMUM_REGEX_FLAGS]) -> &'a str {
+        let mut len = 0;
+        if self.contains(Self::HAS_INDICES) {
+            buf[len] = b'd';
+            len += 1;
+        }
+        if self.contains(Self::GLOBAL) {
+            buf[len] = b'g';
+            len += 1;
+        }
+        if self.contains(Self::IGNORE_CASE) {
+            buf[len] = b'i';
+            len += 1;
+        }
+        if self.contains(Self::MULTILINE) {
+            buf[len] = b'm';
+            len += 1;
+        }
+        if self.contains(Self::DOT_ALL) {
+            buf[len] = b's';
+            len += 1;
+        }
+        if self.contains(Self::UNICODE) {
+            buf[len] = b'u';
+            len += 1;
+        }
+        if self.contains(Self::STICKY) {
+            buf[len] = b'y';
+            len += 1;
+        }
+        if self.contains(Self::UNICODE_SETS) {
+            buf[len] = b'v';
+            len += 1;
+        }
+        // SAFETY: We only wrote ASCII bytes (d, g, i, m, s, u, y, v).
+        unsafe { str::from_utf8_unchecked(&buf[..len]) }
     }
 }
 

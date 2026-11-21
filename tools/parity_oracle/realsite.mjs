@@ -20,6 +20,7 @@ import { chromium } from 'playwright';
 import { writeFileSync, readFileSync } from 'fs';
 import { join as pathJoin } from 'path';
 import { getDeterministicLaunchOptions } from './deterministic.mjs';
+import { oracleLaunchOptions } from './realsite_launch.mjs';
 import { comparePixels } from './compare_pixels.mjs';
 
 const NAV_TIMEOUT_MS = 30000;

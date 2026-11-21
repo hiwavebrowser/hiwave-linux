@@ -854,14 +854,336 @@
     });
     tag(DateTimeFormat.prototype, 'Intl.DateTimeFormat');
 
+    // ---- Segmenter (ECMA-402 Intl.Segmenter)
+    function Segmenter(locales, options) {
+        if (!(this instanceof Segmenter)) throw new TypeError("Constructor Intl.Segmenter requires 'new'");
+        var o = toOptions(options), r = {};
+        r.locale = resolveLocale(locales);
+        getOpt(o, 'localeMatcher', ['lookup', 'best fit'], 'best fit');
+        r.granularity = getOpt(o, 'granularity', ['grapheme', 'word', 'sentence'], 'grapheme');
+        hidden(this, '_intl', r);
+    }
+    var segCheck = checker(Segmenter, 'Segmenter');
+
+    function segmentGraphemes(str) {
+        var segments = [], i = 0, len = str.length;
+        while (i < len) {
+            var start = i;
+            var code = str.charCodeAt(i);
+            if (code >= 0xD800 && code <= 0xDBFF && i + 1 < len) {
+                var next = str.charCodeAt(i + 1);
+                if (next >= 0xDC00 && next <= 0xDFFF) {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            while (i < len) {
+                var c = str.charCodeAt(i);
+                if ((c >= 0x0300 && c <= 0x036F) || (c >= 0x1DC0 && c <= 0x1DFF) || (c >= 0x20D0 && c <= 0x20FF) || (c >= 0xFE20 && c <= 0xFE2F) || c === 0x200D) {
+                    i++;
+                    if (c === 0x200D && i < len) {
+                        var c2 = str.charCodeAt(i);
+                        if (c2 >= 0xD800 && c2 <= 0xDBFF && i + 1 < len) i += 2;
+                        else i += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            segments.push({ segment: str.slice(start, i), index: start, input: str, isWordLike: undefined });
+        }
+        return segments;
+    }
+
+    function segmentWords(str) {
+        var segments = [], i = 0, len = str.length;
+        var isWordChar = function (c) {
+            var code = c.charCodeAt(0);
+            return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 95 || code > 127;
+        };
+        while (i < len) {
+            var start = i;
+            var wordLike = isWordChar(str.charAt(i));
+            if (wordLike) {
+                while (i < len && isWordChar(str.charAt(i))) i++;
+            } else {
+                var isSpace = /\s/.test(str.charAt(i));
+                if (isSpace) {
+                    while (i < len && /\s/.test(str.charAt(i))) i++;
+                } else {
+                    i++;
+                }
+            }
+            segments.push({ segment: str.slice(start, i), index: start, input: str, isWordLike: wordLike });
+        }
+        return segments;
+    }
+
+    function segmentSentences(str) {
+        var segments = [], i = 0, len = str.length;
+        while (i < len) {
+            var start = i;
+            while (i < len) {
+                var ch = str.charAt(i);
+                i++;
+                if (ch === '.' || ch === '!' || ch === '?' || ch === '\n') {
+                    while (i < len && str.charAt(i) === ' ') i++;
+                    break;
+                }
+            }
+            segments.push({ segment: str.slice(start, i), index: start, input: str, isWordLike: undefined });
+        }
+        return segments;
+    }
+
+    function getSegments(granularity, str) {
+        if (granularity === 'word') return segmentWords(str);
+        if (granularity === 'sentence') return segmentSentences(str);
+        return segmentGraphemes(str);
+    }
+
+    function Segments(r, input) {
+        hidden(this, '_intl', r);
+        hidden(this, '_input', input);
+    }
+    methods(Segments.prototype, {
+        containing: function containing(index) {
+            index = Number(index);
+            if (isNaN(index)) index = 0;
+            else index = Math.floor(index);
+            var str = this._input;
+            if (index < 0 || index >= str.length) return undefined;
+            var segs = getSegments(this._intl.granularity, str);
+            for (var i = 0; i < segs.length; i++) {
+                var s = segs[i];
+                if (index >= s.index && index < s.index + s.segment.length) {
+                    return s;
+                }
+            }
+            return undefined;
+        }
+    });
+    if (typeof Symbol === 'function' && Symbol.iterator) {
+        hidden(Segments.prototype, Symbol.iterator, function () {
+            var segs = getSegments(this._intl.granularity, this._input);
+            var idx = 0;
+            var iter = {};
+            methods(iter, {
+                next: function next() {
+                    if (idx < segs.length) {
+                        return { value: segs[idx++], done: false };
+                    }
+                    return { value: undefined, done: true };
+                }
+            });
+            hidden(iter, Symbol.iterator, function () { return this; });
+            return iter;
+        });
+    }
+    tag(Segments.prototype, 'Intl.Segments');
+
+    methods(Segmenter.prototype, {
+        segment: function segment(input) {
+            var r = segCheck(this, 'segment')._intl;
+            if (input === undefined) input = '';
+            else input = String(input);
+            return new Segments(r, input);
+        },
+        resolvedOptions: function resolvedOptions() {
+            var r = segCheck(this, 'resolvedOptions')._intl;
+            return { locale: r.locale, granularity: r.granularity };
+        }
+    });
+    tag(Segmenter.prototype, 'Intl.Segmenter');
+
+    // ---- Intl.Locale: the tag's subtags and its `-u-` keywords, with options
+    // overriding them (ECMA-402 §14); maximize()/minimize() over CLDR's likely
+    // subtags, and the text direction and week data that follow from them.
+    var LOCALE_KEYS = [['calendar', 'ca'], ['caseFirst', 'kf'], ['collation', 'co'],
+                       ['hourCycle', 'hc'], ['numberingSystem', 'nu'], ['numeric', 'kn']];
+    function Locale(tagArg, options) {
+        if (!(this instanceof Locale)) throw new TypeError("Constructor Intl.Locale requires 'new'");
+        if (tagArg === undefined) throw new TypeError('First argument to Intl.Locale constructor can\'t be empty or missing');
+        var sub = canonTag(tagArg).split('-'), i = 1, r = { script: undefined, region: undefined };
+        r.language = sub[0];
+        if (i < sub.length && /^[A-Z][a-z]{3}$/.test(sub[i])) r.script = sub[i++];
+        if (i < sub.length && /^([A-Z]{2}|[0-9]{3})$/.test(sub[i])) r.region = sub[i++];
+        var rest = sub.slice(i), kw = Object.create(null), other = [], j = 0;
+        while (j < rest.length && rest[j].length > 1) j++;
+        var variants = rest.slice(0, j).sort();  // canonical order (UTS #35), as Chrome prints them
+        while (j < rest.length) {
+            if (rest[j] !== 'u') { other.push(rest[j++]); continue; }
+            j++;
+            while (j < rest.length && rest[j].length > 1) {
+                var key = rest[j++], vals = [];
+                while (j < rest.length && rest[j].length > 2) vals.push(rest[j++]);
+                // A 3-8 letter subtag before the first key is an attribute: dropped.
+                if (key.length === 2 && !(key in kw)) kw[key] = vals.join('-') || 'true';
+            }
+        }
+        var o = toOptions(options), id = /^[A-Za-z0-9]{3,8}(-[A-Za-z0-9]{3,8})*$/;
+        var lang = getOpt(o, 'language'), script = getOpt(o, 'script'), region = getOpt(o, 'region');
+        if (lang !== undefined) r.language = canonTag(lang).split('-')[0];
+        if (script !== undefined) {
+            if (!/^[A-Za-z]{4}$/.test(script)) throw new RangeError('Incorrect locale information provided');
+            r.script = script[0].toUpperCase() + script.slice(1).toLowerCase();
+        }
+        if (region !== undefined) {
+            if (!/^([A-Za-z]{2}|[0-9]{3})$/.test(region)) throw new RangeError('Incorrect locale information provided');
+            r.region = region.toUpperCase();
+        }
+        LOCALE_KEYS.forEach(function (k) {
+            var v = o[k[0]];
+            if (v === undefined) return;
+            v = k[1] === 'kn' ? String(Boolean(v)) : String(v);
+            if (k[1] === 'hc' && ['h11', 'h12', 'h23', 'h24'].indexOf(v) < 0 ||
+                k[1] === 'kf' && ['upper', 'lower', 'false'].indexOf(v) < 0 ||
+                !id.test(v)) {
+                throw new RangeError('Value ' + v + ' out of range for Intl.Locale options property ' + k[0]);
+            }
+            kw[k[1]] = v.toLowerCase();
+        });
+        r.baseName = [r.language].concat(r.script ? [r.script] : [], r.region ? [r.region] : [], variants).join('-');
+        r.kw = kw;
+        var u = Object.keys(kw).sort().map(function (k) { return kw[k] === 'true' ? k : k + '-' + kw[k]; });
+        // What follows the language, script and region: kept by maximize()/minimize().
+        r.variants = variants;
+        r.ext = (u.length ? '-u-' + u.join('-') : '') + (other.length ? '-' + other.join('-') : '');
+        r.tag = r.baseName + r.ext;
+        hidden(this, '_intl', r);
+    }
+
+    // Likely subtags (UTS #35 §4.3) over CLDR's table, which stays on the Rust
+    // side (web_intl_likely.rs): one exact-key lookup per call, through a host
+    // function kept on the host object, which pages never see.
+    var likelyHost = __rk.likelySubtags;
+    function likely(key) {
+        var v = typeof likelyHost === 'function' ? likelyHost(key) : undefined;
+        return typeof v === 'string' ? v.split('-') : undefined;
+    }
+    // [language, script, region] with the missing ones filled in, or null for
+    // a language CLDR does not know. `s` and `r` are '' when absent. As ICU:
+    // a tag that already has all three is left alone, whatever they are;
+    // otherwise `und`, `Zzzz` and `ZZ` count as absent; the script is matched
+    // before the region (und-Cyrl-US is Russian, not English).
+    function likelyMax(l, s, r) {
+        var lang = l === 'und' ? '' : l;
+        if (lang && s && r) return [l, s, r];
+        if (s === 'Zzzz') s = '';
+        if (r === 'ZZ') r = '';
+        var base = lang || 'und';
+        var hit = (s && r && likely(base + '-' + s + '-' + r)) || (s && likely(base + '-' + s)) ||
+                  (r && likely(base + '-' + r)) || likely(base);
+        if (!hit) return null;
+        return [lang || hit[0], s || hit[1], r || hit[2]];
+    }
+    // The shortest of language, language-region, language-script that
+    // maximizes back to the same tag (region before script: zh-Hant is zh-TW).
+    function likelyMin(l, s, r) {
+        var max = likelyMax(l, s === 'Zzzz' ? '' : s, r === 'ZZ' ? '' : r);
+        if (!max) return null;
+        var want = max.join('-'), trials = [[max[0], '', ''], [max[0], '', max[2]], [max[0], max[1], '']];
+        for (var i = 0; i < trials.length; i++) {
+            var m = likelyMax(trials[i][0], trials[i][1], trials[i][2]);
+            if (m && m.join('-') === want) return trials[i];
+        }
+        return max;
+    }
+    // A new Locale: `r` with its language, script and region replaced by `lsr`
+    // (unchanged when `lsr` is null); variants, keywords and extensions kept.
+    function relocated(r, lsr) {
+        var n = { language: r.language, script: r.script, region: r.region, kw: r.kw, variants: r.variants, ext: r.ext };
+        if (lsr) { n.language = lsr[0]; n.script = lsr[1] || undefined; n.region = lsr[2] || undefined; }
+        n.baseName = [n.language].concat(n.script ? [n.script] : [], n.region ? [n.region] : [], n.variants).join('-');
+        n.tag = n.baseName + n.ext;
+        var out = Object.create(Locale.prototype);
+        hidden(out, '_intl', n);
+        return out;
+    }
+    // The scripts written right to left (ICU's list, as Chrome 148 answers
+    // for `und-<script>`).
+    var RTL_SCRIPTS = ' Adlm Arab Armi Avst Chrs Cprt Elym Gara Hatr Hebr Hung Khar Lydi Mand Mani Mend Merc Mero ' +
+        'Narb Nbat Nkoo Orkh Ougr Palm Phli Phlp Phnx Prti Rohg Samr Sarb Sidt Sogd Sogo Syrc Thaa Yezi ';
+    // Unicode CLDR data (Unicode-3.0): notice and licence text in THIRD_PARTY_NOTICES.md at the repository root.
+    // CLDR 48 supplemental weekData: regions whose week does not start on
+    // Monday (1 = Monday ... 7 = Sunday), and whose weekend is not Saturday
+    // and Sunday. Everything else is the world's default (001).
+    var WEEK_FIRST = {
+        5: ' MV ',
+        6: ' AF BH DJ DZ EG IQ IR JO KW LY OM QA SD SY ',
+        7: ' AG AS BD BR BS BT BW BZ CA CO DM DO ET GT GU HK HN ID IL IN IS JM JP KE KH KR LA MH MM MO MT MX MZ ' +
+           'NI NP PA PE PH PK PR PT PY SA SG SV TH TT TW UM US VE VI WS YE ZA ZW '
+    };
+    var WEEKEND = { AF: [4, 5], IR: [5], IN: [7], UG: [7] }, WEEKEND_FRI_SAT = ' BH DZ EG IL IQ JO KW LY OM QA SA SD SY YE ';
+    var WEEK_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+    function locCheck(self, name) {
+        if (!(self instanceof Locale) || !self._intl) {
+            throw new TypeError('Method Intl.Locale.prototype.' + name + ' called on incompatible receiver');
+        }
+        return self._intl;
+    }
+    ['language', 'script', 'region', 'baseName'].forEach(function (name) {
+        Object.defineProperty(Locale.prototype, name, {
+            configurable: true, get: function () { return locCheck(this, name)[name]; }
+        });
+    });
+    LOCALE_KEYS.forEach(function (k) {
+        Object.defineProperty(Locale.prototype, k[0], {
+            configurable: true,
+            get: function () {
+                var v = locCheck(this, k[0]).kw[k[1]];
+                return k[1] === 'kn' ? v === 'true' : v;
+            }
+        });
+    });
+    methods(Locale.prototype, {
+        toString: function toString() { return locCheck(this, 'toString').tag; },
+        maximize: function maximize() {
+            var r = locCheck(this, 'maximize');
+            return relocated(r, likelyMax(r.language, r.script || '', r.region || ''));
+        },
+        minimize: function minimize() {
+            var r = locCheck(this, 'minimize');
+            return relocated(r, likelyMin(r.language, r.script || '', r.region || ''));
+        },
+        getTextInfo: function getTextInfo() {
+            var r = locCheck(this, 'getTextInfo'), script = r.script;
+            if (!script) {
+                var max = likelyMax(r.language, '', r.region || '');
+                script = max ? max[1] : '';
+            }
+            return { direction: script && RTL_SCRIPTS.indexOf(' ' + script + ' ') >= 0 ? 'rtl' : 'ltr' };
+        },
+        getWeekInfo: function getWeekInfo() {
+            var r = locCheck(this, 'getWeekInfo'), region = r.region;
+            // `-u-rg-gbzzzz` asks for another region's conventions.
+            if (/^[a-z]{2}zzzz$/.test(r.kw.rg || '')) region = r.kw.rg.slice(0, 2).toUpperCase();
+            if (!region) {
+                var max = likelyMax(r.language, r.script || '', '');
+                region = max ? max[2] : '001';
+            }
+            var key = ' ' + region + ' ', firstDay = 1;
+            for (var d in WEEK_FIRST) if (WEEK_FIRST[d].indexOf(key) >= 0) firstDay = Number(d);
+            if (r.kw.ca === 'iso8601') firstDay = 1;
+            var fw = WEEK_DAYS.indexOf(r.kw.fw);
+            if (fw >= 0) firstDay = fw + 1;
+            var weekend = WEEKEND[region] || (WEEKEND_FRI_SAT.indexOf(key) >= 0 ? [5, 6] : [6, 7]);
+            return { firstDay: firstDay, weekend: weekend.slice() };
+        }
+    });
+    tag(Locale.prototype, 'Intl.Locale');
+
     // ---- the namespace
     var Intl = {};
     methods(Intl, {
         getCanonicalLocales: function getCanonicalLocales(locales) { return canonicalList(locales); },
         NumberFormat: NumberFormat, DateTimeFormat: DateTimeFormat, PluralRules: PluralRules, Collator: Collator,
-        ListFormat: ListFormat, RelativeTimeFormat: RelativeTimeFormat
+        ListFormat: ListFormat, RelativeTimeFormat: RelativeTimeFormat, Segmenter: Segmenter, Locale: Locale
     });
-    [NumberFormat, DateTimeFormat, PluralRules, Collator, ListFormat, RelativeTimeFormat].forEach(function (C) {
+    [NumberFormat, DateTimeFormat, PluralRules, Collator, ListFormat, RelativeTimeFormat, Segmenter].forEach(function (C) {
         hidden(C, 'supportedLocalesOf', function supportedLocalesOf(locales, options) { return supportedOf(locales, options); });
     });
     tag(Intl, 'Intl');

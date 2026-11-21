@@ -25,7 +25,7 @@ fn load(config: EngineConfig, routes: Vec<(&'static str, &'static str, String)>)
 const ORIGIN_PAGE: &str = r#"<html><head><script>
 var log = [];
 function ask(path, tag) {
-    window.__rustkit_net.request({ url: location.origin + path }, function (r) { log.push(tag + ':' + (r.ok ? r.status : r.error)); });
+    fetch(location.origin + path).then(function (r) { log.push(tag + ':' + r.status); }, function (e) { log.push(tag + ':' + e.name); });
 }
 ask('/script', 'script');
 window.addEventListener('load', function () { ask('/load', 'load'); });
@@ -53,8 +53,8 @@ fn with_script_network_off_the_page_has_no_bridge() {
         vec![("/", "text/html", "<html><body>hi</body></html>".to_string())],
     );
     assert_eq!(
-        engine.execute_script(view, "typeof window.__rustkit_net").unwrap(),
-        r#"String("undefined")"#
+        engine.execute_script(view, "typeof fetch + typeof window.__rustkit_net").unwrap(),
+        r#"String("undefinedundefined")"#
     );
     assert_eq!(server.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
@@ -68,8 +68,8 @@ fn a_page_loaded_from_a_string_has_no_bridge() {
         .expect("view");
     engine.load_html(view, "<html><body>hi</body></html>").unwrap();
     assert_eq!(
-        engine.execute_script(view, "typeof window.__rustkit_net").unwrap(),
-        r#"String("undefined")"#
+        engine.execute_script(view, "typeof window.__rustkit_net + typeof window.__net").unwrap(),
+        r#"String("undefinedundefined")"#
     );
 }
 
@@ -139,10 +139,10 @@ setTimeout(function () {
 }
 
 /// The live loop (Z lane I0): a request made after the load, here by the
-/// script a click or a late timer would run, is answered on the next turn of
+/// script a click or a late timer would run, is answered on a later turn of
 /// the loop under the same policy, and what its callback writes is laid out.
 #[test]
-fn a_fetch_made_after_the_load_is_answered_on_the_next_live_turn() {
+fn a_fetch_made_after_the_load_is_answered_on_a_later_live_turn() {
     let page = r#"<html><body style="margin:0"><div style="height:40px">early</div></body></html>"#;
     let (mut engine, view, server) = load(
         EngineConfig::default(),
@@ -166,9 +166,17 @@ fn a_fetch_made_after_the_load_is_answered_on_the_next_live_turn() {
         .enable_all()
         .build()
         .unwrap();
-    let turn = rt.block_on(engine.pump_live(view, 16));
-
-    assert_eq!((turn.requests, turn.relaid_out), (2, true));
+    // The turn that finds the requests starts them; the answers come on the
+    // turns after. The refused one is answered without a connection.
+    let started = std::time::Instant::now();
+    let (mut answered, mut relaid_out) = (0, false);
+    while answered < 2 {
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{answered} of 2 answered");
+        let turn = rt.block_on(engine.pump_live(view, 16));
+        answered += turn.requests;
+        relaid_out |= turn.relaid_out;
+    }
+    assert!(relaid_out);
     assert_eq!(
         engine.execute_script(view, "log.slice().sort().join('|')").unwrap(),
         r#"String("denied:Failed to fetch|late:/late")"#
@@ -178,5 +186,111 @@ fn a_fetch_made_after_the_load_is_answered_on_the_next_live_turn() {
         Some("https://example.com/late")
     );
     // The page and the one allowed request; the refused one never connected.
+    assert_eq!(server.hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// The loop that calls `pump_live` is the app's UI thread, so a turn may not
+/// wait for the network. A request the server holds (300 ms here, three
+/// seconds in tools/real_window's `h1_slow`) used to hold the turn that
+/// took it, up to two seconds, and then fail: the window took no input and
+/// drew nothing meanwhile, and a slower request never arrived. The turn
+/// returns with the request still out, the page's timers run on the turns
+/// in between, and the turn after the answer comes delivers it.
+#[test]
+fn a_slow_request_does_not_hold_the_live_turn() {
+    let page = r#"<html><body style="margin:0"><div style="height:40px">early</div></body></html>"#;
+    let (mut engine, view, _server) = load(
+        EngineConfig::default(),
+        vec![("/", "text/html", page.to_string())],
+    );
+    engine
+        .execute_script(
+            view,
+            "window.log = []; window.ticks = 0; window.ticksAtAnswer = -1; \
+             setInterval(function () { ticks += 1; }, 10); \
+             fetch('/slow').then(function (r) { return r.text(); }).then(function (t) { \
+               ticksAtAnswer = ticks; log.push('slow:' + t); });",
+        )
+        .unwrap();
+
+    // One runtime for every turn, as in the app: the connection lives on it.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let first = rt.block_on(engine.pump_live(view, 16));
+    let held = started.elapsed();
+    assert!(
+        held < std::time::Duration::from_millis(150),
+        "the turn that took a request the server holds for 300 ms lasted {held:?}"
+    );
+    assert_eq!((first.requests, first.in_flight), (0, 1));
+
+    let mut turns = 0;
+    while engine.execute_script(view, "log.join('|')").unwrap() == r#"String("")"# {
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the slow request never arrived");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        rt.block_on(engine.pump_live(view, 5));
+        turns += 1;
+    }
+    assert_eq!(engine.execute_script(view, "log.join('|')").unwrap(), r#"String("slow:/slow")"#);
+    assert!(turns > 3, "the answer came on turn {turns}; it should take many 5 ms turns");
+    // The page's clock ran while the request was out.
+    let ticks = engine.execute_script(view, "ticksAtAnswer").unwrap();
+    let ticks: f64 = ticks.trim_start_matches("Number(").trim_end_matches(')').parse().unwrap();
+    assert!(ticks >= 3.0, "only {ticks} 10 ms ticks ran while a 300 ms request was out");
+}
+
+/// The same for an image a script adds after the load (tools/real_window's
+/// `h4_slow`: an image held three seconds stopped the page for three
+/// seconds). The turn that finds the image starts its fetch and returns; a
+/// later turn keeps it and lays the page out again.
+#[test]
+fn a_slow_image_added_by_a_script_does_not_hold_the_live_turn() {
+    let page = r#"<html><body style="margin:0"><div style="height:40px">early</div></body></html>"#;
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="red"/></svg>"#;
+    let (mut engine, view, server) = load(
+        EngineConfig::default(),
+        vec![("/", "text/html", page.to_string()), ("/held.svg", "image/svg+xml", svg.to_string())],
+    );
+    let image = format!("http://127.0.0.1:{}/held.svg", server.port);
+    engine
+        .execute_script(
+            view,
+            "setTimeout(function () { \
+               var img = document.createElement('img'); img.setAttribute('src', '/held.svg'); \
+               document.body.appendChild(img); }, 10);",
+        )
+        .unwrap();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let first = rt.block_on(engine.pump_live(view, 16));
+    let held = started.elapsed();
+    assert!(first.relaid_out, "the turn lays out what its timer appended");
+    assert!(
+        held < std::time::Duration::from_millis(150),
+        "the turn that found an image the server holds for 300 ms lasted {held:?}"
+    );
+    assert!(!engine.lctx.svg_cache.borrow().contains_key(&image));
+
+    let mut turns = 0;
+    loop {
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the slow image never arrived");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let turn = rt.block_on(engine.pump_live(view, 5));
+        turns += 1;
+        if engine.lctx.svg_cache.borrow().contains_key(&image) {
+            assert!(turn.relaid_out, "the turn that keeps the image lays the page out again");
+            break;
+        }
+        assert!(!turn.relaid_out, "nothing changed on turn {turns}");
+    }
+    assert!(turns > 3, "the image came on turn {turns}; it should take many 5 ms turns");
+    // The page and the image, once.
     assert_eq!(server.hits.load(std::sync::atomic::Ordering::SeqCst), 2);
 }

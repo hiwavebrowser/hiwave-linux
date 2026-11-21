@@ -7,8 +7,17 @@ use wry::Rect;
 pub trait ContentWebViewOps {
     fn load_url(&self, url: &str) -> Result<(), String>;
     fn load_html(&self, html: &str) -> Result<(), String>;
+    /// One of the app's own pages that reads app data (the report page).
+    /// A RustKit view gives it the internal page's `window.ipc`; any other
+    /// view loads it as plain HTML.
+    fn load_internal_page(&self, html: &str) -> Result<(), String> {
+        self.load_html(html)
+    }
     fn evaluate_script(&self, script: &str) -> Result<(), String>;
     fn set_bounds(&self, rect: Rect) -> Result<(), String>;
+    /// An error line in the page's console from the browser itself (not
+    /// run as the page's script). A view without a console drops it.
+    fn report_console_error(&self, _message: &str) {}
 }
 
 // Implement for WRY WebView
@@ -50,7 +59,7 @@ impl ContentWebViewOps for Arc<wry::WebView> {
 }
 
 // Implement for RustKitView
-#[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "linux", feature = "rustkit"))]
 impl ContentWebViewOps for super::webview_rustkit::RustKitView {
     fn load_url(&self, url: &str) -> Result<(), String> {
         self.wry_load_url(url)
@@ -60,6 +69,10 @@ impl ContentWebViewOps for super::webview_rustkit::RustKitView {
         self.wry_load_html(html)
     }
 
+    fn load_internal_page(&self, html: &str) -> Result<(), String> {
+        super::webview_rustkit::RustKitView::load_internal_page(self, html).map_err(|e| format!("Failed to load HTML: {}", e))
+    }
+
     fn evaluate_script(&self, script: &str) -> Result<(), String> {
         self.wry_evaluate_script(script)
     }
@@ -67,10 +80,14 @@ impl ContentWebViewOps for super::webview_rustkit::RustKitView {
     fn set_bounds(&self, rect: Rect) -> Result<(), String> {
         self.wry_set_bounds(rect)
     }
+
+    fn report_console_error(&self, message: &str) {
+        super::webview_rustkit::RustKitView::report_console_error(self, message)
+    }
 }
 
 // Implement for Arc<RustKitView>
-#[cfg(all(target_os = "linux", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "linux", feature = "rustkit"))]
 impl ContentWebViewOps for Arc<super::webview_rustkit::RustKitView> {
     fn load_url(&self, url: &str) -> Result<(), String> {
         self.wry_load_url(url)
@@ -80,12 +97,20 @@ impl ContentWebViewOps for Arc<super::webview_rustkit::RustKitView> {
         self.wry_load_html(html)
     }
 
+    fn load_internal_page(&self, html: &str) -> Result<(), String> {
+        super::webview_rustkit::RustKitView::load_internal_page(self, html).map_err(|e| format!("Failed to load HTML: {}", e))
+    }
+
     fn evaluate_script(&self, script: &str) -> Result<(), String> {
         self.wry_evaluate_script(script)
     }
 
     fn set_bounds(&self, rect: Rect) -> Result<(), String> {
         self.wry_set_bounds(rect)
+    }
+
+    fn report_console_error(&self, message: &str) {
+        super::webview_rustkit::RustKitView::report_console_error(self, message)
     }
 }
 
@@ -100,6 +125,10 @@ impl ContentWebViewOps for Arc<super::content_webview_enum::ContentWebView> {
         (**self).load_html(html)
     }
 
+    fn load_internal_page(&self, html: &str) -> Result<(), String> {
+        (**self).load_internal_page(html)
+    }
+
     fn evaluate_script(&self, script: &str) -> Result<(), String> {
         (**self).evaluate_script(script)
     }
@@ -107,5 +136,8 @@ impl ContentWebViewOps for Arc<super::content_webview_enum::ContentWebView> {
     fn set_bounds(&self, rect: Rect) -> Result<(), String> {
         (**self).set_bounds(rect)
     }
-}
 
+    fn report_console_error(&self, message: &str) {
+        (**self).report_console_error(message)
+    }
+}

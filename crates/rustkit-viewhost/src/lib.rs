@@ -21,6 +21,15 @@
 // Platform-specific modules
 pub mod linux;
 
+pub mod chord_wait;
+pub mod input_queue;
+pub mod x11_input;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use linux::shape_supported as x11_shape_supported;
+pub mod region;
+pub mod cursor;
+pub use cursor::x11_cursor_shape;
+
 // Platform-agnostic trait seam (ported from the reference tree in the wave-4
 // engine adoption; this is the one-engine Phase-2 shape). On this platform
 // WindowHandle is `()` — the native path drives the CONCRETE X11 API
@@ -28,6 +37,36 @@ pub mod linux;
 // compiles and the non-view operations delegate.
 mod traits;
 pub use traits::{ViewHostTrait, WindowHandle};
+
+#[cfg(target_os = "macos")]
+pub use macos::MacOSViewHost;
+#[cfg(target_os = "macos")]
+pub use macos::{
+    begin_key_equivalent, claim_key_equivalent, drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, finish_key_equivalent, is_reserved_chord,
+    set_view_cursor,
+    set_view_tooltip,
+};
+/// No view holds Cmd chords for a menu here: a chord's default is the
+/// page's (see the macOS `claim_key_equivalent`).
+#[cfg(not(target_os = "macos"))]
+pub fn claim_key_equivalent(_token: u64) -> bool {
+    true
+}
+/// No view holds Cmd chords for a menu here: the page hears every chord
+/// (see the macOS `begin_key_equivalent`).
+#[cfg(not(target_os = "macos"))]
+pub fn begin_key_equivalent(_token: u64) -> bool {
+    true
+}
+#[cfg(target_os = "macos")]
+pub use macos::{raise_raw_view_above, raise_raw_view_to_front, set_raw_view_region, set_raw_view_transparent};
+pub use input_queue::{
+    drain_input, drain_input_view, instant_of_native_event, retire_view_input, set_text_input_state,
+    text_input_state, EditAction,
+    ImeInput, InputEvent, InputKind, PendingClick, PendingKey, PendingScroll, PointerInput, TextInputMirror,
+};
+pub use chord_wait::CHORD_ANSWER_TIMEOUT;
+pub use region::{compose_region, region_contains, FrameRegion, RegionRect};
 
 // Screenshot capture
 pub mod screenshot;
@@ -39,7 +78,7 @@ use tracing::{debug, error, info, trace};
 
 #[cfg(windows)]
 use rustkit_core::{
-    FocusEvent, FocusEventType, InputEvent, KeyCode, KeyEvent, KeyEventType, KeyboardState,
+    FocusEvent, FocusEventType, InputEvent as CoreInputEvent, KeyCode, KeyEvent, KeyEventType, KeyboardState,
     Modifiers, MouseButton, MouseEvent, MouseEventType, MouseState, Point,
 };
 
@@ -86,6 +125,13 @@ impl ViewId {
     /// Get the raw ID value.
     pub fn raw(&self) -> u64 {
         self.0
+    }
+
+    /// The id a view carries in its native object (the macOS content view's
+    /// ivar), read back when the view records an input.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self(raw)
     }
 }
 
@@ -161,7 +207,7 @@ pub enum ViewEvent {
     Destroyed { view_id: ViewId },
     /// Input event from the view (Windows only).
     #[cfg(windows)]
-    Input { view_id: ViewId, event: InputEvent },
+    Input { view_id: ViewId, event: CoreInputEvent },
 }
 
 /// Callback for view events.
@@ -278,6 +324,151 @@ impl MainWindowConfig {
     }
 }
 
+/// Clip the view's layer to its frame. wgpu may replace the layer when it
+/// builds the Metal surface, so this is called again after every frame move
+/// and after a present.
+#[cfg(target_os = "macos")]
+fn clip_view_layer(view: id) {
+    unsafe {
+        let layer: id = msg_send![view, layer];
+        if layer != nil {
+            let masks: bool = true;
+            let _: () = msg_send![layer, setMasksToBounds: masks];
+        }
+    }
+}
+
+/// The macOS virtual keycode of Tab.
+const TAB_KEYCODE: u16 = 48;
+
+/// Ctrl+Tab / Ctrl+Shift+Tab, the browser's next/previous tab (M1d).
+/// Chromium reserves it from the page. Cmd or Option held, it is not the
+/// chord: Ctrl+Option+Tab is the page's. The one predicate both the
+/// RustKit view (which claims the chord from the window's key-view loop)
+/// and the app (which switches tabs) use, so the two never disagree
+/// (#1012 R1 nit 2).
+pub fn is_tab_cycle_chord(mac_keycode: u16, ctrl: bool, cmd: bool, alt: bool) -> bool {
+    mac_keycode == TAB_KEYCODE && ctrl && !cmd && !alt
+}
+
+thread_local! {
+    /// Views whose Tab release is owed to a claimed Ctrl+Tab (main thread).
+    static TAB_UP_OWED: std::cell::RefCell<std::collections::HashSet<u64>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// What a RustKit view's `performKeyEquivalent:` does with an event, as
+/// far as Ctrl+Tab goes (M1d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) enum CtrlTabRoute {
+    /// Not a Ctrl+Tab keyDown: the view's usual handling.
+    NotCtrlTab,
+    /// Ctrl+Option+Tab: to the key stream, for the page.
+    ToPage,
+    /// Ctrl+Tab / Ctrl+Shift+Tab: to the key stream, for the app.
+    Cycle,
+}
+
+/// Route an event of NSEvent `kind` with `flags`. `keycode` is read only
+/// for a keyDown with Ctrl and no Cmd: `-[NSEvent keyCode]` raises on a
+/// non-key event, and AppKit offers `performKeyEquivalent:` other events
+/// too (#1012 delta R1 nit b).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn ctrl_tab_route(kind: u64, flags: u64, keycode: impl FnOnce() -> u16) -> CtrlTabRoute {
+    const KEY_DOWN: u64 = 10;
+    let ctrl = flags & (1 << 18) != 0;
+    let cmd = flags & (1 << 20) != 0;
+    let alt = flags & (1 << 19) != 0;
+    if kind != KEY_DOWN || !ctrl || cmd {
+        return CtrlTabRoute::NotCtrlTab;
+    }
+    let keycode = keycode();
+    if keycode != TAB_KEYCODE {
+        CtrlTabRoute::NotCtrlTab
+    } else if is_tab_cycle_chord(keycode, ctrl, cmd, alt) {
+        CtrlTabRoute::Cycle
+    } else {
+        CtrlTabRoute::ToPage
+    }
+}
+
+/// A view claimed a Ctrl+Tab press: its Tab release is swallowed too,
+/// whichever key the user lets go first (#1012 R1 nit 1: with Ctrl
+/// released first the release carries no Ctrl and reached the page as a
+/// stray Tab keyup).
+/// Kept per view: all tabs share one content view, so a Ctrl+Tab switch
+/// leaves the keyboard on the view that owes the release (#1012 delta R1
+/// nit a).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn owe_tab_up(view: u64) {
+    TAB_UP_OWED.with(|owed| owed.borrow_mut().insert(view));
+}
+
+/// Whether this key release is the one a claimed Ctrl+Tab owes (and so
+/// is swallowed). Consumes the debt.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn take_tab_up(view: u64, mac_keycode: u16) -> bool {
+    mac_keycode == TAB_KEYCODE && TAB_UP_OWED.with(|owed| owed.borrow_mut().remove(&view))
+}
+
+/// Move an existing `NSView` and clip its layer. Does not touch the engine,
+/// so a content load can inset the page while the engine is borrowed.
+#[cfg(target_os = "macos")]
+pub fn place_raw_view(view: isize, bounds: Bounds) {
+    if view == 0 {
+        return;
+    }
+    let view = view as id;
+    unsafe {
+        let superview: id = msg_send![view, superview];
+        if superview != nil {
+            let parent: cocoa::foundation::NSRect = msg_send![superview, frame];
+            let frame = cocoa::foundation::NSRect::new(
+                cocoa::foundation::NSPoint::new(
+                    bounds.x as f64,
+                    parent.size.height - bounds.y as f64 - bounds.height as f64,
+                ),
+                cocoa::foundation::NSSize::new(bounds.width as f64, bounds.height as f64),
+            );
+            let _: () = msg_send![view, setFrame: frame];
+        }
+        clip_view_layer(view);
+    }
+}
+
+/// The host view's frame size in pixels, after [`place_raw_view`] or
+/// `set_bounds`. `None` when there is no view. This is the frame on screen,
+/// which can move while the engine's stored bounds have not.
+#[cfg(target_os = "macos")]
+pub fn raw_view_content_size(view: isize) -> Option<(u32, u32)> {
+    if view == 0 {
+        return None;
+    }
+    let view = view as id;
+    unsafe {
+        let frame: cocoa::foundation::NSRect = msg_send![view, frame];
+        let width = frame.size.width.round();
+        let height = frame.size.height.round();
+        if width < 1.0 || height < 1.0 {
+            return None;
+        }
+        Some((width as u32, height as u32))
+    }
+}
+
+/// Clip an existing `NSView`'s layer. No-op when the view has no layer yet.
+#[cfg(target_os = "macos")]
+pub fn clip_raw_view(view: isize) {
+    if view == 0 {
+        return;
+    }
+    clip_view_layer(view as id);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn clip_raw_view(_view: isize) {}
+
 /// The main ViewHost that manages all views.
 pub struct ViewHost {
     views: RwLock<HashMap<ViewId, Arc<Mutex<ViewState>>>>,
@@ -299,6 +490,18 @@ pub struct ViewHost {
 }
 
 impl ViewHost {
+    /// The platform pointer stored for `view_id` (an `NSView` on macOS). 0
+    /// when the view is unknown.
+    pub fn raw_view(&self, view_id: ViewId) -> isize {
+        let Ok(views) = self.views.read() else {
+            return 0;
+        };
+        let Some(state) = views.get(&view_id) else {
+            return 0;
+        };
+        state.lock().map(|guard| guard.hwnd_raw).unwrap_or(0)
+    }
+
     /// Create a new ViewHost.
     pub fn new() -> Self {
         #[cfg(windows)]
@@ -381,6 +584,47 @@ impl ViewHost {
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn get_x11_window(&self, id: ViewId) -> Result<u64, ViewHostError> {
         self.x11()?.get_x11_window(id)
+    }
+
+    /// Give the keyboard to a view: its X11 window takes the input focus (S1c).
+    ///
+    /// Before this existed the trait's `focus_view` called itself: `fn focus_view(&self) { self.focus_view() }`
+    /// with no inherent method to resolve to, so the first call overflowed the stack (measured: SIGSEGV on the
+    /// first mouse press in the RustKit page view).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn focus_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
+        self.x11()?.focus_view(view_id)?;
+        if let Some(state) = self.views.read().unwrap().get(&view_id) {
+            state.lock().unwrap().focused = true;
+        }
+        Ok(())
+    }
+
+    /// Show a view only inside `region` (view-local), or everywhere with `None`: XShape on X11.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn set_view_region(&self, view_id: ViewId, region: Option<&[RegionRect]>) -> Result<(), ViewHostError> {
+        self.x11()?.set_region(view_id, region)
+    }
+
+    /// Show the X11 font cursor `shape` over a view's window.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn set_x11_cursor(&self, view_id: ViewId, shape: u32) -> Result<(), ViewHostError> {
+        self.x11()?.set_cursor(view_id, shape)
+    }
+
+    /// Give the X input focus to window `window` (a raw `XSetInputFocus`).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn focus_x11_window(&self, window: u64) {
+        match self.x11() {
+            Ok(host) => host.focus_window(window),
+            Err(_) => tracing::warn!("focus_x11_window: no X11 host (the app window is not an X11 window?)"),
+        }
+    }
+
+    /// Raise a view above its siblings.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn raise_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
+        self.x11()?.raise_view(view_id)
     }
 
     /// Raw X11 display pointer.
@@ -729,7 +973,6 @@ impl ViewHost {
     // the caller from a real one. That is worse than an error: it succeeded.
     // Replaced by the real X11 implementation above.
 
-
     /// Set the bounds of a view.
     pub fn set_bounds(&self, view_id: ViewId, bounds: Bounds) -> Result<(), ViewHostError> {
         let views = self.views.read().unwrap();
@@ -783,8 +1026,17 @@ impl ViewHost {
                         cocoa::foundation::NSSize::new(bounds.width as f64, bounds.height as f64),
                     );
                     let _: () = msg_send![view, setFrame: frame];
+                    clip_view_layer(view);
                 }
             }
+        }
+
+        // X11: until now this function only RECORDED the bounds (it had a Windows and a macOS arm and no X11 one), so
+        // a RustKit view's window kept its first size and place whatever the app asked: a resized browser window
+        // left the chrome and the page at their old size, and a panel could not move or hide.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(host) = self.x11.as_ref() {
+            let _ = host.resize_view(view_id, bounds);
         }
 
         trace!(?view_id, ?bounds, "Bounds updated");
@@ -876,6 +1128,22 @@ impl ViewHost {
             let state_lock = state.lock().unwrap();
             let hwnd_raw = state_lock.hwnd_raw;
             drop(state_lock);
+            let _ = hwnd_raw;
+
+            // CH2.E35: the NSView leaves its window and is released (it was
+            // alloc'd by `create_view`; the superview held the other
+            // reference). Before, a destroyed view stayed in the window,
+            // still showing its last frame: one per closed view. The GPU
+            // surface on its layer is the caller's to release first
+            // (`Presenter::destroy_view`).
+            #[cfg(target_os = "macos")]
+            if hwnd_raw != 0 {
+                let view = hwnd_raw as id;
+                unsafe {
+                    let _: () = msg_send![view, removeFromSuperview];
+                    let _: () = msg_send![view, release];
+                }
+            }
 
             #[cfg(windows)]
             {
@@ -890,6 +1158,10 @@ impl ViewHost {
                     let _ = DestroyWindow(hwnd);
                 }
             }
+
+            // An input recorded for this view must not reach whatever
+            // view comes next (threads plan M2).
+            input_queue::retire_view_input(view_id);
 
             info!(?view_id, "View destroyed");
             Ok(())
@@ -1043,7 +1315,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1087,7 +1359,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1116,7 +1388,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1149,7 +1421,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1167,7 +1439,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1190,7 +1462,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Key(event),
+                        event: CoreInputEvent::Key(event),
                     });
                 }
             }
@@ -1211,7 +1483,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Key(event),
+                        event: CoreInputEvent::Key(event),
                     });
                 }
             }
@@ -1229,7 +1501,7 @@ impl ViewHost {
 
                         emit(ViewEvent::Input {
                             view_id,
-                            event: InputEvent::Key(event),
+                            event: CoreInputEvent::Key(event),
                         });
                     }
                 }
@@ -1249,7 +1521,7 @@ impl ViewHost {
                     emit(ViewEvent::Focused { view_id });
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Focus(event),
+                        event: CoreInputEvent::Focus(event),
                     });
                 }
             }
@@ -1267,7 +1539,7 @@ impl ViewHost {
                     emit(ViewEvent::Blurred { view_id });
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Focus(event),
+                        event: CoreInputEvent::Focus(event),
                     });
                 }
             }
@@ -1374,6 +1646,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tab_cycle_chord_is_ctrl_tab_without_cmd_or_option() {
+        assert!(is_tab_cycle_chord(48, true, false, false));
+        assert!(!is_tab_cycle_chord(48, true, false, true), "Ctrl+Option+Tab is the page's");
+        assert!(!is_tab_cycle_chord(48, true, true, false), "Cmd+Ctrl+Tab");
+        assert!(!is_tab_cycle_chord(48, false, false, false), "plain Tab");
+        assert!(!is_tab_cycle_chord(0, true, false, false), "Ctrl+A");
+    }
+
+    #[test]
+    fn ctrl_tab_route_reads_the_keycode_of_key_downs_only() {
+        let ctrl = 1u64 << 18;
+        let never = || -> u16 { panic!("keyCode read for an event that is not a Ctrl keyDown") };
+        // A mouse-down (1), a flags-changed (12), a key-up (11): keyCode is not read.
+        for kind in [1u64, 11, 12, 14] {
+            assert_eq!(ctrl_tab_route(kind, ctrl, never), CtrlTabRoute::NotCtrlTab, "kind {kind}");
+        }
+        // A keyDown without Ctrl, or with Cmd, is not read either.
+        assert_eq!(ctrl_tab_route(10, 0, never), CtrlTabRoute::NotCtrlTab);
+        assert_eq!(ctrl_tab_route(10, ctrl | (1 << 20), never), CtrlTabRoute::NotCtrlTab);
+        assert_eq!(ctrl_tab_route(10, ctrl, || 48), CtrlTabRoute::Cycle);
+        assert_eq!(ctrl_tab_route(10, ctrl | (1 << 17), || 48), CtrlTabRoute::Cycle, "Ctrl+Shift+Tab");
+        assert_eq!(ctrl_tab_route(10, ctrl | (1 << 19), || 48), CtrlTabRoute::ToPage, "Ctrl+Option+Tab");
+        assert_eq!(ctrl_tab_route(10, ctrl, || 0), CtrlTabRoute::NotCtrlTab, "Ctrl+A");
+    }
+
+    #[test]
+    fn a_claimed_ctrl_tab_swallows_exactly_its_tab_release() {
+        let (a, b) = (0xA1D0_0001, 0xA1D0_0002);
+        assert!(!take_tab_up(a, 48), "nothing owed yet");
+        owe_tab_up(a);
+        assert!(!take_tab_up(b, 48), "another view owes nothing");
+        assert!(!take_tab_up(a, 59), "the Ctrl release is not it");
+        assert!(take_tab_up(a, 48), "the Tab release is swallowed, Ctrl down or not");
+        assert!(!take_tab_up(a, 48), "once");
+    }
+
+    #[test]
     fn test_view_id_uniqueness() {
         let id1 = ViewId::new();
         let id2 = ViewId::new();
@@ -1440,6 +1749,28 @@ mod tests {
         host.destroy_view(view_id).unwrap();
         assert_eq!(host.view_count(), 0);
     }
+
+    #[test]
+    fn test_bounds_clone() {
+        let b1 = Bounds::new(10, 20, 800, 600);
+        let b2 = b1;
+
+        assert_eq!(b1, b2);
+        assert_eq!(b1.x, b2.x);
+        assert_eq!(b1.y, b2.y);
+        assert_eq!(b1.width, b2.width);
+        assert_eq!(b1.height, b2.height);
+    }
+
+    #[test]
+    fn test_view_id_clone() {
+        let id1 = ViewId::new();
+        let id2 = id1;
+
+        // Cloned IDs should be equal
+        assert_eq!(id1, id2);
+        assert_eq!(id1.raw(), id2.raw());
+    }
 }
 
 // ============================================================================
@@ -1490,3 +1821,9 @@ impl ViewHostTrait for ViewHost {
         self.get_dpi(view_id)
     }
 }
+
+/// macOS hands a key equivalent the page did not claim on to the main menu, holding the `NSEvent`
+/// by token until the page answers. Other platforms hold nothing, so there is nothing to finish.
+/// A no-op so the shared `webview_rustkit.rs` (synced from hiwave-macos, S3) builds off macOS.
+#[cfg(not(target_os = "macos"))]
+pub fn finish_key_equivalent(_token: u64, _claimed: bool) {}

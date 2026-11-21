@@ -10,25 +10,24 @@
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/export
 
 use crate::{
-    lexer::{token::ContainsEscapeSequence, TokenKind},
+    lexer::{TokenKind, token::ContainsEscapeSequence},
     parser::{
+        Error, OrAbrupt, ParseResult, TokenParser,
         cursor::Cursor,
         expression::AssignmentExpression,
         statement::{declaration::ClassDeclaration, variable::VariableStatement},
-        Error, OrAbrupt, ParseResult, TokenParser,
     },
     source::ReadChar,
 };
 use boa_ast::{
+    Keyword, Punctuator, Spanned,
     declaration::{ExportDeclaration as AstExportDeclaration, ReExportKind},
-    Keyword, Punctuator,
 };
 use boa_interner::{Interner, Sym};
-use boa_profiler::Profiler;
 
 use super::{
+    Declaration, FromClause, FunctionDeclaration, WithClause,
     hoistable::{AsyncFunctionDeclaration, AsyncGeneratorDeclaration, GeneratorDeclaration},
-    Declaration, FromClause, FunctionDeclaration,
 };
 
 /// Parses an export declaration.
@@ -47,8 +46,6 @@ where
     type Output = AstExportDeclaration;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let _timer = Profiler::global().start_event("ExportDeclaration", "Parsing");
-
         cursor.expect((Keyword::Export, false), "export declaration", interner)?;
 
         let tok = cursor.peek(0, interner).or_abrupt()?;
@@ -60,7 +57,7 @@ where
 
                 let next = cursor.peek(0, interner).or_abrupt()?;
 
-                let export = match next.kind() {
+                let (kind, specifier) = match next.kind() {
                     TokenKind::IdentifierName((Sym::AS, _)) => {
                         cursor.advance(interner);
                         let tok = cursor.next(interner).or_abrupt()?;
@@ -75,26 +72,20 @@ where
                                     tok.to_string(interner),
                                     tok.span(),
                                     "export declaration",
-                                ))
+                                ));
                             }
                         };
 
                         let specifier =
                             FromClause::new("export declaration").parse(cursor, interner)?;
 
-                        AstExportDeclaration::ReExport {
-                            kind: ReExportKind::Namespaced { name: Some(alias) },
-                            specifier,
-                        }
+                        (ReExportKind::Namespaced { name: Some(alias) }, specifier)
                     }
                     TokenKind::IdentifierName((Sym::FROM, _)) => {
                         let specifier =
                             FromClause::new("export declaration").parse(cursor, interner)?;
 
-                        AstExportDeclaration::ReExport {
-                            kind: ReExportKind::Namespaced { name: None },
-                            specifier,
-                        }
+                        (ReExportKind::Namespaced { name: None }, specifier)
                     }
                     _ => {
                         return Err(Error::expected(
@@ -102,13 +93,18 @@ where
                             next.to_string(interner),
                             next.span(),
                             "export declaration",
-                        ))
+                        ));
                     }
                 };
 
+                let attributes = WithClause::new("export declaration").parse(cursor, interner)?;
                 cursor.expect_semicolon("star re-export", interner)?;
 
-                export
+                AstExportDeclaration::ReExport {
+                    kind,
+                    specifier,
+                    attributes,
+                }
             }
             TokenKind::Punctuator(Punctuator::OpenBlock) => {
                 let names = NamedExports.parse(cursor, interner)?;
@@ -121,12 +117,15 @@ where
                 ) {
                     let specifier =
                         FromClause::new("export declaration").parse(cursor, interner)?;
+                    let attributes =
+                        WithClause::new("export declaration").parse(cursor, interner)?;
 
                     cursor.expect_semicolon("named re-exports", interner)?;
 
                     AstExportDeclaration::ReExport {
                         kind: ReExportKind::Named { names },
                         specifier,
+                        attributes,
                     }
                 } else {
                     cursor.expect_semicolon("named exports", interner)?;
@@ -200,7 +199,9 @@ where
                     }
                     TokenKind::Keyword((Keyword::Class, false)) => {
                         AstExportDeclaration::DefaultClassDeclaration(
-                            ClassDeclaration::new(false, true, true).parse(cursor, interner)?,
+                            ClassDeclaration::new(false, true, true)
+                                .parse(cursor, interner)?
+                                .into(),
                         )
                     }
                     _ => {
@@ -317,6 +318,10 @@ where
             }
             TokenKind::IdentifierName((ident, _)) => Ok((*ident, false)),
             TokenKind::Keyword((kw, _)) => Ok((kw.to_sym(), false)),
+            TokenKind::BooleanLiteral((b, _)) => {
+                Ok((if *b { Sym::TRUE } else { Sym::FALSE }, false))
+            }
+            TokenKind::NullLiteral(_) => Ok((Sym::NULL, false)),
             _ => Err(Error::expected(
                 ["identifier".to_owned(), "string literal".to_owned()],
                 tok.to_string(interner),

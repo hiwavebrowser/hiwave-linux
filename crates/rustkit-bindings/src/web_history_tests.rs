@@ -205,3 +205,313 @@ fn anchor_setters_write_the_href_attribute() {
          http://other.test:81/new?k=v#h,http://other.test:81,https://site.test/moved/z"
     );
 }
+
+// ---- navigations script starts (the live app follows them) ----
+
+const DOC: &str = "https://site.test/dir/index.html?a=1#top";
+
+#[test]
+fn assigning_location_asks_for_a_navigation() {
+    let b = bound();
+    // Binding the document and writing its URL are not requests.
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+
+    ev(&b, "location.href = '../next?x=1'; 0");
+    assert_eq!(b.take_navigation_requests(), ["https://site.test/next?x=1"]);
+    // Taken once.
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+
+    for (script, want) in [
+        ("location.assign('/a')", "https://site.test/a"),
+        (
+            "location.replace('https://other.test/b')",
+            "https://other.test/b",
+        ),
+        ("window.location = '/c'", "https://site.test/c"),
+        ("document.location = '/d'", "https://site.test/d"),
+    ] {
+        b.set_location(&Url::parse(DOC).unwrap()).unwrap();
+        ev(&b, &format!("{script}; 0"));
+        assert_eq!(b.take_navigation_requests(), [want], "{script}");
+    }
+    // `window.location = url` used to replace the object with a string.
+    assert_eq!(
+        ev(&b, "typeof location + ',' + typeof location.assign"),
+        "object,function"
+    );
+}
+
+#[test]
+fn what_is_not_a_navigation_asks_for_none() {
+    let b = bound();
+    // The same document with another fragment, a script URL, a URL that
+    // does not parse, and the history API's own rewrites of `location`.
+    ev(
+        &b,
+        "window.log = []; addEventListener('hashchange', function (e) { log.push(e.newURL); }); \
+         location.href = '#other'; location.href = 'javascript:void 0'; location.href = 'http://[bad'; \
+         history.pushState(null, '', '/pushed'); history.replaceState(null, '', '/replaced'); 0",
+    );
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+    // The fragment was a navigation inside the document.
+    assert_eq!(
+        ev(&b, "log.join()"),
+        "https://site.test/dir/index.html?a=1#other"
+    );
+    // `location` reads the document's URL, not what script assigned.
+    ev(&b, "location.href = '/away'; 0");
+    assert_eq!(ev(&b, "location.href"), "https://site.test/replaced");
+    assert_eq!(b.take_navigation_requests(), ["https://site.test/away"]);
+    // A new document's URL, written by the engine.
+    b.set_location(&Url::parse("https://site.test/elsewhere").unwrap())
+        .unwrap();
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+    assert_eq!(ev(&b, "location.href"), "https://site.test/elsewhere");
+}
+
+#[test]
+fn a_script_click_on_a_link_follows_it() {
+    let b = bound();
+    ev(&b, "document.getElementById('abs').click(); 0");
+    assert_eq!(
+        b.take_navigation_requests(),
+        ["http://other.test:8080/p/q?s#h"]
+    );
+
+    // From a descendant of the link, resolved against the document.
+    ev(
+        &b,
+        "var a = document.getElementById('rel'), s = document.createElement('span'); a.appendChild(s); s.click(); 0",
+    );
+    assert_eq!(
+        b.take_navigation_requests(),
+        ["https://site.test/page?x=1#frag"]
+    );
+
+    // A cancelled click, a link with no href, one that does not parse, one
+    // that opens elsewhere, a download, and a button inside a link (the
+    // button has the activation) follow nothing.
+    ev(
+        &b,
+        "a.addEventListener('click', function (e) { e.preventDefault(); }); a.click(); \
+         document.getElementById('none').click(); document.getElementById('bad').click(); \
+         var abs = document.getElementById('abs'); abs.setAttribute('target', '_blank'); abs.click(); \
+         abs.removeAttribute('target'); abs.setAttribute('download', ''); abs.click(); \
+         abs.removeAttribute('download'); var bt = document.createElement('button'); abs.appendChild(bt); bt.click(); 0",
+    );
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+}
+
+#[test]
+fn location_stringifies_to_its_href_and_can_be_a_url_base() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "String(location) + '|' + location.toString() + '|' + (location == location.href)"),
+        "https://site.test/dir/index.html?a=1#top|https://site.test/dir/index.html?a=1#top|true"
+    );
+    assert_eq!(
+        ev(&b, "new URL('/abs', location).href + ' ' + new URL('rel.js', location).href + ' ' + new URL(location).href"),
+        "https://site.test/abs https://site.test/dir/rel.js https://site.test/dir/index.html?a=1#top"
+    );
+}
+
+#[test]
+fn a_script_click_on_a_fragment_link_stays_in_the_document() {
+    let b = bound();
+    ev(
+        &b,
+        "window.log = []; addEventListener('hashchange', function (e) { log.push(e.newURL); }); \
+         var f = document.createElement('a'); f.setAttribute('href', '#sec'); document.body.appendChild(f); f.click(); 0",
+    );
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+    assert_eq!(
+        ev(
+            &b,
+            "log.join() + ' ' + location.hash + ' ' + history.length"
+        ),
+        "https://site.test/dir/index.html?a=1#sec #sec 2"
+    );
+}
+
+// squarespace's homepage bundle, 2026-10-20: `new URL(path, location)` threw
+// "Invalid URL" and its app root unmounted, leaving the page white. Location's
+// stringifier (HTML §7.2.4, `stringifier attribute href`) makes the object
+// read as its URL wherever a string is wanted.
+#[test]
+fn location_reads_as_its_href_wherever_a_string_is_wanted() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "[String(location), '' + location, `${location}`, new URL('/p?q', location).href, \
+             new URL('x', window.location).href, location.toString(), typeof location.toString].join(' ')"
+        ),
+        "https://site.test/dir/index.html?a=1#top https://site.test/dir/index.html?a=1#top \
+         https://site.test/dir/index.html?a=1#top https://site.test/p?q https://site.test/dir/x \
+         https://site.test/dir/index.html?a=1#top function"
+    );
+    // It follows the URL as it changes.
+    assert_eq!(
+        ev(&b, "history.pushState(null, '', '/moved#m'); String(location) + ' ' + new URL('n', location).href"),
+        "https://site.test/moved#m https://site.test/n"
+    );
+}
+
+/// HistoryHandling "replace" (#707): reload, `location.replace`, and the
+/// document's own URL again must ask the embedder to overwrite the current
+/// entry. `assign` / a new `href` still push. Portable beside the headless
+/// error-page pins that only assert after a full load.
+#[test]
+fn reload_replace_and_same_url_ask_to_replace_the_history_entry() {
+    // Same-URL assign/href only reloads when the document URL has no
+    // fragment (`go` treats `#…` as in-document). Match the error-page pins.
+    const PAGE_NO_HASH: &str = "https://site.test/dir/index.html?a=1";
+    let b = bound();
+    for (script, want_url, replace) in [
+        ("location.replace('/a')", "https://site.test/a", true),
+        (
+            "location.assign('/b?x=1')",
+            "https://site.test/b?x=1",
+            false,
+        ),
+        ("location.href = '/c'", "https://site.test/c", false),
+        (
+            "location.href = location.href",
+            PAGE_NO_HASH,
+            true,
+        ),
+        (
+            "location.assign(location.href)",
+            PAGE_NO_HASH,
+            true,
+        ),
+        ("location.reload()", PAGE_NO_HASH, true),
+    ] {
+        b.set_location(&Url::parse(PAGE_NO_HASH).unwrap()).unwrap();
+        let _ = b.take_navigation_requests_with_replace();
+        ev(&b, &format!("{script}; 0"));
+        assert_eq!(
+            b.take_navigation_requests_with_replace(),
+            [(want_url.to_string(), replace)],
+            "{script}"
+        );
+    }
+    // Same href with a fragment is not a navigation (fragment no-op).
+    b.set_location(&Url::parse(DOC).unwrap()).unwrap();
+    let _ = b.take_navigation_requests_with_replace();
+    ev(&b, "location.href = location.href; 0");
+    assert_eq!(
+        b.take_navigation_requests_with_replace(),
+        Vec::<(String, bool)>::new(),
+        "identical URL with a hash stays in the document"
+    );
+    // A fragment-only write stays in the document.
+    ev(&b, "location.href = '#other'; 0");
+    assert_eq!(
+        b.take_navigation_requests_with_replace(),
+        Vec::<(String, bool)>::new()
+    );
+}
+
+/// Declarative refresh (#707): after `load`, the first parsable
+/// `<meta http-equiv=refresh>` asks for its URL (or this document again)
+/// with historyHandling "replace", so a looping interstitial does not grow
+/// the session history every tick.
+#[test]
+fn a_meta_refresh_after_load_asks_to_replace_the_history_entry() {
+    let with_url = r#"<!DOCTYPE html><html><head>
+<meta http-equiv="refresh" content="0;url=/next">
+</head><body></body></html>"#;
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(Document::parse_html(with_url).unwrap()))
+        .unwrap();
+    b.set_location(&Url::parse("https://site.test/page").unwrap())
+        .unwrap();
+    let _ = b.take_navigation_requests_with_replace();
+    b.fire_lifecycle_event(LifecycleTarget::Window, "load")
+        .unwrap();
+    assert_eq!(
+        b.take_navigation_requests_with_replace(),
+        Vec::<(String, bool)>::new(),
+        "refresh waits for its delay, even at 0s"
+    );
+    b.run_timers(0, 10).unwrap();
+    assert_eq!(
+        b.take_navigation_requests_with_replace(),
+        [("https://site.test/next".into(), true)]
+    );
+
+    // No URL: reload this document, still replace.
+    let reload = r#"<!DOCTYPE html><html><head>
+<meta http-equiv=refresh content="1">
+</head><body></body></html>"#;
+    b.set_document(Rc::new(Document::parse_html(reload).unwrap()))
+        .unwrap();
+    b.set_location(&Url::parse("https://site.test/again").unwrap())
+        .unwrap();
+    let _ = b.take_navigation_requests_with_replace();
+    b.fire_lifecycle_event(LifecycleTarget::Window, "load")
+        .unwrap();
+    b.run_timers(999, 10).unwrap();
+    assert_eq!(
+        b.take_navigation_requests_with_replace(),
+        Vec::<(String, bool)>::new()
+    );
+    b.run_timers(1000, 10).unwrap();
+    assert_eq!(
+        b.take_navigation_requests_with_replace(),
+        [("https://site.test/again".into(), true)]
+    );
+}
+
+/// HTML §7.2.4 hash setter (#850 / e00f0988): when the new fragment equals
+/// the current one (none reads as empty), return — no hashchange, no history
+/// entry, URL unchanged. Portable beside the headless scroll_into_view pins.
+#[test]
+fn the_hash_setter_does_nothing_for_the_fragment_already_there() {
+    let b = bound();
+    // DOC ends in `#top`.
+    assert_eq!(
+        ev(
+            &b,
+            "window.hc = 0; addEventListener('hashchange', function () { hc++; }); \
+             var len = history.length; location.hash = 'top'; location.hash = '#top'; \
+             [hc, history.length - len, location.hash, location.href].join()"
+        ),
+        "0,0,#top,https://site.test/dir/index.html?a=1#top"
+    );
+    // A different fragment still navigates inside the document.
+    assert_eq!(
+        ev(
+            &b,
+            "var len = history.length; location.hash = 'other'; \
+             [hc, history.length - len, location.hash].join()"
+        ),
+        "1,1,#other"
+    );
+
+    // No fragment: clearing stays put (Chromium keeps `/`, not `/#`).
+    b.set_location(&Url::parse("https://site.test/dir/index.html?a=1").unwrap())
+        .unwrap();
+    assert_eq!(
+        ev(
+            &b,
+            "window.hc = 0; var len = history.length; \
+             location.hash = ''; location.hash = '#'; \
+             [hc, history.length - len, location.hash, location.href].join()"
+        ),
+        "0,0,,https://site.test/dir/index.html?a=1"
+    );
+    // A bare `#` already there is the empty fragment; clearing is still a no-op.
+    b.set_location(&Url::parse("https://site.test/dir/index.html?a=1#").unwrap())
+        .unwrap();
+    assert_eq!(
+        ev(
+            &b,
+            "window.hc = 0; var len = history.length; \
+             location.hash = ''; location.hash = '#'; \
+             [hc, history.length - len, location.href.endsWith('#')].join()"
+        ),
+        "0,0,true"
+    );
+}

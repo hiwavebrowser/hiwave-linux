@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2021"
-rust-version = "1.82.0"
+edition = "2024"
+rust-version = "1.91.0"
 name = "boa_parser"
-version = "0.20.0"
+version = "0.22.0"
 authors = ["boa-dev"]
 build = false
 autolib = false
@@ -35,53 +35,58 @@ categories = [
 ]
 license = "Unlicense OR MIT"
 repository = "https://github.com/boa-dev/boa"
+resolver = "2"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[features]
+annex-b = []
 
 [lib]
 name = "boa_parser"
 path = "src/lib.rs"
 
 [dependencies.bitflags]
-version = "2.5.0"
+version = "2.13.1"
 
 [dependencies.boa_ast]
-version = "~0.20.0"
+version = "~0.22.0"
 
 [dependencies.boa_interner]
-version = "~0.20.0"
+version = "~0.22.0"
 
 [dependencies.boa_macros]
-version = "~0.20.0"
-
-[dependencies.boa_profiler]
-version = "~0.20.0"
+version = "~0.22.0"
 
 [dependencies.fast-float2]
-version = "0.2.3"
+version = "0.2.4"
 
 [dependencies.icu_properties]
-version = "~1.5.0"
+version = "~2.3.0"
 default-features = true
 
 [dependencies.num-bigint]
-version = "0.4.6"
+version = "0.5.1"
 
 [dependencies.num-traits]
 version = "0.2.19"
 
 [dependencies.regress]
-version = "0.10.1"
+version = "0.12.0"
 features = ["utf16"]
 
 [dependencies.rustc-hash]
-version = "2.1.0"
+version = "2.1.3"
 features = ["std"]
 default-features = false
 
-[features]
-annex-b = []
+[dev-dependencies.indoc]
+version = "2.0.7"
+
+[dev-dependencies.strum]
+version = "0.28"
+features = ["derive"]
 
 [lints.clippy]
 dbg_macro = "warn"

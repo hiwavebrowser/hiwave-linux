@@ -10,6 +10,8 @@
 //! - Event loop via XNextEvent
 //! - Surface integration via raw-window-handle
 
+use crate::input_queue::push_input;
+use crate::x11_input::{self, ClickTracker};
 use crate::{Bounds, EventCallback, MainWindowConfig, ViewEvent, ViewHostError, ViewId};
 use rustkit_core::{
     FocusEvent, FocusEventType, InputEvent, KeyCode, KeyEvent, KeyEventType, KeyboardState,
@@ -23,12 +25,69 @@ use tracing::{debug, error, info, trace, warn};
 use x11::xlib::{
     Display, Window, XCloseDisplay, XCreateSimpleWindow, XDefaultRootWindow, XDefaultScreen,
     XDestroyWindow, XFlush, XMapWindow, XMoveResizeWindow, XNextEvent, XOpenDisplay, XPending,
-    XRootWindow, XSelectInput, XStoreName, XUnmapWindow, ButtonPressMask, ButtonReleaseMask,
+    XRootWindow, XSelectInput, XSetInputFocus, RevertToParent, CurrentTime, XStoreName, XUnmapWindow, ButtonPressMask, ButtonReleaseMask,
     ExposureMask, FocusChangeMask, KeyPressMask, KeyReleaseMask, PointerMotionMask,
-    StructureNotifyMask,
+    StructureNotifyMask, EnterWindowMask, LeaveWindowMask, XEvent, XKeyEvent, XLookupString, KeySym,
+    ButtonPress, ButtonRelease, MotionNotify, KeyPress, KeyRelease, LeaveNotify,
 };
 use std::ffi::CString;
 use std::ptr;
+
+
+// XShape (libXext). The `x11` crate has no binding for it, so the three calls the region route needs are
+// declared here; `libXext` is a dependency of every X11 desktop.
+#[link(name = "Xext")]
+extern "C" {
+    fn XShapeCombineRectangles(
+        display: *mut Display,
+        dest: Window,
+        dest_kind: i32,
+        x_off: i32,
+        y_off: i32,
+        rectangles: *mut x11::xlib::XRectangle,
+        n_rects: i32,
+        op: i32,
+        ordering: i32,
+    );
+    fn XShapeCombineMask(display: *mut Display, dest: Window, dest_kind: i32, x_off: i32, y_off: i32, src: x11::xlib::Pixmap, op: i32);
+    fn XShapeQueryExtension(display: *mut Display, event_base: *mut i32, error_base: *mut i32) -> i32;
+}
+const SHAPE_BOUNDING: i32 = 0;
+const SHAPE_INPUT: i32 = 2;
+const SHAPE_SET: i32 = 0;
+const SHAPE_UNSORTED: i32 = 0;
+
+/// Whether the X server has the SHAPE extension the region route needs (a server started with
+/// `-extension SHAPE` does not). Opens and closes its own connection; call it before building a view that
+/// depends on a region.
+pub fn shape_supported() -> bool {
+    unsafe {
+        let display = XOpenDisplay(ptr::null());
+        if display.is_null() {
+            return false;
+        }
+        let (mut event_base, mut error_base) = (0, 0);
+        let ok = XShapeQueryExtension(display, &mut event_base, &mut error_base) != 0;
+        XCloseDisplay(display);
+        ok
+    }
+}
+
+/// View-local region rectangles (floating point, top-left) as X rectangles: rounded outward to whole pixels,
+/// clamped to what the protocol can carry, empty ones dropped. Pure.
+pub fn region_to_xrects(region: &[crate::RegionRect]) -> Vec<(i16, i16, u16, u16)> {
+    region
+        .iter()
+        .filter_map(|r| {
+            let x0 = r.x.floor().clamp(i16::MIN as f64, i16::MAX as f64);
+            let y0 = r.y.floor().clamp(i16::MIN as f64, i16::MAX as f64);
+            let x1 = (r.x + r.width).ceil().clamp(i16::MIN as f64, i16::MAX as f64);
+            let y1 = (r.y + r.height).ceil().clamp(i16::MIN as f64, i16::MAX as f64);
+            let (w, h) = ((x1 - x0).max(0.0), (y1 - y0).max(0.0));
+            (w > 0.0 && h > 0.0).then_some((x0 as i16, y0 as i16, w as u16, h as u16))
+        })
+        .collect()
+}
 
 /// View state for Linux X11.
 struct X11ViewState {
@@ -39,6 +98,7 @@ struct X11ViewState {
     focused: bool,
     keyboard_state: KeyboardState,
     mouse_state: MouseState,
+    clicks: ClickTracker,
 }
 
 /// Linux X11 ViewHost implementation.
@@ -194,6 +254,8 @@ impl X11ViewHost {
                     | ButtonPressMask
                     | ButtonReleaseMask
                     | PointerMotionMask
+                    | EnterWindowMask
+                    | LeaveWindowMask
                     | FocusChangeMask,
             );
 
@@ -207,6 +269,7 @@ impl X11ViewHost {
                 focused: false,
                 keyboard_state: KeyboardState::default(),
                 mouse_state: MouseState::default(),
+                clicks: ClickTracker::default(),
             };
 
             self.views
@@ -217,6 +280,72 @@ impl X11ViewHost {
             debug!(?view_id, window, "X11 view created");
             Ok(view_id)
         }
+    }
+
+    /// Move the X11 input focus to a view's window.
+    pub fn focus_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
+        let window = self.get_x11_window(view_id)?;
+        unsafe {
+            XSetInputFocus(self.display, window, RevertToParent, CurrentTime);
+            XFlush(self.display);
+        }
+        Ok(())
+    }
+
+    /// Show and hit-test a view only inside `region` (view-local rectangles); `None` restores the whole window.
+    /// The X11 form of the macOS region route: the view's bounding AND input shapes are set, so what the region
+    /// leaves out shows the views beneath it and passes the pointer through to them.
+    pub fn set_region(&self, view_id: ViewId, region: Option<&[crate::RegionRect]>) -> Result<(), ViewHostError> {
+        let window = self.get_x11_window(view_id)?;
+        unsafe {
+            for kind in [SHAPE_BOUNDING, SHAPE_INPUT] {
+                match region {
+                    Some(region) => {
+                        let mut rects: Vec<x11::xlib::XRectangle> = region_to_xrects(region)
+                            .into_iter()
+                            .map(|(x, y, width, height)| x11::xlib::XRectangle { x, y, width, height })
+                            .collect();
+                        XShapeCombineRectangles(self.display, window, kind, 0, 0, rects.as_mut_ptr(), rects.len() as i32, SHAPE_SET, SHAPE_UNSORTED);
+                    }
+                    None => XShapeCombineMask(self.display, window, kind, 0, 0, 0, SHAPE_SET),
+                }
+            }
+            XFlush(self.display);
+        }
+        Ok(())
+    }
+
+    /// Give the X input focus to any X window of this server (the app's toplevel, when the keyboard goes back
+    /// from a view to the page): the exact inverse of [`Self::focus_view`], a raw `XSetInputFocus`, not a request
+    /// to the window manager.
+    pub fn focus_window(&self, window: Window) {
+        unsafe {
+            XSetInputFocus(self.display, window, RevertToParent, CurrentTime);
+            XFlush(self.display);
+        }
+    }
+
+    /// Show the X11 font cursor `shape` (`cursorfont.h`) over a view's window.
+    pub fn set_cursor(&self, view_id: ViewId, shape: u32) -> Result<(), ViewHostError> {
+        let window = self.get_x11_window(view_id)?;
+        unsafe {
+            let cursor = x11::xlib::XCreateFontCursor(self.display, shape);
+            x11::xlib::XDefineCursor(self.display, window, cursor);
+            // The server keeps the cursor the window uses; the client's handle can go.
+            x11::xlib::XFreeCursor(self.display, cursor);
+            XFlush(self.display);
+        }
+        Ok(())
+    }
+
+    /// Raise a view's window above its siblings.
+    pub fn raise_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
+        let window = self.get_x11_window(view_id)?;
+        unsafe {
+            x11::xlib::XRaiseWindow(self.display, window);
+            XFlush(self.display);
+        }
+        Ok(())
     }
 
     /// Resize a view.
@@ -262,18 +391,66 @@ impl X11ViewHost {
         Ok(())
     }
 
-    /// Pump events from X11 (non-blocking).
+    /// Pump events from X11 (non-blocking): pointer, wheel and key events on a view's window are translated
+    /// (`x11_input`) and recorded in the input queue, tagged with the view, for the app to drain.
     pub fn pump_messages(&self) -> bool {
         unsafe {
             while XPending(self.display) > 0 {
-                let mut event = std::mem::zeroed();
+                let mut event: XEvent = std::mem::zeroed();
                 XNextEvent(self.display, &mut event);
-                
-                // TODO: Handle events and emit via callback
-                // For now, just process them to prevent queue backup
+                self.record(&mut event);
             }
         }
         true
+    }
+
+    #[allow(non_upper_case_globals)]
+    unsafe fn record(&self, event: &mut XEvent) {
+        let kind = event.get_type();
+        let window = event.any.window;
+        trace!(kind, window, "X11 event");
+        let Some((view, state)) = self
+            .views
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, s)| s.lock().map(|s| s.window == window).unwrap_or(false))
+            .map(|(id, s)| (*id, Arc::clone(s)))
+        else {
+            return;
+        };
+        let input = match kind {
+            ButtonPress | ButtonRelease => {
+                let b = event.button;
+                let down = kind == ButtonPress;
+                let (x, y) = (b.x as f64, b.y as f64);
+                let clicks = if down && b.button == 1 {
+                    state.lock().unwrap().clicks.press(std::time::Instant::now(), x, y)
+                } else {
+                    1
+                };
+                x11_input::button_input(b.button, down, x, y, b.state as u32, clicks)
+            }
+            MotionNotify => {
+                let m = event.motion;
+                Some(x11_input::motion_input(m.x as f64, m.y as f64, m.state as u32))
+            }
+            LeaveNotify => Some(x11_input::leave_input()),
+            KeyPress | KeyRelease => {
+                let k: &mut XKeyEvent = &mut event.key;
+                let mut buf = [0u8; 32];
+                let mut keysym: KeySym = 0;
+                let n = XLookupString(k, buf.as_mut_ptr() as *mut _, buf.len() as i32, &mut keysym, ptr::null_mut());
+                // Latin-1 text only: XLookupString without an input context. Other scripts and IME composing
+                // are a known gap for this stage.
+                let text: String = buf[..n.max(0) as usize].iter().map(|&b| b as char).collect();
+                Some(x11_input::key_input(keysym as u32, &text, k.state as u32, kind == KeyRelease))
+            }
+            _ => None,
+        };
+        if let Some(input) = input {
+            push_input(view, input);
+        }
     }
 
     /// Set the event callback.
@@ -311,3 +488,36 @@ mod tests {
     // These are integration tests that should be run manually
 }
 
+
+#[cfg(test)]
+mod region_tests {
+    use super::region_to_xrects;
+    use crate::RegionRect;
+
+    #[test]
+    fn rectangles_round_outward_and_empty_ones_are_dropped() {
+        let r = region_to_xrects(&[
+            RegionRect::new(0.4, 10.2, 99.2, 20.1),
+            RegionRect::new(5.0, 5.0, 0.0, 10.0),
+            RegionRect::new(5.0, 5.0, 10.0, 0.0),
+        ]);
+        assert_eq!(r, vec![(0, 10, 100, 21)]);
+    }
+
+    #[test]
+    fn a_rectangle_straddling_the_i16_limit_is_cut_at_it() {
+        // x = 32000, width = 2000 would end at 34000; X11 coordinates stop at 32767, so the width is 767.
+        assert_eq!(region_to_xrects(&[RegionRect::new(32000.0, 0.0, 2000.0, 10.0)]), vec![(32000, 0, 767, 10)]);
+        // wholly beyond the limit: nothing left
+        assert!(region_to_xrects(&[RegionRect::new(40000.0, 0.0, 10.0, 10.0)]).is_empty());
+    }
+
+    #[test]
+    fn huge_and_negative_rectangles_are_clamped_to_what_x11_can_carry() {
+        let r = region_to_xrects(&[RegionRect::new(-40000.0, -5.0, 200000.0, 100.0)]);
+        assert_eq!(r.len(), 1);
+        let (x, y, w, _h) = r[0];
+        assert_eq!((x, y), (i16::MIN, -5));
+        assert!(w as i64 <= u16::MAX as i64);
+    }
+}

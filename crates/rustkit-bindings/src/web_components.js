@@ -7,8 +7,10 @@
 // methods of the node wrappers and does nothing (one length check) until
 // a page defines its first element. Stated limits: autonomous custom
 // elements only (`define(name, ctor, { extends })` throws NotSupportedError,
-// as in Safari); adoptedCallback never fires (one document); `:defined` is not
-// a selector; ElementInternals / form-associated elements are not provided.
+// as in Safari); adoptedCallback never fires (one document); ElementInternals /
+// form-associated elements are not provided. `:defined` follows the names
+// defined here: each define tells the DOM (`__rkShadowInternals`, 'define'),
+// and the style engine reads that set.
 // Shadow DOM is not here (see the shadow root work).
 (function (g) {
     if (g.customElements) return;
@@ -24,12 +26,15 @@
     var stack = [];                 // upgrade/construct in progress
     var rawCreateElement = null;    // the DOM's own createElement, below
     var selector = '';              // joined defined names, for subtree scans
+    // The natives already wrapped: kept here, not as a property of the function.
+    var WRAPPED = new WeakSet();
+    var shadowHost = g.__rkShadowInternals || null;  // tells the DOM a name is defined
 
     function domError(message, name) {
         return typeof g.DOMException === 'function' ? new g.DOMException(message, name) : (function () { var e = new Error(message); e.name = name; return e; })();
     }
     function report(e) {
-        try { if (g.__rustkit_errors) g.__rustkit_errors.push(String(e)); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
     function call(fn, thisArg, args) {
         try { fn.apply(thisArg, args); } catch (e) { report(e); }
@@ -84,10 +89,10 @@
             return;
         }
         // Attributes present at upgrade time are "changed" from null.
-        var observed = def.observed;
-        if (observed.length && def.attributeChanged && typeof el.getAttributeNames === 'function') {
+        var observed = def.observedSet;
+        if (def.observed.length && def.attributeChanged && typeof el.getAttributeNames === 'function') {
             el.getAttributeNames().forEach(function (n) {
-                if (observed.indexOf(n) >= 0) call(def.attributeChanged, el, [n, null, el.getAttribute(n)]);
+                if (observed[n] === true) call(def.attributeChanged, el, [n, null, el.getAttribute(n)]);
             });
         }
         enqueueConnected(el, st);
@@ -175,6 +180,26 @@
         return el;
     };
 
+    // The connected elements named `name`, in shadow-including tree order
+    // (HTML §4.13.4 define, step "upgrade candidates"): a host's shadow
+    // tree, closed ones too, comes before the host's children.
+    function upgradeCandidates(name) {
+        var light = Array.prototype.slice.call(document.getElementsByTagName(name));
+        if (!shadowHost || !shadowHost.call('any', document)) return light;
+        var out = [];
+        (function walk(node) {
+            var kids = node.children;
+            for (var i = 0; i < kids.length; i++) {
+                var el = kids[i];
+                if (String(el.localName).toLowerCase() === name) out.push(el);
+                var root = shadowHost.node('root', el);
+                if (root) walk(root);
+                walk(el);
+            }
+        })(document);
+        return out;
+    }
+
     // ---- the registry
     function CustomElementRegistry() { throw new TypeError('Illegal constructor'); }
     CustomElementRegistry.prototype.define = function (name, ctor, options) {
@@ -184,6 +209,7 @@
         if (byName[name]) throw domError("Failed to execute 'define' on 'CustomElementRegistry': the name \"" + name + '" has already been used with this registry', 'NotSupportedError');
         if (byCtor && byCtor.has(ctor)) throw domError("Failed to execute 'define' on 'CustomElementRegistry': this constructor has already been used with this registry", 'NotSupportedError');
         if (options && options.extends !== undefined && options.extends !== null) {
+            __rk.unsupported('CustomElementRegistry', 'define(extends)');
             throw domError("Failed to execute 'define' on 'CustomElementRegistry': customized built-in elements are not supported", 'NotSupportedError');
         }
         var proto = ctor.prototype;
@@ -200,19 +226,25 @@
         var def = {
             name: name, ctor: ctor,
             connected: callback('connectedCallback'), disconnected: callback('disconnectedCallback'),
-            attributeChanged: callback('attributeChangedCallback'), observed: []
+            attributeChanged: callback('attributeChangedCallback'), observed: [],
+            observedSet: Object.create(null)
         };
         if (def.attributeChanged) {
             var list = ctor.observedAttributes;
             if (list !== undefined && list !== null) def.observed = Array.from(list).map(String);
+            // The names as a set, and the names any definition watches: the attribute write path asks these
+            // two questions on every write, so they are property reads on null-prototype objects.
+            for (var oi = 0; oi < def.observed.length; oi++) def.observedSet[def.observed[oi]] = watched[def.observed[oi]] = true;
         }
         byName[name] = def;
         if (byCtor) byCtor.set(ctor, def);
         names.push(name);
+        if (HOOKS && !HOOKS.attrs) { HOOKS.watched = watched; HOOKS.attrs = attrHook; }
         selector = names.join(',');
-        // Every connected element of that name that already exists upgrades.
-        var found = document.getElementsByTagName(name);
-        Array.prototype.slice.call(found).forEach(function (el) { upgrade(el, def); });
+        if (shadowHost) shadowHost.call('define', document, name);
+        // Every connected element of that name that already exists upgrades,
+        // shadow trees included.
+        upgradeCandidates(name).forEach(function (el) { upgrade(el, def); });
         if (pending[name]) {
             pending[name].forEach(function (resolve) { resolve(ctor); });
             delete pending[name];
@@ -263,7 +295,7 @@
     function wrapInsert(name, firstOnly) {
         protoWith(name).forEach(function (proto) {
             var native = proto[name];
-            if (typeof native !== 'function' || native.__rkCE) return;
+            if (typeof native !== 'function' || WRAPPED.has(native)) return;
             var wrapped = function () {
                 if (!names.length) return native.apply(this, arguments);
                 var inserted = nodesIn(firstOnly ? [arguments[0]] : arguments);
@@ -287,7 +319,7 @@
                 inserted.forEach(reconcile);
                 return result;
             };
-            wrapped.__rkCE = true;
+            WRAPPED.add(wrapped);
             Object.defineProperty(proto, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, name) });
         });
     }
@@ -297,7 +329,7 @@
     function wrapRemove(name, victim) {
         protoWith(name).forEach(function (proto) {
             var native = proto[name];
-            if (typeof native !== 'function' || native.__rkCE) return;
+            if (typeof native !== 'function' || WRAPPED.has(native)) return;
             var wrapped = function () {
                 if (!names.length) return native.apply(this, arguments);
                 var leaving = connectedCustom(victim(this, arguments));
@@ -305,7 +337,7 @@
                 afterRemoval(leaving);
                 return result;
             };
-            wrapped.__rkCE = true;
+            WRAPPED.add(wrapped);
             Object.defineProperty(proto, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, name) });
         });
     }
@@ -315,7 +347,7 @@
     // innerHTML / textContent setters replace the children: those leave.
     function wrapSetter(proto, prop, replacesChildren) {
         var d = Object.getOwnPropertyDescriptor(proto, prop);
-        if (!d || !d.set || d.set.__rkCE) return;
+        if (!d || !d.set || WRAPPED.has(d.set)) return;
         var set = d.set;
         var wrapped = function (v) {
             if (!names.length) return set.call(this, v);
@@ -325,7 +357,7 @@
             if (prop === 'innerHTML') reconcile(this);
             return result;
         };
-        wrapped.__rkCE = true;
+        WRAPPED.add(wrapped);
         Object.defineProperty(proto, prop, { get: d.get, set: wrapped, enumerable: d.enumerable, configurable: true });
     }
     wrapSetter(g.Element.prototype, 'innerHTML');
@@ -333,7 +365,7 @@
 
     protoWith('insertAdjacentHTML').forEach(function (proto) {
         var native = proto.insertAdjacentHTML;
-        if (native.__rkCE) return;
+        if (WRAPPED.has(native)) return;
         var wrapped = function (where) {
             var result = native.apply(this, arguments);
             if (names.length) {
@@ -342,30 +374,31 @@
             }
             return result;
         };
-        wrapped.__rkCE = true;
+        WRAPPED.add(wrapped);
         Object.defineProperty(proto, 'insertAdjacentHTML', { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, 'insertAdjacentHTML') });
     });
 
-    // Attributes: attributeChangedCallback for the observed ones.
-    function wrapAttribute(name, newValue) {
-        var native = g.Element.prototype[name];
-        if (typeof native !== 'function' || native.__rkCE) return;
-        var wrapped = function (attr) {
-            if (!names.length) return native.apply(this, arguments);
-            var st = stateOf(this);
-            var key = String(attr);
-            var watched = st && !st.failed && st.def.attributeChanged && st.def.observed.indexOf(key) >= 0;
-            var old = watched ? this.getAttribute(key) : null;
-            var result = native.apply(this, arguments);
-            if (watched) {
-                var now = this.getAttribute(key);
-                if (name !== 'removeAttribute' || old !== null) call(st.def.attributeChanged, this, [key, old, now]);
-            }
-            return result;
+    // Attributes: attributeChangedCallback for the observed ones. The DOM's one native
+    // attribute write path asks `__rk.domHooks.attrs` before each write and runs the closure
+    // it answers after it, so every writer reacts alike: setAttribute, removeAttribute,
+    // classList, el.id, el.className. Nothing is installed until the first define.
+    var HOOKS = __rk.domHooks;
+    var getAttr = Function.prototype.call.bind(g.Element.prototype.getAttribute);
+    var lower = Function.prototype.call.bind(String.prototype.toLowerCase);
+    // The one name lookup that is not a property read: `state` is a WeakMap, and `WeakMap.prototype.get` is taken
+    // here, before any page script runs.
+    var stateGet = Function.prototype.call.bind((typeof WeakMap === 'function' ? WeakMap : Map).prototype.get);
+    var watched = Object.create(null);  // names some definition observes
+    // `lowered`: the caller's name is a literal that is already lower case ('id', 'class').
+    function attrHook(el, op, key, lowered) {
+        if (lowered !== true) key = lower(key);
+        if (watched[key] !== true) return undefined;
+        var st = stateGet(state, el);
+        if (!st || st.failed || !st.def.attributeChanged || st.def.observedSet[key] !== true) return undefined;
+        var old = getAttr(el, key);
+        return function () {
+            if (op === 'removeAttr' && old === null) return;
+            call(st.def.attributeChanged, el, [key, old, getAttr(el, key)]);
         };
-        wrapped.__rkCE = true;
-        Object.defineProperty(g.Element.prototype, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(g.Element.prototype, name) });
     }
-    wrapAttribute('setAttribute');
-    wrapAttribute('removeAttribute');
 })(typeof globalThis === 'object' ? globalThis : this);

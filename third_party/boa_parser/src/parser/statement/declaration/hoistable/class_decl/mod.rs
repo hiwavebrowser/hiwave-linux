@@ -2,20 +2,21 @@
 mod tests;
 
 use crate::{
-    lexer::{token::ContainsEscapeSequence, Error as LexError, TokenKind},
+    Error,
+    lexer::{Error as LexError, TokenKind, token::ContainsEscapeSequence},
     parser::{
+        AllowAwait, AllowDefault, AllowYield, Cursor, OrAbrupt, ParseResult, TokenParser,
         expression::{
             AssignmentExpression, AsyncGeneratorMethod, AsyncMethod, BindingIdentifier,
             GeneratorMethod, LeftHandSideExpression, PropertyName,
         },
-        function::{FunctionBody, UniqueFormalParameters, FUNCTION_BREAK_TOKENS},
+        function::{FUNCTION_BREAK_TOKENS, FunctionBody, UniqueFormalParameters},
         statement::StatementList,
-        AllowAwait, AllowDefault, AllowYield, Cursor, OrAbrupt, ParseResult, TokenParser,
     },
     source::ReadChar,
-    Error,
 };
 use ast::{
+    function::FunctionBody as AstFunctionBody,
     function::PrivateName,
     operations::{
         check_labels, contains_invalid_object_literal, lexically_declared_names, var_declared_names,
@@ -23,15 +24,14 @@ use ast::{
     property::MethodDefinitionKind,
 };
 use boa_ast::{
-    self as ast,
+    self as ast, Expression, Keyword, Position, Punctuator, Span, Spanned,
     expression::Identifier,
     function::{
         self, ClassDeclaration as ClassDeclarationNode, ClassElementName, ClassFieldDefinition,
         ClassMethodDefinition, FormalParameterList, FunctionExpression, PrivateFieldDefinition,
         StaticBlockBody,
     },
-    operations::{contains, contains_arguments, ContainsSymbol},
-    Expression, Keyword, Punctuator,
+    operations::{ContainsSymbol, contains, contains_arguments},
 };
 use boa_interner::{Interner, Sym};
 use boa_macros::utf16;
@@ -75,7 +75,9 @@ where
     type Output = ClassDeclarationNode;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        cursor.expect((Keyword::Class, false), "class declaration", interner)?;
+        let span = cursor
+            .expect((Keyword::Class, false), "class declaration", interner)?
+            .span();
         let strict = cursor.strict();
         cursor.set_strict(true);
 
@@ -86,18 +88,22 @@ where
                 BindingIdentifier::new(self.allow_yield, self.allow_await)
                     .parse(cursor, interner)?
             }
-            _ if self.is_default.0 => Sym::DEFAULT.into(),
+            TokenKind::Keyword((k, _)) if !k.to_sym().is_reserved_identifier() => {
+                BindingIdentifier::new(self.allow_yield, self.allow_await)
+                    .parse(cursor, interner)?
+            }
+            _ if self.is_default.0 => Identifier::new(Sym::DEFAULT, span),
             _ => {
                 return Err(Error::unexpected(
                     token.to_string(interner),
                     token.span(),
                     "expected class identifier",
-                ))
+                ));
             }
         };
         cursor.set_strict(strict);
 
-        let (super_ref, constructor, elements) =
+        let (super_ref, constructor, elements, _end) =
             ClassTail::new(name, self.allow_yield, self.allow_await).parse(cursor, interner)?;
 
         Ok(ClassDeclarationNode::new(
@@ -146,6 +152,7 @@ where
         Option<Expression>,
         Option<FunctionExpression>,
         Vec<function::ClassElement>,
+        Position,
     );
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
@@ -168,32 +175,35 @@ where
         // Temporarily disable strict mode because "strict" may be parsed as a keyword.
         let strict = cursor.strict();
         cursor.set_strict(false);
-        let is_close_block = cursor.peek(0, interner).or_abrupt()?.kind()
-            == &TokenKind::Punctuator(Punctuator::CloseBlock);
+        let token = cursor.peek(0, interner).or_abrupt()?;
+        let token_span_end = token.span().end();
+        let is_close_block = token.kind() == &TokenKind::Punctuator(Punctuator::CloseBlock);
         cursor.set_strict(strict);
 
         if is_close_block {
             cursor.advance(interner);
-            Ok((super_ref, None, Vec::new()))
+            Ok((super_ref, None, Vec::new(), token_span_end))
         } else {
             let body_start = cursor.peek(0, interner).or_abrupt()?.span().start();
             let (constructor, elements) =
                 ClassBody::new(self.name, self.allow_yield, self.allow_await)
                     .parse(cursor, interner)?;
-            cursor.expect(Punctuator::CloseBlock, "class tail", interner)?;
+            let end = cursor
+                .expect(Punctuator::CloseBlock, "class tail", interner)?
+                .span()
+                .start();
 
-            if super_ref.is_none() {
-                if let Some(constructor) = &constructor {
-                    if contains(constructor, ContainsSymbol::SuperCall) {
-                        return Err(Error::lex(LexError::Syntax(
-                            "invalid super usage".into(),
-                            body_start,
-                        )));
-                    }
-                }
+            if super_ref.is_none()
+                && let Some(constructor) = &constructor
+                && contains(constructor, ContainsSymbol::SuperCall)
+            {
+                return Err(Error::lex(LexError::Syntax(
+                    "invalid super usage".into(),
+                    body_start,
+                )));
             }
 
-            Ok((super_ref, constructor, elements))
+            Ok((super_ref, constructor, elements, end))
         }
     }
 }
@@ -240,7 +250,8 @@ where
         let strict = cursor.strict();
         cursor.set_strict(true);
         let lhs = LeftHandSideExpression::new(self.allow_yield, self.allow_await)
-            .parse(cursor, interner)?;
+            .parse(cursor, interner)?
+            .try_into_expression()?;
         cursor.set_strict(strict);
 
         Ok(lhs)
@@ -315,13 +326,13 @@ where
             match &element {
                 function::ClassElement::MethodDefinition(m) => {
                     // It is a Syntax Error if PropName of MethodDefinition is not "constructor" and HasDirectSuper of MethodDefinition is true.
-                    if let ClassElementName::PropertyName(name) = m.name() {
-                        if contains(name, ContainsSymbol::SuperCall) {
-                            return Err(Error::lex(LexError::Syntax(
-                                "invalid super call usage".into(),
-                                position,
-                            )));
-                        }
+                    if let ClassElementName::PropertyName(name) = m.name()
+                        && contains(name, ContainsSymbol::SuperCall)
+                    {
+                        return Err(Error::lex(LexError::Syntax(
+                            "invalid super call usage".into(),
+                            position,
+                        )));
                     }
                     if contains(m.parameters(), ContainsSymbol::SuperCall)
                         || contains(m.body(), ContainsSymbol::SuperCall)
@@ -416,13 +427,13 @@ where
                     }
                 }
                 function::ClassElement::PrivateFieldDefinition(field) => {
-                    if let Some(node) = field.field() {
-                        if contains(node, ContainsSymbol::SuperCall) {
-                            return Err(Error::lex(LexError::Syntax(
-                                "invalid super usage".into(),
-                                position,
-                            )));
-                        }
+                    if let Some(node) = field.initializer()
+                        && contains(node, ContainsSymbol::SuperCall)
+                    {
+                        return Err(Error::lex(LexError::Syntax(
+                            "invalid super usage".into(),
+                            position,
+                        )));
                     }
                     if private_elements_names
                         .insert(field.name().description(), PrivateElement::Value)
@@ -434,17 +445,17 @@ where
                         ));
                     }
                 }
-                function::ClassElement::PrivateStaticFieldDefinition(name, init) => {
-                    if let Some(node) = init {
-                        if contains(node, ContainsSymbol::SuperCall) {
-                            return Err(Error::lex(LexError::Syntax(
-                                "invalid super usage".into(),
-                                position,
-                            )));
-                        }
+                function::ClassElement::PrivateStaticFieldDefinition(field) => {
+                    if let Some(node) = field.initializer()
+                        && contains(node, ContainsSymbol::SuperCall)
+                    {
+                        return Err(Error::lex(LexError::Syntax(
+                            "invalid super usage".into(),
+                            position,
+                        )));
                     }
                     if private_elements_names
-                        .insert(name.description(), PrivateElement::StaticValue)
+                        .insert(field.name().description(), PrivateElement::StaticValue)
                         .is_some()
                     {
                         return Err(Error::general(
@@ -455,13 +466,13 @@ where
                 }
                 function::ClassElement::FieldDefinition(field)
                 | function::ClassElement::StaticFieldDefinition(field) => {
-                    if let Some(field) = field.field() {
-                        if contains(field, ContainsSymbol::SuperCall) {
-                            return Err(Error::lex(LexError::Syntax(
-                                "invalid super usage".into(),
-                                position,
-                            )));
-                        }
+                    if let Some(field) = field.initializer()
+                        && contains(field, ContainsSymbol::SuperCall)
+                    {
+                        return Err(Error::lex(LexError::Syntax(
+                            "invalid super usage".into(),
+                            position,
+                        )));
                     }
                 }
                 function::ClassElement::StaticBlock(_) => {}
@@ -537,6 +548,7 @@ where
                     | TokenKind::NumericLiteral(_)
                     | TokenKind::Keyword(_)
                     | TokenKind::NullLiteral(_)
+                    | TokenKind::BooleanLiteral(_)
                     | TokenKind::PrivateIdentifier(_)
                     | TokenKind::Punctuator(
                         Punctuator::OpenBracket | Punctuator::Mul | Punctuator::OpenBlock,
@@ -568,6 +580,9 @@ where
         );
 
         let token = cursor.peek(0, interner).or_abrupt()?;
+        let start_linear_span = token.linear_span();
+        let start_linear_pos = start_linear_span.start();
+
         let position = token.span().start();
         let element = match token.kind() {
             TokenKind::IdentifierName((Sym::CONSTRUCTOR, _)) if !r#static => {
@@ -577,36 +592,36 @@ where
 
                 let parameters =
                     UniqueFormalParameters::new(false, false).parse(cursor, interner)?;
-                cursor.expect(
-                    TokenKind::Punctuator(Punctuator::OpenBlock),
-                    "class constructor",
-                    interner,
-                )?;
-                let body = FunctionBody::new(false, false).parse(cursor, interner)?;
-                cursor.expect(
-                    TokenKind::Punctuator(Punctuator::CloseBlock),
-                    "class constructor",
-                    interner,
-                )?;
+                let body =
+                    FunctionBody::new(false, false, "class constructor").parse(cursor, interner)?;
                 cursor.set_strict(strict);
 
+                let span = Some(start_linear_span.union(body.linear_pos_end()));
+
+                let function_span_end = body.span().end();
                 return Ok((
-                    Some(FunctionExpression::new(self.name, parameters, body, false)),
+                    Some(FunctionExpression::new(
+                        self.name,
+                        parameters,
+                        body,
+                        span,
+                        false,
+                        Span::new(position, function_span_end),
+                    )),
                     None,
                 ));
             }
             TokenKind::Punctuator(Punctuator::OpenBlock) if r#static => {
                 cursor.advance(interner);
-                let statement_list = if cursor
-                    .next_if(TokenKind::Punctuator(Punctuator::CloseBlock), interner)?
-                    .is_some()
+                let (statement_list, end) = if let Some(token) =
+                    cursor.next_if(TokenKind::Punctuator(Punctuator::CloseBlock), interner)?
                 {
-                    ast::StatementList::default()
+                    (ast::StatementList::default(), token.span().end())
                 } else {
                     let strict = cursor.strict();
                     cursor.set_strict(true);
                     let position = cursor.peek(0, interner).or_abrupt()?.span().start();
-                    let statement_list =
+                    let (statement_list, _end) =
                         StatementList::new(false, true, false, &FUNCTION_BREAK_TOKENS, false, true)
                             .parse(cursor, interner)?;
 
@@ -670,26 +685,33 @@ where
                         )));
                     }
 
-                    cursor.expect(
-                        TokenKind::Punctuator(Punctuator::CloseBlock),
-                        "class definition",
-                        interner,
-                    )?;
+                    let end = cursor
+                        .expect(
+                            TokenKind::Punctuator(Punctuator::CloseBlock),
+                            "class definition",
+                            interner,
+                        )?
+                        .span()
+                        .end();
+
                     cursor.set_strict(strict);
-                    statement_list
+
+                    (statement_list, end)
                 };
-                function::ClassElement::StaticBlock(StaticBlockBody::new(statement_list.into()))
+                function::ClassElement::StaticBlock(StaticBlockBody::new(AstFunctionBody::new(
+                    statement_list,
+                    Span::new(position, end),
+                )))
             }
             TokenKind::Punctuator(Punctuator::Mul) => {
                 let token = cursor.peek(1, interner).or_abrupt()?;
                 let name_position = token.span().start();
-                if !r#static {
-                    if let TokenKind::IdentifierName((Sym::CONSTRUCTOR, _)) = token.kind() {
-                        return Err(Error::general(
-                            "class constructor may not be a generator method",
-                            token.span().start(),
-                        ));
-                    }
+                if !r#static && let TokenKind::IdentifierName((Sym::CONSTRUCTOR, _)) = token.kind()
+                {
+                    return Err(Error::general(
+                        "class constructor may not be a generator method",
+                        token.span().start(),
+                    ));
                 }
                 let strict = cursor.strict();
                 cursor.set_strict(true);
@@ -700,7 +722,7 @@ where
 
                 let name = match class_element_name {
                     ClassElementName::PropertyName(name) => {
-                        if r#static && name.literal() == Some(Sym::PROTOTYPE) {
+                        if r#static && name.literal().map(Identifier::sym) == Some(Sym::PROTOTYPE) {
                             return Err(Error::general(
                                 "class may not have static method definitions named 'prototype'",
                                 name_position,
@@ -724,6 +746,7 @@ where
                     body,
                     MethodDefinitionKind::Generator,
                     r#static,
+                    start_linear_pos,
                 ))
             }
             TokenKind::Keyword((Keyword::Async, true)) if is_keyword => {
@@ -764,7 +787,9 @@ where
 
                         let name = match class_element_name {
                             ClassElementName::PropertyName(name) => {
-                                if r#static && name.literal() == Some(Sym::PROTOTYPE) {
+                                if r#static
+                                    && name.literal().map(Identifier::sym) == Some(Sym::PROTOTYPE)
+                                {
                                     return Err(Error::general(
                                         "class may not have static method definitions named 'prototype'",
                                         name_position,
@@ -783,13 +808,14 @@ where
                             body,
                             MethodDefinitionKind::AsyncGenerator,
                             r#static,
+                            start_linear_pos,
                         ))
                     }
                     TokenKind::IdentifierName((Sym::CONSTRUCTOR, _)) if !r#static => {
                         return Err(Error::general(
                             "class constructor may not be an async method",
                             token.span().start(),
-                        ))
+                        ));
                     }
                     _ => {
                         let name_position = token.span().start();
@@ -802,7 +828,9 @@ where
 
                         let name = match class_element_name {
                             ClassElementName::PropertyName(name) => {
-                                if r#static && name.literal() == Some(Sym::PROTOTYPE) {
+                                if r#static
+                                    && name.literal().map(Identifier::sym) == Some(Sym::PROTOTYPE)
+                                {
                                     return Err(Error::general(
                                         "class may not have static method definitions named 'prototype'",
                                         name_position,
@@ -826,6 +854,7 @@ where
                             body,
                             MethodDefinitionKind::Async,
                             r#static,
+                            start_linear_pos,
                         ))
                     }
                 }
@@ -836,36 +865,29 @@ where
                 return Err(Error::general(
                     "keyword must not contain escaped characters",
                     token.span().start(),
-                ))
+                ));
             }
             TokenKind::IdentifierName((Sym::GET, ContainsEscapeSequence(false))) if is_keyword => {
                 cursor.advance(interner);
                 let token = cursor.peek(0, interner).or_abrupt()?;
+                let start = token.span().start();
                 match token.kind() {
                     TokenKind::PrivateIdentifier(Sym::CONSTRUCTOR) => {
                         return Err(Error::general(
                             "class constructor may not be a private method",
                             token.span().start(),
-                        ))
+                        ));
                     }
                     TokenKind::PrivateIdentifier(name) => {
                         let name = *name;
+                        let name_span = token.span();
                         cursor.advance(interner);
                         let strict = cursor.strict();
                         cursor.set_strict(true);
                         let params =
                             UniqueFormalParameters::new(false, false).parse(cursor, interner)?;
-                        cursor.expect(
-                            TokenKind::Punctuator(Punctuator::OpenBlock),
-                            "method definition",
-                            interner,
-                        )?;
-                        let body = FunctionBody::new(false, false).parse(cursor, interner)?;
-                        let token = cursor.expect(
-                            TokenKind::Punctuator(Punctuator::CloseBlock),
-                            "method definition",
-                            interner,
-                        )?;
+                        let body = FunctionBody::new(false, false, "method definition")
+                            .parse(cursor, interner)?;
 
                         // Early Error: It is a Syntax Error if FunctionBodyContainsUseStrict of FunctionBody is true
                         // and IsSimpleParameterList of UniqueFormalParameters is false.
@@ -873,29 +895,31 @@ where
                             return Err(Error::lex(LexError::Syntax(
                             "Illegal 'use strict' directive in function with non-simple parameter list"
                                 .into(),
-                                token.span().start(),
+                                start,
                         )));
                         }
                         cursor.set_strict(strict);
                         function::ClassElement::MethodDefinition(ClassMethodDefinition::new(
-                            ClassElementName::PrivateName(PrivateName::new(name)),
+                            ClassElementName::PrivateName(PrivateName::new(name, name_span)),
                             params,
                             body,
                             MethodDefinitionKind::Get,
                             r#static,
+                            start_linear_pos,
                         ))
                     }
                     TokenKind::IdentifierName((Sym::CONSTRUCTOR, _)) if !r#static => {
                         return Err(Error::general(
                             "class constructor may not be a getter method",
                             token.span().start(),
-                        ))
+                        ));
                     }
                     TokenKind::IdentifierName(_)
                     | TokenKind::StringLiteral(_)
                     | TokenKind::NumericLiteral(_)
                     | TokenKind::Keyword(_)
                     | TokenKind::NullLiteral(_)
+                    | TokenKind::BooleanLiteral(_)
                     | TokenKind::Punctuator(Punctuator::OpenBracket) => {
                         let name_position = token.span().start();
                         let name = PropertyName::new(self.allow_yield, self.allow_await)
@@ -910,21 +934,14 @@ where
                             "class getter",
                             interner,
                         )?;
-                        cursor.expect(
-                            TokenKind::Punctuator(Punctuator::OpenBlock),
-                            "class getter",
-                            interner,
-                        )?;
+
                         let strict = cursor.strict();
                         cursor.set_strict(true);
-                        let body = FunctionBody::new(false, false).parse(cursor, interner)?;
+                        let body = FunctionBody::new(false, false, "class getter")
+                            .parse(cursor, interner)?;
                         cursor.set_strict(strict);
-                        cursor.expect(
-                            TokenKind::Punctuator(Punctuator::CloseBlock),
-                            "class getter",
-                            interner,
-                        )?;
-                        if r#static && name.literal() == Some(Sym::PROTOTYPE) {
+
+                        if r#static && name.literal().map(Identifier::sym) == Some(Sym::PROTOTYPE) {
                             return Err(Error::general(
                                 "class may not have static method definitions named 'prototype'",
                                 name_position,
@@ -936,14 +953,14 @@ where
                             body,
                             MethodDefinitionKind::Get,
                             r#static,
+                            start_linear_pos,
                         ))
                     }
                     _ => {
+                        let span = token.span();
                         cursor.expect_semicolon("expected semicolon", interner)?;
-                        let field = ClassFieldDefinition::new(
-                            ast::property::PropertyName::Literal(Sym::GET),
-                            None,
-                        );
+                        let field =
+                            ClassFieldDefinition::new(Identifier::new(Sym::GET, span).into(), None);
                         if r#static {
                             function::ClassElement::StaticFieldDefinition(field)
                         } else {
@@ -955,31 +972,25 @@ where
             TokenKind::IdentifierName((Sym::SET, ContainsEscapeSequence(false))) if is_keyword => {
                 cursor.advance(interner);
                 let token = cursor.peek(0, interner).or_abrupt()?;
+                let start = token.span().start();
                 match token.kind() {
                     TokenKind::PrivateIdentifier(Sym::CONSTRUCTOR) => {
                         return Err(Error::general(
                             "class constructor may not be a private method",
                             token.span().start(),
-                        ))
+                        ));
                     }
                     TokenKind::PrivateIdentifier(name) => {
                         let name = *name;
+                        let name_span = token.span();
                         cursor.advance(interner);
                         let strict = cursor.strict();
                         cursor.set_strict(true);
                         let params =
                             UniqueFormalParameters::new(false, false).parse(cursor, interner)?;
-                        cursor.expect(
-                            TokenKind::Punctuator(Punctuator::OpenBlock),
-                            "method definition",
-                            interner,
-                        )?;
-                        let body = FunctionBody::new(false, false).parse(cursor, interner)?;
-                        let token = cursor.expect(
-                            TokenKind::Punctuator(Punctuator::CloseBlock),
-                            "method definition",
-                            interner,
-                        )?;
+
+                        let body = FunctionBody::new(false, false, "method definition")
+                            .parse(cursor, interner)?;
 
                         // Early Error: It is a Syntax Error if FunctionBodyContainsUseStrict of FunctionBody is true
                         // and IsSimpleParameterList of UniqueFormalParameters is false.
@@ -987,48 +998,40 @@ where
                             return Err(Error::lex(LexError::Syntax(
                             "Illegal 'use strict' directive in function with non-simple parameter list"
                                 .into(),
-                                token.span().start(),
+                                start,
                         )));
                         }
                         cursor.set_strict(strict);
                         function::ClassElement::MethodDefinition(ClassMethodDefinition::new(
-                            ClassElementName::PrivateName(PrivateName::new(name)),
+                            ClassElementName::PrivateName(PrivateName::new(name, name_span)),
                             params,
                             body,
                             MethodDefinitionKind::Set,
                             r#static,
+                            start_linear_pos,
                         ))
                     }
                     TokenKind::IdentifierName((Sym::CONSTRUCTOR, _)) if !r#static => {
                         return Err(Error::general(
                             "class constructor may not be a setter method",
-                            token.span().start(),
-                        ))
+                            start,
+                        ));
                     }
                     TokenKind::IdentifierName(_)
                     | TokenKind::StringLiteral(_)
                     | TokenKind::NumericLiteral(_)
                     | TokenKind::Keyword(_)
                     | TokenKind::NullLiteral(_)
+                    | TokenKind::BooleanLiteral(_)
                     | TokenKind::Punctuator(Punctuator::OpenBracket) => {
-                        let name_position = token.span().start();
                         let name = PropertyName::new(self.allow_yield, self.allow_await)
                             .parse(cursor, interner)?;
                         let strict = cursor.strict();
                         cursor.set_strict(true);
                         let params =
                             UniqueFormalParameters::new(false, false).parse(cursor, interner)?;
-                        cursor.expect(
-                            TokenKind::Punctuator(Punctuator::OpenBlock),
-                            "method definition",
-                            interner,
-                        )?;
-                        let body = FunctionBody::new(false, false).parse(cursor, interner)?;
-                        let token = cursor.expect(
-                            TokenKind::Punctuator(Punctuator::CloseBlock),
-                            "method definition",
-                            interner,
-                        )?;
+                        let body = FunctionBody::new(false, false, "method definition")
+                            .parse(cursor, interner)?;
 
                         // Early Error: It is a Syntax Error if FunctionBodyContainsUseStrict of FunctionBody is true
                         // and IsSimpleParameterList of UniqueFormalParameters is false.
@@ -1036,14 +1039,14 @@ where
                             return Err(Error::lex(LexError::Syntax(
                             "Illegal 'use strict' directive in function with non-simple parameter list"
                                 .into(),
-                                token.span().start(),
+                                start,
                         )));
                         }
                         cursor.set_strict(strict);
-                        if r#static && name.literal() == Some(Sym::PROTOTYPE) {
+                        if r#static && name.literal().map(Identifier::sym) == Some(Sym::PROTOTYPE) {
                             return Err(Error::general(
                                 "class may not have static method definitions named 'prototype'",
-                                name_position,
+                                start,
                             ));
                         }
                         function::ClassElement::MethodDefinition(ClassMethodDefinition::new(
@@ -1052,14 +1055,14 @@ where
                             body,
                             MethodDefinitionKind::Set,
                             r#static,
+                            start_linear_pos,
                         ))
                     }
                     _ => {
+                        let span = token.span();
                         cursor.expect_semicolon("expected semicolon", interner)?;
-                        let field = ClassFieldDefinition::new(
-                            ast::property::PropertyName::Literal(Sym::SET),
-                            None,
-                        );
+                        let field =
+                            ClassFieldDefinition::new(Identifier::new(Sym::SET, span).into(), None);
                         if r#static {
                             function::ClassElement::StaticFieldDefinition(field)
                         } else {
@@ -1072,12 +1075,14 @@ where
                 return Err(Error::general(
                     "class constructor may not be a private method",
                     token.span().start(),
-                ))
+                ));
             }
             TokenKind::PrivateIdentifier(name) => {
                 let name = *name;
+                let name_span = token.span();
                 cursor.advance(interner);
                 let token = cursor.peek(0, interner).or_abrupt()?;
+                let start = token.span().start();
                 match token.kind() {
                     TokenKind::Punctuator(Punctuator::Assign) => {
                         cursor.advance(interner);
@@ -1093,16 +1098,18 @@ where
                                 .concat()
                                 .as_slice(),
                         );
-                        rhs.set_anonymous_function_definition_name(&Identifier::new(function_name));
+                        rhs.set_anonymous_function_definition_name(&Identifier::new(
+                            function_name,
+                            Span::new((1234, 1234), (1234, 1234)),
+                        ));
+                        let field = PrivateFieldDefinition::new(
+                            PrivateName::new(name, name_span),
+                            Some(rhs),
+                        );
                         if r#static {
-                            function::ClassElement::PrivateStaticFieldDefinition(
-                                PrivateName::new(name),
-                                Some(rhs),
-                            )
+                            function::ClassElement::PrivateStaticFieldDefinition(field)
                         } else {
-                            function::ClassElement::PrivateFieldDefinition(
-                                PrivateFieldDefinition::new(PrivateName::new(name), Some(rhs)),
-                            )
+                            function::ClassElement::PrivateFieldDefinition(field)
                         }
                     }
                     TokenKind::Punctuator(Punctuator::OpenParen) => {
@@ -1110,46 +1117,35 @@ where
                         cursor.set_strict(true);
                         let params =
                             UniqueFormalParameters::new(false, false).parse(cursor, interner)?;
-                        cursor.expect(
-                            TokenKind::Punctuator(Punctuator::OpenBlock),
-                            "method definition",
-                            interner,
-                        )?;
-                        let body = FunctionBody::new(false, false).parse(cursor, interner)?;
-                        let token = cursor.expect(
-                            TokenKind::Punctuator(Punctuator::CloseBlock),
-                            "method definition",
-                            interner,
-                        )?;
+                        let body = FunctionBody::new(false, false, "method definition")
+                            .parse(cursor, interner)?;
 
                         // Early Error: It is a Syntax Error if FunctionBodyContainsUseStrict of FunctionBody is true
                         // and IsSimpleParameterList of UniqueFormalParameters is false.
                         if body.strict() && !params.is_simple() {
                             return Err(Error::lex(LexError::Syntax(
                                 "Illegal 'use strict' directive in function with non-simple parameter list".into(),
-                                token.span().start(),
+                                start,
                             )));
                         }
                         cursor.set_strict(strict);
                         function::ClassElement::MethodDefinition(ClassMethodDefinition::new(
-                            ClassElementName::PrivateName(PrivateName::new(name)),
+                            ClassElementName::PrivateName(PrivateName::new(name, name_span)),
                             params,
                             body,
                             MethodDefinitionKind::Ordinary,
                             r#static,
+                            start_linear_pos,
                         ))
                     }
                     _ => {
                         cursor.expect_semicolon("expected semicolon", interner)?;
+                        let field =
+                            PrivateFieldDefinition::new(PrivateName::new(name, name_span), None);
                         if r#static {
-                            function::ClassElement::PrivateStaticFieldDefinition(
-                                PrivateName::new(name),
-                                None,
-                            )
+                            function::ClassElement::PrivateStaticFieldDefinition(field)
                         } else {
-                            function::ClassElement::PrivateFieldDefinition(
-                                PrivateFieldDefinition::new(PrivateName::new(name), None),
-                            )
+                            function::ClassElement::PrivateFieldDefinition(field)
                         }
                     }
                 }
@@ -1159,8 +1155,9 @@ where
             | TokenKind::NumericLiteral(_)
             | TokenKind::Keyword(_)
             | TokenKind::NullLiteral(_)
+            | TokenKind::BooleanLiteral(_)
             | TokenKind::Punctuator(Punctuator::OpenBracket) => {
-                let name_position = token.span().start();
+                let start = token.span().start();
                 let name = PropertyName::new(self.allow_yield, self.allow_await)
                     .parse(cursor, interner)?;
                 let token = cursor.peek(0, interner).or_abrupt()?;
@@ -1168,16 +1165,16 @@ where
                     TokenKind::Punctuator(Punctuator::Assign) => {
                         if let Some(name) = name.literal() {
                             if r#static {
-                                if [Sym::CONSTRUCTOR, Sym::PROTOTYPE].contains(&name) {
+                                if [Sym::CONSTRUCTOR, Sym::PROTOTYPE].contains(&name.sym()) {
                                     return Err(Error::general(
                                         "class may not have static field definitions named 'constructor' or 'prototype'",
-                                        name_position,
+                                        start,
                                     ));
                                 }
                             } else if name == Sym::CONSTRUCTOR {
                                 return Err(Error::general(
                                     "class may not have field definitions named 'constructor'",
-                                    name_position,
+                                    start,
                                 ));
                             }
                         }
@@ -1190,7 +1187,7 @@ where
                         cursor.expect_semicolon("expected semicolon", interner)?;
                         cursor.set_strict(strict);
                         if let Some(name) = name.literal() {
-                            rhs.set_anonymous_function_definition_name(&Identifier::new(name));
+                            rhs.set_anonymous_function_definition_name(&name);
                         }
                         let field = ClassFieldDefinition::new(name, Some(rhs));
                         if r#static {
@@ -1200,27 +1197,19 @@ where
                         }
                     }
                     TokenKind::Punctuator(Punctuator::OpenParen) => {
-                        if r#static && name.literal() == Some(Sym::PROTOTYPE) {
+                        if r#static && name.literal().map(Identifier::sym) == Some(Sym::PROTOTYPE) {
                             return Err(Error::general(
                                 "class may not have static method definitions named 'prototype'",
-                                name_position,
+                                start,
                             ));
                         }
                         let strict = cursor.strict();
                         cursor.set_strict(true);
                         let params =
                             UniqueFormalParameters::new(false, false).parse(cursor, interner)?;
-                        cursor.expect(
-                            TokenKind::Punctuator(Punctuator::OpenBlock),
-                            "method definition",
-                            interner,
-                        )?;
-                        let body = FunctionBody::new(false, false).parse(cursor, interner)?;
-                        let token = cursor.expect(
-                            TokenKind::Punctuator(Punctuator::CloseBlock),
-                            "method definition",
-                            interner,
-                        )?;
+
+                        let body = FunctionBody::new(false, false, "method definition")
+                            .parse(cursor, interner)?;
 
                         // Early Error: It is a Syntax Error if FunctionBodyContainsUseStrict of FunctionBody is true
                         // and IsSimpleParameterList of UniqueFormalParameters is false.
@@ -1228,7 +1217,7 @@ where
                             return Err(Error::lex(LexError::Syntax(
                             "Illegal 'use strict' directive in function with non-simple parameter list"
                                 .into(),
-                                token.span().start(),
+                                start,
                         )));
                         }
                         cursor.set_strict(strict);
@@ -1238,21 +1227,22 @@ where
                             body,
                             MethodDefinitionKind::Ordinary,
                             r#static,
+                            start_linear_pos,
                         ))
                     }
                     _ => {
                         if let Some(name) = name.literal() {
                             if r#static {
-                                if [Sym::CONSTRUCTOR, Sym::PROTOTYPE].contains(&name) {
+                                if [Sym::CONSTRUCTOR, Sym::PROTOTYPE].contains(&name.sym()) {
                                     return Err(Error::general(
                                         "class may not have static field definitions named 'constructor' or 'prototype'",
-                                        name_position,
+                                        start,
                                     ));
                                 }
                             } else if name == Sym::CONSTRUCTOR {
                                 return Err(Error::general(
                                     "class may not have field definitions named 'constructor'",
-                                    name_position,
+                                    start,
                                 ));
                             }
                         }
@@ -1266,7 +1256,13 @@ where
                     }
                 }
             }
-            _ => return Err(Error::general("unexpected token", token.span().start())),
+            _ => {
+                return Err(Error::unexpected(
+                    token.to_string(interner),
+                    token.span(),
+                    "expected class element (method, field, or static block)",
+                ));
+            }
         };
 
         match &element {
@@ -1274,27 +1270,20 @@ where
             // It is a Syntax Error if Initializer is present and ContainsArguments of Initializer is true.
             function::ClassElement::FieldDefinition(field)
             | function::ClassElement::StaticFieldDefinition(field) => {
-                if let Some(field) = field.field() {
-                    if contains_arguments(field) {
-                        return Err(Error::general(
-                            "'arguments' not allowed in class field definition",
-                            position,
-                        ));
-                    }
+                if let Some(field) = field.initializer()
+                    && contains_arguments(field)
+                {
+                    return Err(Error::general(
+                        "'arguments' not allowed in class field definition",
+                        position,
+                    ));
                 }
             }
-            function::ClassElement::PrivateFieldDefinition(field) => {
-                if let Some(node) = field.field() {
-                    if contains_arguments(node) {
-                        return Err(Error::general(
-                            "'arguments' not allowed in class field definition",
-                            position,
-                        ));
-                    }
-                }
-            }
-            function::ClassElement::PrivateStaticFieldDefinition(_, Some(node)) => {
-                if contains_arguments(node) {
+            function::ClassElement::PrivateFieldDefinition(field)
+            | function::ClassElement::PrivateStaticFieldDefinition(field) => {
+                if let Some(node) = field.initializer()
+                    && contains_arguments(node)
+                {
                     return Err(Error::general(
                         "'arguments' not allowed in class field definition",
                         position,

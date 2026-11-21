@@ -5,10 +5,11 @@
 // images, infinite scroll, impression tracking, responsive widgets) never
 // appeared.
 //
-// Delivery: `__rkObserversTick()` computes every observer's records from the
+// Delivery: `__rk.observersTick()` computes every observer's records from the
 // geometry as it stands and calls the callbacks. It runs from a timer after
-// the first observe() (the initial notification), and the engine runs it after
-// a layout and after a scroll (`DomBindings::tick_observers`). Callbacks that
+// the first observe() (the initial notification) unless script has written to
+// the DOM since the last layout, and the engine runs it after a layout and
+// after a scroll (`DomBindings::tick_observers`). Callbacks that
 // observe or mutate during the tick are picked up by the next one (bounded).
 //
 // Stated limits: IntersectionObserver clips by the viewport (or the `root`
@@ -20,7 +21,7 @@
     if (!document || !g.Element) return;
 
     function report(e) {
-        try { if (g.__rustkit_errors) g.__rustkit_errors.push(String(e)); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
     function requireCallback(ctor, cb) {
         if (typeof cb !== 'function') {
@@ -48,7 +49,15 @@
     function schedule() {
         if (scheduled || typeof g.setTimeout !== 'function') return;
         scheduled = true;
-        g.setTimeout(function () { scheduled = false; tick(); }, 0);
+        g.setTimeout(function () {
+            scheduled = false;
+            // Script wrote to the DOM and the engine has not laid it out yet:
+            // the geometry is stale, and an element inserted since has no box
+            // at all (it would read as an empty rectangle at the origin, "in
+            // view"). The engine reports after the layout the write is owed.
+            if (typeof __rk.domDirty === 'function' && __rk.domDirty()) return;
+            tick();
+        }, 0);
     }
     function track(o) { if (observers.indexOf(o) < 0) observers.push(o); }
     function untrackIfEmpty(o) {
@@ -122,7 +131,9 @@
     function area(r) { return Math.max(0, r.w) * Math.max(0, r.h); }
     function rootBounds(io) {
         var base;
-        if (io.root && io.root.nodeType === 1) {
+        // The root element scrolls with the viewport and is clipped by it:
+        // as a root it is the viewport, now that it has a box of its own.
+        if (io.root && io.root.nodeType === 1 && io.root !== document.documentElement) {
             var b = io.root.getBoundingClientRect();
             base = { x: b.left, y: b.top, w: b.width, h: b.height };
         } else {
@@ -194,6 +205,16 @@
     define('ResizeObserver', ResizeObserver);
 
     function px(v) { var n = parseFloat(v); return isNaN(n) ? 0 : n; }
+    // Whether an observer has a size to report: only then is it held for a frame (with nothing
+    // to report, a pending frame holds nothing, and the end of a load runs no frame for it).
+    function sizesChanged(ro) {
+        var t = ro._targets;
+        for (var i = 0; i < t.length; i++) {
+            var cs = g.getComputedStyle(t[i]), st = ro._state.get(t[i]);
+            if (st && (st.w !== px(cs.width) || st.h !== px(cs.height))) return true;
+        }
+        return false;
+    }
     function observeSizes(ro) {
         ro._targets.slice().forEach(function (target) {
             var cs = g.getComputedStyle(target);
@@ -214,6 +235,29 @@
     }
 
     // ---- delivery
+    // A frame's resize observations come after its animation frame callbacks (HTML update the
+    // rendering), so a size change seen while a frame callback is asked for is reported once
+    // that frame's round has run, not in the task that made it: script that asks for a frame
+    // from its callback (Chart.js's `throttled` resize) gets the frame after that round, as in
+    // Chrome 148 (REPORT-CHART-0x0, `report_chart_resize_cft148.json`). Reported earlier,
+    // Chart.js's resize landed while its animator's frame was still owed and was dropped.
+    // `resizeWait` is the round count the observations wait to see pass (-1: none).
+    var resizeWait = -1;
+    function resizeDue() {
+        if (typeof __rk.framePending !== 'function' || typeof __rk.frameRounds !== 'function') return true;
+        var pending = __rk.framePending();
+        if (resizeWait >= 0) {
+            // That round has run, or the frame it waited for was cancelled.
+            if (__rk.frameRounds() !== resizeWait || !pending) { resizeWait = -1; return true; }
+            return false;
+        }
+        if (!pending) return true;
+        resizeWait = __rk.frameRounds();
+        return false;
+    }
+    // Held for a frame: the host that takes the page with no turn to come runs that frame
+    // (`__rk.pendingFrameRound`) and the next tick delivers it (#1361 R1).
+    __rk.resizeHeld = function () { return resizeWait >= 0; };
     var ticking = false;
     function tick() {
         if (ticking) return 0;
@@ -221,8 +265,14 @@
         try {
             // A callback can observe more or change layout-independent state;
             // what it changes is seen by the next tick, not this one.
+            var sizes = null;
             observers.slice().forEach(function (o) {
-                if (o instanceof IntersectionObserver) observeIntersections(o); else observeSizes(o);
+                if (o instanceof IntersectionObserver) { observeIntersections(o); return; }
+                if (sizes === null) {
+                    if (resizeWait < 0 && !sizesChanged(o)) return;
+                    sizes = resizeDue();
+                }
+                if (sizes) observeSizes(o);
             });
             observers.slice().forEach(function (o) {
                 if (!o._queue.length) return;
@@ -234,5 +284,5 @@
         }
         return observers.length;
     }
-    Object.defineProperty(g, '__rkObserversTick', { value: tick, configurable: true, writable: true, enumerable: false });
+    __rk.observersTick = tick;
 })(typeof globalThis === 'object' ? globalThis : this);

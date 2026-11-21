@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Cross-platform ViewHost layer for RustKit browser engine"
 authors = ["HiWave Team"]
-license = "MIT"
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 # RustKit core (for input event types)
@@ -41,6 +41,10 @@ core-graphics = "0.23"
 [target.'cfg(target_os = "linux")'.dependencies]
 x11 = { version = "2.21", features = ["xlib"] }
 
+# The window loop hiwave-app runs, for the wheel test.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+tao = { workspace = true }
+
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -59,5 +63,30 @@ name = "macos_key_events"
 harness = false
 
 [[test]]
+name = "macos_text_input"
+harness = false
+
+[[test]]
 name = "macos_pointer_moves"
+harness = false
+
+# Runs a tao event loop, which must own the main thread.
+[[test]]
+name = "macos_wheel_recorded"
+harness = false
+
+[[test]]
+name = "macos_input_order"
+harness = false
+
+[[test]]
+name = "macos_transparent_region"
+harness = false
+
+[[test]]
+name = "macos_destroy_view"
+harness = false
+
+[[test]]
+name = "macos_chord_wait"
 harness = false

@@ -8,6 +8,7 @@
 //! [spec]: https://tc39.es/ecma262/#sec-ecmascript-language-expressions
 
 mod assignment;
+mod fpl_or_exp;
 mod identifiers;
 mod left_hand_side;
 mod primary;
@@ -20,31 +21,30 @@ pub(in crate::parser) mod await_expr;
 mod tests;
 
 use crate::{
+    Error,
     lexer::{InputElement, TokenKind},
     parser::{
-        expression::assignment::ExponentiationExpression, AllowAwait, AllowIn, AllowYield, Cursor,
-        OrAbrupt, ParseResult, TokenParser,
+        AllowAwait, AllowIn, AllowYield, Cursor, OrAbrupt, ParseResult, TokenParser,
+        expression::assignment::ExponentiationExpression,
     },
     source::ReadChar,
-    Error,
 };
 use boa_ast::{
-    self as ast,
+    self as ast, Keyword, Position, Punctuator, Spanned,
     expression::{
-        operator::{
-            binary::{BinaryOp, LogicalOp},
-            Binary, BinaryInPrivate,
-        },
         Identifier,
+        operator::{
+            Binary, BinaryInPrivate,
+            binary::{BinaryOp, LogicalOp},
+        },
     },
     function::PrivateName,
-    Keyword, Position, Punctuator,
 };
 use boa_interner::{Interner, Sym};
-use boa_profiler::Profiler;
 
 pub(super) use self::{assignment::AssignmentExpression, primary::Initializer};
 pub(in crate::parser) use {
+    fpl_or_exp::FormalParameterListOrExpression,
     identifiers::{BindingIdentifier, LabelIdentifier},
     left_hand_side::LeftHandSideExpression,
     primary::object_initializer::{
@@ -75,31 +75,39 @@ macro_rules! expression {
         where
             R: ReadChar
         {
-            type Output = ast::Expression;
+            type Output = FormalParameterListOrExpression;
 
-            fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner)-> ParseResult<ast::Expression> {
-                let _timer = Profiler::global().start_event(stringify!($name), "Parsing");
+            fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner)-> ParseResult<Self::Output> {
 
                 if $goal.is_some() {
                     cursor.set_goal($goal.unwrap());
                 }
 
-                let mut lhs = $lower::new($( self.$low_param ),*).parse(cursor, interner)?;
+                let lhs = $lower::new($( self.$low_param ),*).parse(cursor, interner)?;
+                let FormalParameterListOrExpression::Expression(mut lhs) = lhs else {
+                    return Ok(lhs);
+                };
+
+                let mut chain = 0usize;
                 while let Some(tok) = cursor.peek(0, interner)? {
+                    chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
+                    if chain > crate::parser::MAX_CHAIN {
+                        return Err(crate::Error::stack_overflow());
+                    }
                     match *tok.kind() {
                         TokenKind::Punctuator(op) if $( op == $op )||* => {
                             cursor.advance(interner);
                             lhs = Binary::new(
                                 op.as_binary_op().expect("Could not get binary operation."),
                                 lhs,
-                                $lower::new($( self.$low_param ),*).parse(cursor, interner)?
+                                $lower::new($( self.$low_param ),*).parse(cursor, interner)?.try_into_expression()?
                             ).into();
                         }
                         _ => break
                     }
                 }
 
-                Ok(lhs)
+                Ok(lhs.into())
             }
         }
     };
@@ -143,11 +151,14 @@ where
     type Output = ast::Expression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let _timer = Profiler::global().start_event("Expression", "Parsing");
-
         let mut lhs = AssignmentExpression::new(self.allow_in, self.allow_yield, self.allow_await)
             .parse(cursor, interner)?;
+        let mut chain = 0usize;
         while let Some(tok) = cursor.peek(0, interner)? {
+            chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
+            if chain > crate::parser::MAX_CHAIN {
+                return Err(Error::stack_overflow());
+            }
             match *tok.kind() {
                 TokenKind::Punctuator(Punctuator::Comma) => {
                     if cursor.peek(1, interner).or_abrupt()?.kind()
@@ -249,23 +260,31 @@ impl<R> TokenParser<R> for ShortCircuitExpression
 where
     R: ReadChar,
 {
-    type Output = ast::Expression;
+    type Output = FormalParameterListOrExpression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let _timer = Profiler::global().start_event("ShortCircuitExpression", "Parsing");
-
-        let mut current_node =
+        let current_node =
             BitwiseORExpression::new(self.allow_in, self.allow_yield, self.allow_await)
                 .parse(cursor, interner)?;
+        let FormalParameterListOrExpression::Expression(mut current_node) = current_node else {
+            return Ok(current_node);
+        };
+
         let mut previous = self.previous;
 
+        let mut chain = 0usize;
         while let Some(tok) = cursor.peek(0, interner)? {
+            chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
+            if chain > crate::parser::MAX_CHAIN {
+                return Err(Error::stack_overflow());
+            }
             match tok.kind() {
                 TokenKind::Punctuator(Punctuator::BoolAnd) => {
                     if previous == PreviousExpr::Coalesce {
                         return Err(Error::expected(
                             ["??".to_owned()],
-                            tok.to_string(interner), tok.span(),
+                            tok.to_string(interner),
+                            tok.span(),
                             "logical expression (cannot use '??' without parentheses within '||' or '&&')",
                         ));
                     }
@@ -273,7 +292,8 @@ where
                     previous = PreviousExpr::Logical;
                     let rhs =
                         BitwiseORExpression::new(self.allow_in, self.allow_yield, self.allow_await)
-                            .parse(cursor, interner)?;
+                            .parse(cursor, interner)?
+                            .try_into_expression()?;
 
                     current_node =
                         Binary::new(BinaryOp::Logical(LogicalOp::And), current_node, rhs).into();
@@ -282,7 +302,8 @@ where
                     if previous == PreviousExpr::Coalesce {
                         return Err(Error::expected(
                             ["??".to_owned()],
-                            tok.to_string(interner), tok.span(),
+                            tok.to_string(interner),
+                            tok.span(),
                             "logical expression (cannot use '??' without parentheses within '||' or '&&')",
                         ));
                     }
@@ -294,7 +315,8 @@ where
                         self.allow_await,
                         PreviousExpr::Logical,
                     )
-                    .parse(cursor, interner)?;
+                    .parse(cursor, interner)?
+                    .try_into_expression()?;
                     current_node =
                         Binary::new(BinaryOp::Logical(LogicalOp::Or), current_node, rhs).into();
                 }
@@ -311,7 +333,8 @@ where
                     previous = PreviousExpr::Coalesce;
                     let rhs =
                         BitwiseORExpression::new(self.allow_in, self.allow_yield, self.allow_await)
-                            .parse(cursor, interner)?;
+                            .parse(cursor, interner)?
+                            .try_into_expression()?;
                     current_node =
                         Binary::new(BinaryOp::Logical(LogicalOp::Coalesce), current_node, rhs)
                             .into();
@@ -319,7 +342,7 @@ where
                 _ => break,
             }
         }
-        Ok(current_node)
+        Ok(current_node.into())
     }
 }
 
@@ -519,15 +542,14 @@ impl<R> TokenParser<R> for RelationalExpression
 where
     R: ReadChar,
 {
-    type Output = ast::Expression;
+    type Output = FormalParameterListOrExpression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let _timer = Profiler::global().start_event("Relation Expression", "Parsing");
-
         if self.allow_in.0 {
             let token = cursor.peek(0, interner).or_abrupt()?;
             if let TokenKind::PrivateIdentifier(identifier) = token.kind() {
                 let identifier = *identifier;
+                let identifier_span = token.span();
                 let token = cursor.peek(1, interner).or_abrupt()?;
                 match token.kind() {
                     TokenKind::Keyword((Keyword::In, true)) => {
@@ -541,19 +563,32 @@ where
                         cursor.advance(interner);
 
                         let rhs = ShiftExpression::new(self.allow_yield, self.allow_await)
-                            .parse(cursor, interner)?;
+                            .parse(cursor, interner)?
+                            .try_into_expression()?;
 
-                        return Ok(BinaryInPrivate::new(PrivateName::new(identifier), rhs).into());
+                        return Ok(BinaryInPrivate::new(
+                            PrivateName::new(identifier, identifier_span),
+                            rhs,
+                        )
+                        .into());
                     }
                     _ => {}
                 }
             }
         }
 
-        let mut lhs =
+        let lhs =
             ShiftExpression::new(self.allow_yield, self.allow_await).parse(cursor, interner)?;
+        let FormalParameterListOrExpression::Expression(mut lhs) = lhs else {
+            return Ok(lhs);
+        };
 
+        let mut chain = 0usize;
         while let Some(tok) = cursor.peek(0, interner)? {
+            chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
+            if chain > crate::parser::MAX_CHAIN {
+                return Err(Error::stack_overflow());
+            }
             match *tok.kind() {
                 TokenKind::Punctuator(op)
                     if op == Punctuator::LessThan
@@ -566,7 +601,8 @@ where
                         op.as_binary_op().expect("Could not get binary operation."),
                         lhs,
                         ShiftExpression::new(self.allow_yield, self.allow_await)
-                            .parse(cursor, interner)?,
+                            .parse(cursor, interner)?
+                            .try_into_expression()?,
                     )
                     .into();
                 }
@@ -585,7 +621,8 @@ where
                         op.as_binary_op().expect("Could not get binary operation."),
                         lhs,
                         ShiftExpression::new(self.allow_yield, self.allow_await)
-                            .parse(cursor, interner)?,
+                            .parse(cursor, interner)?
+                            .try_into_expression()?,
                     )
                     .into();
                 }
@@ -593,7 +630,7 @@ where
             }
         }
 
-        Ok(lhs)
+        Ok(lhs.into())
     }
 }
 

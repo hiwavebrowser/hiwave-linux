@@ -8,23 +8,24 @@
 //! [spec]: https://tc39.es/ecma262/#sec-unary-operators
 
 use crate::{
+    Error,
     lexer::{Error as LexError, TokenKind},
     parser::{
-        expression::{await_expr::AwaitExpression, update::UpdateExpression},
         AllowAwait, AllowYield, Cursor, OrAbrupt, ParseResult, TokenParser,
+        expression::{
+            FormalParameterListOrExpression, await_expr::AwaitExpression, update::UpdateExpression,
+        },
     },
     source::ReadChar,
-    Error,
 };
 use boa_ast::{
+    Expression, Keyword, Punctuator, Span, Spanned,
     expression::{
         access::PropertyAccess,
-        operator::{unary::UnaryOp, Unary},
+        operator::{Unary, unary::UnaryOp},
     },
-    Expression, Keyword, Punctuator,
 };
 use boa_interner::Interner;
-use boa_profiler::Profiler;
 
 /// Parses a unary expression.
 ///
@@ -58,11 +59,10 @@ impl<R> TokenParser<R> for UnaryExpression
 where
     R: ReadChar,
 {
-    type Output = Expression;
+    type Output = FormalParameterListOrExpression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let _timer = Profiler::global().start_event("UnaryExpression", "Parsing");
-
+        cursor.check_depth()?; // HIWAVE PATCH (native recursion)
         let tok = cursor.peek(0, interner).or_abrupt()?;
         let token_start = tok.span().start();
         match tok.kind() {
@@ -72,7 +72,7 @@ where
             TokenKind::Keyword((Keyword::Delete, false)) => {
                 cursor.advance(interner);
                 let position = cursor.peek(0, interner).or_abrupt()?.span().start();
-                let target = self.parse(cursor, interner)?;
+                let target = self.parse(cursor, interner)?.try_into_expression()?;
 
                 match target.flatten() {
                     Expression::Identifier(_) if cursor.strict() => {
@@ -90,31 +90,84 @@ where
                     _ => {}
                 }
 
-                Ok(Unary::new(UnaryOp::Delete, target).into())
+                let target_span_end = target.span().end();
+                Ok(Unary::new(
+                    UnaryOp::Delete,
+                    target,
+                    Span::new(token_start, target_span_end),
+                )
+                .into())
             }
             TokenKind::Keyword((Keyword::Void, false)) => {
                 cursor.advance(interner);
-                Ok(Unary::new(UnaryOp::Void, self.parse(cursor, interner)?).into())
+                let target = self.parse(cursor, interner)?.try_into_expression()?;
+                let target_span_end = target.span().end();
+                Ok(Unary::new(
+                    UnaryOp::Void,
+                    target,
+                    Span::new(token_start, target_span_end),
+                )
+                .into())
             }
             TokenKind::Keyword((Keyword::TypeOf, false)) => {
                 cursor.advance(interner);
-                Ok(Unary::new(UnaryOp::TypeOf, self.parse(cursor, interner)?).into())
+
+                let target = self.parse(cursor, interner)?.try_into_expression()?;
+                let target_span_end = target.span().end();
+                Ok(Unary::new(
+                    UnaryOp::TypeOf,
+                    target,
+                    Span::new(token_start, target_span_end),
+                )
+                .into())
             }
             TokenKind::Punctuator(Punctuator::Add) => {
                 cursor.advance(interner);
-                Ok(Unary::new(UnaryOp::Plus, self.parse(cursor, interner)?).into())
+
+                let target = self.parse(cursor, interner)?.try_into_expression()?;
+                let target_span_end = target.span().end();
+                Ok(Unary::new(
+                    UnaryOp::Plus,
+                    target,
+                    Span::new(token_start, target_span_end),
+                )
+                .into())
             }
             TokenKind::Punctuator(Punctuator::Sub) => {
                 cursor.advance(interner);
-                Ok(Unary::new(UnaryOp::Minus, self.parse(cursor, interner)?).into())
+
+                let target = self.parse(cursor, interner)?.try_into_expression()?;
+                let target_span_end = target.span().end();
+                Ok(Unary::new(
+                    UnaryOp::Minus,
+                    target,
+                    Span::new(token_start, target_span_end),
+                )
+                .into())
             }
             TokenKind::Punctuator(Punctuator::Neg) => {
                 cursor.advance(interner);
-                Ok(Unary::new(UnaryOp::Tilde, self.parse(cursor, interner)?).into())
+
+                let target = self.parse(cursor, interner)?.try_into_expression()?;
+                let target_span_end = target.span().end();
+                Ok(Unary::new(
+                    UnaryOp::Tilde,
+                    target,
+                    Span::new(token_start, target_span_end),
+                )
+                .into())
             }
             TokenKind::Punctuator(Punctuator::Not) => {
                 cursor.advance(interner);
-                Ok(Unary::new(UnaryOp::Not, self.parse(cursor, interner)?).into())
+
+                let target = self.parse(cursor, interner)?.try_into_expression()?;
+                let target_span_end = target.span().end();
+                Ok(Unary::new(
+                    UnaryOp::Not,
+                    target,
+                    Span::new(token_start, target_span_end),
+                )
+                .into())
             }
             TokenKind::Keyword((Keyword::Await, true)) if self.allow_await.0 => {
                 Err(Error::general(

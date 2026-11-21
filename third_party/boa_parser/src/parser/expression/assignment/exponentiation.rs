@@ -10,17 +10,18 @@
 use crate::{
     lexer::TokenKind,
     parser::{
-        expression::{unary::UnaryExpression, update::UpdateExpression},
         AllowAwait, AllowYield, Cursor, OrAbrupt, ParseResult, TokenParser,
+        expression::{
+            FormalParameterListOrExpression, unary::UnaryExpression, update::UpdateExpression,
+        },
     },
     source::ReadChar,
 };
 use boa_ast::{
-    expression::operator::{binary::ArithmeticOp, Binary},
-    Expression, Keyword, Punctuator,
+    Keyword, Punctuator,
+    expression::operator::{Binary, binary::ArithmeticOp},
 };
 use boa_interner::Interner;
-use boa_profiler::Profiler;
 
 /// Parses an exponentiation expression.
 ///
@@ -54,11 +55,9 @@ impl<R> TokenParser<R> for ExponentiationExpression
 where
     R: ReadChar,
 {
-    type Output = Expression;
+    type Output = FormalParameterListOrExpression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let _timer = Profiler::global().start_event("ExponentiationExpression", "Parsing");
-
         let next = cursor.peek(0, interner).or_abrupt()?;
         match next.kind() {
             TokenKind::Keyword((Keyword::Delete | Keyword::Void | Keyword::TypeOf, _))
@@ -77,17 +76,21 @@ where
 
         let lhs =
             UpdateExpression::new(self.allow_yield, self.allow_await).parse(cursor, interner)?;
-        if let Some(tok) = cursor.peek(0, interner)? {
-            if tok.kind() == &TokenKind::Punctuator(Punctuator::Exp) {
-                cursor.advance(interner);
-                return Ok(Binary::new(
-                    ArithmeticOp::Exp.into(),
-                    lhs,
-                    self.parse(cursor, interner)?,
-                )
-                .into());
-            }
+        let FormalParameterListOrExpression::Expression(lhs) = lhs else {
+            return Ok(lhs);
+        };
+
+        if let Some(tok) = cursor.peek(0, interner)?
+            && tok.kind() == &TokenKind::Punctuator(Punctuator::Exp)
+        {
+            cursor.advance(interner);
+            return Ok(Binary::new(
+                ArithmeticOp::Exp.into(),
+                lhs,
+                self.parse(cursor, interner)?.try_into_expression()?,
+            )
+            .into());
         }
-        Ok(lhs)
+        Ok(lhs.into())
     }
 }

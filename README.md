@@ -21,7 +21,7 @@
   <a href="https://github.com/hiwavebrowser/hiwave-linux/actions/workflows/metrics.yml"><img src="https://github.com/hiwavebrowser/hiwave-linux/actions/workflows/metrics.yml/badge.svg?branch=master" alt="Linux CI" /></a>
   <img src="https://img.shields.io/badge/engine-RustKit_(original)-orange" alt="Engine: RustKit" />
   <img src="https://img.shields.io/badge/status-alpha-blueviolet" alt="Status: Alpha" />
-  <img src="https://img.shields.io/badge/license-MPL--2.0-blue" alt="License: MPL-2.0" />
+  <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
 </p>
 
 ---
@@ -158,7 +158,8 @@ sudo apt-get install -y \
     libwebkit2gtk-4.1-dev \
     libssl-dev \
     libsoup-3.0-dev \
-    libjavascriptcoregtk-4.1-dev
+    libjavascriptcoregtk-4.1-dev \
+    libxext-dev
 ```
 
 **Fedora:**
@@ -167,13 +168,16 @@ sudo dnf install -y \
     gtk3-devel \
     webkit2gtk4.1-devel \
     openssl-devel \
-    libsoup3-devel
+    libsoup3-devel \
+    libXext-devel
 ```
 
 **Arch Linux:**
 ```bash
-sudo pacman -S gtk3 webkit2gtk-4.1 openssl libsoup3
+sudo pacman -S gtk3 webkit2gtk-4.1 openssl libsoup3 libxext
 ```
+
+`libXext` is linked by the X11 viewhost (the XShape calls the RustKit chrome uses).
 
 ### Build from Source
 
@@ -300,7 +304,33 @@ cargo clippy --workspace
 
 ## License
 
-HiWave is licensed under the [Mozilla Public License 2.0](LICENSE).
+HiWave is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later). The source code is owned by Aleph Null LLC; HiWave is a subsidiary of Aleph Null LLC. See [NOTICE](NOTICE).
+
+This means:
+- ✅ Free to use, modify, and distribute
+- ✅ Source code is open
+- ⚠️ If you distribute HiWave, or a modified version, you must make the complete corresponding source available under AGPL-3.0-or-later
+- ⚠️ If you run a modified version for users over a network, you must offer them its source (AGPL section 13)
+
+This covers the RustKit engine (`crates/rustkit-*`) as well as the app.
+
+**Earlier versions:** versions of HiWave published before the move to AGPL-3.0-or-later were released under the Mozilla Public License 2.0 and remain available under it; in those versions the RustKit engine crates declared the MIT licence and remain available under MIT.
+
+**Files under MPL-2.0:** these files contain code contributed under MPL-2.0 by outside contributors (carried over from hiwave-macos and hiwave-windows) and stay under MPL-2.0 (text in [LICENSES/MPL-2.0.txt](LICENSES/MPL-2.0.txt)); each is marked `SPDX-License-Identifier: MPL-2.0`. MPL-2.0 files may form part of this AGPL-3.0-or-later larger work (MPL-2.0 section 3.3).
+- `crates/hiwave-app/src/main.rs`
+- `crates/hiwave-app/src/ipc/mod.rs`
+- `crates/hiwave-app/src/ipc/commands.rs`
+- `crates/hiwave-app/src/ui/context_menu.js`
+- `crates/hiwave-app/src/ui/inspector.html`
+- `crates/hiwave-app/src/ui/inspector_inject.js`
+- `crates/rustkit-text/src/lib.rs`
+- `crates/rustkit-text/src/linux.rs`
+
+**Kept on their upstream licence:** the Unicode CLDR data in `crates/rustkit-bindings/src/likely_subtags.txt` and the CLDR tables in `crates/rustkit-bindings/src/web_intl.js` (Unicode License v3), and the Ahem test font in `crates/rustkit-text/tests/fixtures/` (web-platform-tests, tests only). See NOTICE and THIRD_PARTY_NOTICES.md.
+
+For commercial licensing options, see COMMERCIAL-LICENSE.md.
+
+**Third-party notices:** the app also contains third-party works (Rust crates, the vendored Boa engine, Chart.js, Unicode CLDR data) under their own licences. Their copyright notices and licence texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 

@@ -24,6 +24,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,18 +37,50 @@ RUNNING_RE = re.compile(r"Running .*?\(.*?[\\/]deps[\\/]([A-Za-z0-9_]+?)-[0-9a-f
 DOCTEST_RE = re.compile(r"^\s*Doc-tests (\S+)")
 
 
-def run(cmd: list[str]) -> tuple[int, str]:
-    # stderr is merged into stdout by the PIPE, not concatenated afterwards.
-    # cargo prints "Running <binary>" on stderr and "test result:" on stdout,
-    # so appending one to the other loses the interleaving that attributes a
-    # result block to the binary that produced it -- every crate then lands
-    # in a single bucket.
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, encoding="utf-8", errors="replace")
-    return proc.returncode, proc.stdout or ""
+# Lines worth showing live. The step used to print NOTHING between 'Run python ...' and its end, so a
+# timeout (the 60-minute cancel of 2026-11-10) was undiagnosable: no way to tell the build from the tests,
+# or which binary was running. The whole output is still captured for parsing; only these are echoed.
+PROGRESS_RE = re.compile(
+    r"^\s*(Running |Doc-tests |Finished |Compiling (?:rustkit|hiwave)|test result:|error(?:\[|:)|warning: unused)"
+    r"|\.\.\. FAILED|panicked at|has been running for over"
+)
+
+
+def run(cmd: list[str], label: str = "") -> tuple[int, str]:
+    """Run `cmd`, capture everything, and echo progress lines to stderr as they arrive.
+
+    stderr is merged into stdout by the PIPE, not concatenated afterwards.
+    cargo prints "Running <binary>" on stderr and "test result:" on stdout,
+    so appending one to the other loses the interleaving that attributes a
+    result block to the binary that produced it -- every crate then lands
+    in a single bucket.
+    """
+    started = time.monotonic()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace", bufsize=1)
+    lines: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        lines.append(line)
+        if PROGRESS_RE.search(line):
+            elapsed = time.monotonic() - started
+            print(f"[{label or cmd[1]} +{elapsed:7.0f}s] {line.rstrip()}", file=sys.stderr, flush=True)
+    code = proc.wait()
+    run.last_seconds = time.monotonic() - started  # type: ignore[attr-defined]
+    return code, "".join(lines)
 
 
 APPLIER_FN = "fn apply_style_property_impl"
+
+# ComputedStyle fields the layout reads that are ENGINE-INTERNAL STATE, not CSS properties: nothing in
+# the applier can set them because no author declaration maps to them. Each is set by the cascade or the
+# animation system. Listing one here is not an exemption from evidence: `reachability()` still requires
+# an assignment to it in the engine's non-test source, so a removed setter re-fires the ratchet.
+ENGINE_STATE = {
+    "abspos_was_inline_level": "cascade flag: the element's display before out-of-flow blockification",
+    "animation_settled_opacity": "animation system: the opacity a settled animation leaves for paint",
+    "webkit_scrollbar": "cascade: built from ::-webkit-scrollbar pseudo-element rules, not a property",
+}
 
 
 def _applier_body(engine: str) -> tuple[str, bool]:
@@ -70,9 +103,13 @@ def _applier_body(engine: str) -> tuple[str, bool]:
     # function's body without firing the fallback - Argos's soft note on #37.
     # A rename that ADDS a suffix is exactly the shape a refactor produces, so
     # the substring form is loud only for the renames least likely to happen.
-    m = re.search(re.escape(APPLIER_FN) + r"\s*[(<]", engine)
-    i = m.start() if m else -1
-    if i < 0:
+    # EVERY definition, not the first. Linux carries a thin `Engine::apply_style_property_impl`
+    # forwarder (the wave-4 seam: a 3-line body that calls LayoutCtx's) BEFORE the real applier; the
+    # first match scoped the body to that forwarder, which writes no field, so every field the layout
+    # reads counted as unreachable (a whole-tree REGRESSION on every PR, 2026-11-09). The applier is
+    # the definition with the largest body; a forwarder is never where a CSS arm lives.
+    starts = [m.start() for m in re.finditer(re.escape(APPLIER_FN) + r"\s*[(<]", engine)]
+    if not starts:
         print(
             f"WARNING: could not find `{APPLIER_FN}` - reachability is falling "
             f"back to a WHOLE-FILE scan. Internal plumbing will count as "
@@ -81,17 +118,50 @@ def _applier_body(engine: str) -> tuple[str, bool]:
             file=sys.stderr,
         )
         return engine, True
-    j = engine.find("{", i)
+    return max((_brace_body(engine, i) for i in starts), key=len), False
+
+
+def _brace_body(text: str, i: int) -> str:
+    """The `{ ... }` block that opens at or after `i`, brace-matched."""
+    j = text.find("{", i)
     depth, k = 0, j
-    while k < len(engine):
-        if engine[k] == "{":
+    while k < len(text):
+        if text[k] == "{":
             depth += 1
-        elif engine[k] == "}":
+        elif text[k] == "}":
             depth -= 1
             if depth == 0:
                 break
         k += 1
-    return engine[j:k], False
+    return text[j:k]
+
+
+def _helper_bodies(applier: str, sources: dict) -> str:
+    """Bodies of the functions the applier calls WITH `style` as an argument.
+
+    A CSS arm often delegates (`animations::set_animation_names(style, value)`): the field is
+    assigned in the helper, not in the applier's own text, and is exactly as settable from CSS.
+    Only DIRECT callees, only those handed the style: a helper the applier never gives the style to
+    cannot write it, and recursing further would drift toward the whole-file scan this scoping
+    exists to avoid (a false REACHABLE is the expensive direction).
+    """
+    names = set(re.findall(r"\b([a-z_][a-z_0-9]*)\(\s*(?:&mut\s+)?(?:style|s)\b", applier))
+    names.discard("apply_style_property_impl")
+    out = []
+    for text in sources.values():
+        for name in names:
+            for m in re.finditer(r"\bfn " + re.escape(name) + r"\b\s*[(<]", text):
+                out.append(_brace_body(text, m.start()))
+    # A method called ON the style is a direct callee too (`style.set_font_size_length(..)`,
+    # upstream's font-size setters since #1053): its body writes `self.<field>`, which is the
+    # style. Only `&mut self` methods of rustkit-css (a `&self` method cannot write), and only
+    # those the applier calls on `style`/`s`; `self.` is read as `style.` for the field scan.
+    methods = set(re.findall(r"\b(?:style|s)\.([a-z_][a-z_0-9]*)\s*\(", applier))
+    css = Path("crates/rustkit-css/src/lib.rs").read_text()
+    for name in methods:
+        for m in re.finditer(r"\bfn " + re.escape(name) + r"\s*\(\s*&mut self\b", css):
+            out.append(re.sub(r"\bself\.", "style.", _brace_body(css, m.start())))
+    return "\n".join(out)
 
 
 def reachability() -> dict:
@@ -118,10 +188,14 @@ def reachability() -> dict:
     is the part someone can act on.
     """
     css = Path("crates/rustkit-css/src/lib.rs").read_text()
-    i = css.find("pub struct ComputedStyle")
+    # Line comments out first, then the struct brace-matched: a doc comment quoting CSS
+    # (`html { line-height: 1.5 }`) ended a first-`}` scan at half the struct, and every field after
+    # it went unchecked without a word.
+    css_code = re.sub(r"//[^\n]*", "", css)
+    i = css_code.find("pub struct ComputedStyle")
     if i < 0:
         return {"error": "ComputedStyle not found"}
-    fields = sorted(set(re.findall(r"pub ([a-z_0-9]+):", css[i:css.find("}", css.find("{", i))])))
+    fields = sorted(set(re.findall(r"pub ([a-z_0-9]+):", _brace_body(css_code, i))))
 
     layout = "".join(p.read_text() for p in sorted(Path("crates/rustkit-layout/src").glob("*.rs")))
     engine = Path("crates/rustkit-engine/src/lib.rs").read_text()
@@ -154,12 +228,31 @@ def reachability() -> dict:
     # `.is_visible()` are reads, and treating every receiver as a write would
     # mark fields writable that no arm can set - a FALSE REACHABLE, the
     # expensive direction.
-    MUTATORS = "push|clear|insert|extend|remove|pop|truncate|retain|append|push_str|set"
+    # `apply`/`reset` are the mask-image mutators (`style.mask.apply(..)`, `style.mask.reset()`).
+    MUTATORS = "push|clear|insert|extend|remove|pop|truncate|retain|append|push_str|set|apply|reset"
+    # What the applier delegates to is part of the applier: see `_helper_bodies`.
+    engine_dir = Path("crates/rustkit-engine/src")
+    sources = {p.name: p.read_text() for p in sorted(engine_dir.glob("*.rs"))
+               if not p.name.endswith("_tests.rs")}
+    scope = applier + "\n" + _helper_bodies(applier, sources)
+
+    def _writes(f: str) -> bool:
+        for recv in ("style", "s"):
+            r = r"\b" + recv + r"\." + f
+            if (re.search(r + r"\s*=(?!=)", scope)                          # assignment
+                    # one element of an array field: `style.padding_declared[i] = true` (CB3c)
+                    or re.search(r + r"\[[^\]\n]*\]\s*=(?!=)", scope)
+                    or re.search(r + r"\s*(?:[-+*/&|^]|<<|>>)=", scope)     # compound: &=, |=, +=, ...
+                    or re.search(r + r"\.(?:" + MUTATORS + r")\s*\(", scope)  # in-place mutator
+                    # tuple target: `(style.a, style.b) = ..` (either position)
+                    or re.search(r"\([^()=;]*" + r + r"\b[^()=;]*\)\s*=(?!=)", scope)):
+                return True
+        return False
+
+    engine_src = "\n".join(sources.values())
     written = [f for f in fields
-               if re.search(r"\bstyle\." + f + r"\s*=", applier)
-               or re.search(r"\bs\." + f + r"\s*=", applier)
-               or re.search(r"\bstyle\." + f + r"\.(?:" + MUTATORS + r")\s*\(", applier)
-               or re.search(r"\bs\." + f + r"\.(?:" + MUTATORS + r")\s*\(", applier)]
+               if _writes(f)
+               or (f in ENGINE_STATE and re.search(r"\.(?:" + f + r")\s*=(?!=)", engine_src))]
     unreachable = [f for f in read if f not in written]
 
     return {
@@ -238,8 +331,69 @@ def check_reachability_regression(current: dict) -> tuple[bool, str]:
     return (not regressed), " | ".join(msg) or "reachability unchanged"
 
 
+KNOWN_FAILURES = Path(__file__).with_name("linux_known_failures.json")
+FAILED_RE = re.compile(r"^test (\S+) \.\.\. FAILED\s*$")
+
+
+def classify_failures(failed_names: list[str], known_path: Path = KNOWN_FAILURES) -> dict:
+    """Split failing tests into the ones this tree is KNOWN to fail and the ones it is not.
+
+    Linux carries tests whose expectations are Chrome-on-macOS font metrics (one FreeType run face, no
+    fallback-face line union, runner fonts that are not the reference machine's). Counting them as
+    failures turned the job red on every PR, and a check that is always red gates nothing; deleting or
+    `#[ignore]`-ing them would hide a real signal. They are listed, with a reason each, in
+    scripts/linux_known_failures.json and reported on every run; ONLY a failure outside that list
+    fails the job. A known failure that now passes is reported (remove its entry) but is not red: the
+    hosted runner's fonts differ from a developer machine's, so the same test can flip between them.
+    """
+    known: dict[str, str] = {}
+    if known_path.exists():
+        known = {e["test"]: e.get("reason", "") for e in json.loads(known_path.read_text(encoding="utf-8"))["known"]}
+    seen = set(failed_names)
+    return {
+        "failed_unexpected": sorted(n for n in seen if n not in known),
+        "failed_known": sorted(n for n in seen if n in known),
+        "known_now_passing": sorted(k for k in known if k not in seen),
+    }
+
+
+def parse_tests(test_out: str) -> tuple[dict, dict, list[str]]:
+    """Per-binary results, totals, and the names of the failing tests (`binary::test_path`)."""
+    # Attribute each "test result:" block to the binary that produced it.
+    current = None
+    per_crate: dict[str, dict[str, int]] = {}
+    totals = {"passed": 0, "failed": 0, "ignored": 0}
+    failed_names: list[str] = []
+    for line in test_out.splitlines():
+        fm = FAILED_RE.match(line)
+        if fm:
+            failed_names.append(f"{current or 'unattributed'}::{fm.group(1)}")
+            continue
+        m = RUNNING_RE.search(line)
+        if m:
+            current = m.group(1)
+            continue
+        m = DOCTEST_RE.match(line)
+        if m:
+            current = m.group(1) + " (doc)"
+            continue
+        m = RESULT_RE.search(line)
+        if m:
+            _ok, p, f, i = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            key = current or "unattributed"
+            bucket = per_crate.setdefault(key, {"passed": 0, "failed": 0, "ignored": 0})
+            bucket["passed"] += p
+            bucket["failed"] += f
+            bucket["ignored"] += i
+            totals["passed"] += p
+            totals["failed"] += f
+            totals["ignored"] += i
+    return per_crate, totals, failed_names
+
+
 def collect(commit: str, branch: str) -> dict:
-    build_code, build_out = run(["cargo", "build", "--workspace"])
+    build_code, build_out = run(["cargo", "build", "--workspace"], "build")
+    build_seconds = round(run.last_seconds)  # type: ignore[attr-defined]
     build_warnings = len(re.findall(r"^warning:", build_out, re.M))
 
     # On a failed build, echo the tail to stderr so CI shows WHY. The metrics
@@ -260,7 +414,9 @@ def collect(commit: str, branch: str) -> dict:
     # on the wait, not on its assertions (5 tests, run 36804275308); serial
     # runs the whole engine suite in ~50s locally with no contention.
     test_code, test_out = run(["cargo", "test", "--workspace", "--no-fail-fast",
-                               "--", "--test-threads=1"])
+                               "--", "--test-threads=1"], "test")
+    test_seconds = round(run.last_seconds)  # type: ignore[attr-defined]
+    print(f"PHASES: build {build_seconds}s, test {test_seconds}s", file=sys.stderr, flush=True)
 
     # Echo failing-test context to stderr so CI names WHICH tests failed and
     # why, instead of only a count. Mirrors the build-failure surfacing above.
@@ -274,30 +430,7 @@ def collect(commit: str, branch: str) -> dict:
             print("\n=== FAILING TESTS ===\n" + "\n".join(fail_lines[:80]),
                   file=sys.stderr)
 
-    # Attribute each "test result:" block to the binary that produced it.
-    current = None
-    per_crate: dict[str, dict[str, int]] = {}
-    totals = {"passed": 0, "failed": 0, "ignored": 0}
-    for line in test_out.splitlines():
-        m = RUNNING_RE.search(line)
-        if m:
-            current = m.group(1)
-            continue
-        m = DOCTEST_RE.match(line)
-        if m:
-            current = m.group(1) + " (doc)"
-            continue
-        m = RESULT_RE.search(line)
-        if m:
-            _ok, p, f, i = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
-            key = current or "unattributed"
-            bucket = per_crate.setdefault(key, {"passed": 0, "failed": 0, "ignored": 0})
-            bucket["passed"] += p
-            bucket["failed"] += f
-            bucket["ignored"] += i
-            totals["passed"] += p
-            totals["failed"] += f
-            totals["ignored"] += i
+    per_crate, totals, failed_names = parse_tests(test_out)
 
     # A crate with zero tests is worth surfacing: it is the shape of the
     # rustkit-text gap (compiled green, ran nothing, looked fine).
@@ -313,6 +446,7 @@ def collect(commit: str, branch: str) -> dict:
             "ok": build_code == 0,
             "exit_code": build_code,
             "warnings": build_warnings,
+            "seconds": build_seconds,
         },
         "tests": {
             "ok": test_code == 0,
@@ -321,6 +455,10 @@ def collect(commit: str, branch: str) -> dict:
             "failed": totals["failed"],
             "ignored": totals["ignored"],
             "total": totals["passed"] + totals["failed"],
+            "seconds": test_seconds,
+            **classify_failures(failed_names),
+            # A non-zero exit that names no failing test is a crash or a timeout, not a pass.
+            "unexplained_exit": test_code != 0 and not failed_names,
         },
         "per_crate": dict(sorted(per_crate.items())),
         "crates_with_no_tests": empty,
@@ -344,7 +482,8 @@ def to_markdown(m: dict) -> str:
         "|--------|-------|",
         f"| Build | {'PASS' if b['ok'] else 'FAIL'} ({b['warnings']} warnings) |",
         f"| Tests passed | **{t['passed']}** |",
-        f"| Tests failed | {t['failed']} |",
+        f"| Tests failed | {t['failed']} ({len(t.get('failed_known', []))} known on Linux, "
+        f"{len(t.get('failed_unexpected', []))} unexpected) |",
         f"| Tests ignored | {t['ignored']} |",
         f"| Commit | `{m['commit'][:8]}` |",
         f"| Branch | {m['branch']} |",

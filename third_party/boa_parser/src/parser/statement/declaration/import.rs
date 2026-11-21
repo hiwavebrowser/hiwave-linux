@@ -10,24 +10,26 @@
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import
 
 use crate::{
-    lexer::TokenKind,
+    lexer::{TokenKind, token::ContainsEscapeSequence},
     parser::{
-        cursor::Cursor,
-        statement::{declaration::FromClause, BindingIdentifier},
         Error, OrAbrupt, ParseResult, TokenParser,
+        cursor::Cursor,
+        statement::{
+            BindingIdentifier,
+            declaration::{FromClause, WithClause},
+        },
     },
     source::ReadChar,
 };
 use boa_ast::{
+    Keyword, Punctuator, Spanned,
     declaration::{
-        ImportDeclaration as AstImportDeclaration, ImportKind,
+        ImportAttribute, ImportDeclaration as AstImportDeclaration, ImportKind,
         ImportSpecifier as AstImportSpecifier, ModuleSpecifier,
     },
     expression::Identifier,
-    Keyword, Punctuator,
 };
 use boa_interner::{Interner, Sym};
-use boa_profiler::Profiler;
 
 /// Parses an import declaration.
 ///
@@ -44,28 +46,60 @@ impl ImportDeclaration {
         cursor: &mut Cursor<R>,
         interner: &mut Interner,
     ) -> ParseResult<bool> {
-        if let Some(token) = cursor.peek(0, interner)? {
-            if let TokenKind::Keyword((Keyword::Import, escaped)) = token.kind() {
-                if *escaped {
-                    return Err(Error::general(
-                        "keyword `import` must not contain escaped characters",
-                        token.span().start(),
-                    ));
-                }
+        if let Some(token) = cursor.peek(0, interner)?
+            && let TokenKind::Keyword((Keyword::Import, escaped)) = token.kind()
+        {
+            if *escaped {
+                return Err(Error::general(
+                    "keyword `import` must not contain escaped characters",
+                    token.span().start(),
+                ));
+            }
 
-                if let Some(token) = cursor.peek(1, interner)? {
-                    match token.kind() {
-                        TokenKind::StringLiteral(_)
-                        | TokenKind::Punctuator(Punctuator::OpenBlock | Punctuator::Mul)
-                        | TokenKind::IdentifierName(_)
-                        | TokenKind::Keyword(_) => return Ok(true),
-                        _ => {}
-                    }
+            if let Some(token) = cursor.peek(1, interner)? {
+                match token.kind() {
+                    TokenKind::StringLiteral(_)
+                    | TokenKind::Punctuator(Punctuator::OpenBlock | Punctuator::Mul)
+                    | TokenKind::IdentifierName(_)
+                    | TokenKind::Keyword(_) => return Ok(true),
+                    _ => {}
                 }
             }
         }
 
         Ok(false)
+    }
+}
+
+impl ImportDeclaration {
+    /// HIWAVE PATCH (source-phase-import): whether the tokens after `import` are
+    /// `source ImportedBinding`, not a default import named `source`: an unescaped `source`
+    /// followed by a binding identifier, unless that identifier is `from` followed by a string
+    /// literal (`import source from "m"`).
+    fn is_source_phase<R: ReadChar>(
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<bool> {
+        let Some(tok) = cursor.peek(0, interner)? else {
+            return Ok(false);
+        };
+        if !matches!(
+            tok.kind(),
+            TokenKind::IdentifierName((Sym::SOURCE, ContainsEscapeSequence(false)))
+        ) {
+            return Ok(false);
+        }
+        let Some(next) = cursor.peek(1, interner)? else {
+            return Ok(false);
+        };
+        match next.kind() {
+            TokenKind::IdentifierName((Sym::FROM, _)) => Ok(cursor
+                .peek(2, interner)?
+                .is_some_and(|t| !matches!(t.kind(), TokenKind::StringLiteral(_)))),
+            TokenKind::IdentifierName(_)
+            | TokenKind::Keyword((Keyword::Await | Keyword::Yield, _)) => Ok(true),
+            _ => Ok(false),
+        }
     }
 }
 
@@ -76,9 +110,25 @@ where
     type Output = AstImportDeclaration;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let _timer = Profiler::global().start_event("ImportDeclaration", "Parsing");
-
         cursor.expect((Keyword::Import, false), "import declaration", interner)?;
+
+        // HIWAVE PATCH (source-phase-import): `import source ImportedBinding FromClause ;`
+        // (source-phase-imports proposal). `import source from "m"` and `import source, ...`
+        // stay default imports of a binding named `source`.
+        if Self::is_source_phase(cursor, interner)? {
+            cursor.advance(interner);
+            let binding = ImportedBinding.parse(cursor, interner)?;
+            let module_identifier =
+                FromClause::new("import declaration").parse(cursor, interner)?;
+            let attributes = WithClause::new("import declaration").parse(cursor, interner)?;
+            cursor.expect_semicolon("import declaration", interner)?;
+            return Ok(AstImportDeclaration::new(
+                None,
+                ImportKind::Source { binding },
+                module_identifier,
+                attributes,
+            ));
+        }
 
         let tok = cursor.peek(0, interner).or_abrupt()?;
 
@@ -87,12 +137,16 @@ where
                 let module_identifier = *module_identifier;
 
                 cursor.advance(interner);
+
+                let attributes = WithClause::new("import declaration").parse(cursor, interner)?;
+
                 cursor.expect_semicolon("import declaration", interner)?;
 
                 return Ok(AstImportDeclaration::new(
                     None,
                     ImportKind::DefaultOrUnnamed,
                     ModuleSpecifier::new(module_identifier),
+                    attributes,
                 ));
             }
             TokenKind::Punctuator(Punctuator::OpenBlock) => {
@@ -132,7 +186,7 @@ where
                                     tok.to_string(interner),
                                     tok.span(),
                                     "import declaration",
-                                ))
+                                ));
                             }
                         }
                     }
@@ -150,13 +204,16 @@ where
                     tok.to_string(interner),
                     tok.span(),
                     "import declaration",
-                ))
+                ));
             }
         };
 
         let module_identifier = FromClause::new("import declaration").parse(cursor, interner)?;
+        let attributes = WithClause::new("import declaration").parse(cursor, interner)?;
 
-        Ok(import_clause.with_specifier(module_identifier))
+        cursor.expect_semicolon("import declaration", interner)?;
+
+        Ok(import_clause.with_specifier_and_attributes(module_identifier, attributes))
     }
 }
 
@@ -260,17 +317,33 @@ enum ImportClause {
 
 impl ImportClause {
     #[inline]
-    #[allow(clippy::missing_const_for_fn)]
-    fn with_specifier(self, specifier: ModuleSpecifier) -> AstImportDeclaration {
+    fn with_specifier_and_attributes(
+        self,
+        specifier: ModuleSpecifier,
+        attributes: Box<[ImportAttribute]>,
+    ) -> AstImportDeclaration {
         match self {
-            Self::Namespace(default, binding) => {
-                AstImportDeclaration::new(default, ImportKind::Namespaced { binding }, specifier)
-            }
+            Self::Namespace(default, binding) => AstImportDeclaration::new(
+                default,
+                ImportKind::Namespaced { binding },
+                specifier,
+                attributes,
+            ),
             Self::ImportList(default, names) => {
                 if names.is_empty() {
-                    AstImportDeclaration::new(default, ImportKind::DefaultOrUnnamed, specifier)
+                    AstImportDeclaration::new(
+                        default,
+                        ImportKind::DefaultOrUnnamed,
+                        specifier,
+                        attributes,
+                    )
                 } else {
-                    AstImportDeclaration::new(default, ImportKind::Named { names }, specifier)
+                    AstImportDeclaration::new(
+                        default,
+                        ImportKind::Named { names },
+                        specifier,
+                        attributes,
+                    )
                 }
             }
         }
@@ -335,17 +408,17 @@ where
             TokenKind::IdentifierName((name, _)) => {
                 let name = *name;
 
-                if let Some(token) = cursor.peek(1, interner)? {
-                    if token.kind() == &TokenKind::identifier(Sym::AS) {
-                        // export name
-                        cursor.advance(interner);
+                if let Some(token) = cursor.peek(1, interner)?
+                    && token.kind() == &TokenKind::identifier(Sym::AS)
+                {
+                    // export name
+                    cursor.advance(interner);
 
-                        // `as`
-                        cursor.advance(interner);
+                    // `as`
+                    cursor.advance(interner);
 
-                        let binding = ImportedBinding.parse(cursor, interner)?;
-                        return Ok(AstImportSpecifier::new(binding, name));
-                    }
+                    let binding = ImportedBinding.parse(cursor, interner)?;
+                    return Ok(AstImportSpecifier::new(binding, name));
                 }
 
                 let name = ImportedBinding.parse(cursor, interner)?;

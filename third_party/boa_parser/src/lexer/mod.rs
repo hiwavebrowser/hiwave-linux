@@ -42,9 +42,8 @@ use self::{
     template::TemplateLiteral,
 };
 use crate::source::{ReadChar, UTF8Input};
-use boa_ast::{Position, Punctuator, Span};
+use boa_ast::{PositionGroup, Punctuator};
 use boa_interner::Interner;
-use boa_profiler::Profiler;
 
 pub use self::{
     error::Error,
@@ -56,7 +55,7 @@ trait Tokenizer<R> {
     fn lex(
         &mut self,
         cursor: &mut Cursor<R>,
-        start_pos: Position,
+        start_pos: PositionGroup,
         interner: &mut Interner,
     ) -> Result<Token, Error>
     where
@@ -112,66 +111,74 @@ impl<R> Lexer<R> {
         }
     }
 
-    // Handles lexing of a token starting '/' with the '/' already being consumed.
-    // This could be a divide symbol or the start of a regex.
-    //
-    // A '/' symbol can always be a comment but if as tested above it is not then
-    // that means it could be multiple different tokens depending on the input token.
-    //
-    // As per https://tc39.es/ecma262/#sec-ecmascript-language-lexical-grammar
+    /// Handles lexing of a token starting '/' with the '/' already being consumed.
+    /// This could be a divide symbol or the start of a regex.
+    ///
+    /// If `init_with_eq` is `true`, assume that '/=' has already been consumed.
+    ///
+    /// A '/' symbol can always be a comment but if as tested above it is not then
+    /// that means it could be multiple different tokens depending on the input token.
+    ///
+    /// As per <https://tc39.es/ecma262/#sec-ecmascript-language-lexical-grammar>
     pub(crate) fn lex_slash_token(
         &mut self,
-        start: Position,
+        start: PositionGroup,
         interner: &mut Interner,
+        init_with_eq: bool,
     ) -> Result<Token, Error>
     where
         R: ReadChar,
     {
-        let _timer = Profiler::global().start_event("lex_slash_token", "Lexing");
-
         if let Some(c) = self.cursor.peek_char()? {
-            match c {
+            match (c, init_with_eq) {
                 // /
-                0x002F => {
+                (0x002F, false) => {
                     self.cursor.next_char()?.expect("/ token vanished"); // Consume the '/'
                     SingleLineComment.lex(&mut self.cursor, start, interner)
                 }
                 // *
-                0x002A => {
+                (0x002A, false) => {
                     self.cursor.next_char()?.expect("* token vanished"); // Consume the '*'
                     MultiLineComment.lex(&mut self.cursor, start, interner)
                 }
-                ch => {
+                (ch, init_with_eq) => {
                     match self.get_goal() {
                         InputElement::Div | InputElement::TemplateTail => {
                             // Only div punctuator allowed, regex not.
 
                             // =
-                            if ch == 0x003D {
-                                // Indicates this is an AssignDiv.
-                                self.cursor.next_char()?.expect("= token vanished"); // Consume the '='
-                                Ok(Token::new(
+                            if init_with_eq || ch == 0x003D {
+                                // if `=` is not consumed, consume it
+                                if !init_with_eq {
+                                    // Indicates this is an AssignDiv.
+                                    // Consume the '='
+                                    self.cursor.next_char()?.expect("= token vanished");
+                                }
+                                Ok(Token::new_by_position_group(
                                     Punctuator::AssignDiv.into(),
-                                    Span::new(start, self.cursor.pos()),
+                                    start,
+                                    self.cursor.pos_group(),
                                 ))
                             } else {
-                                Ok(Token::new(
+                                Ok(Token::new_by_position_group(
                                     Punctuator::Div.into(),
-                                    Span::new(start, self.cursor.pos()),
+                                    start,
+                                    self.cursor.pos_group(),
                                 ))
                             }
                         }
                         InputElement::RegExp | InputElement::HashbangOrRegExp => {
                             // Can be a regular expression.
-                            RegexLiteral.lex(&mut self.cursor, start, interner)
+                            RegexLiteral::new(init_with_eq).lex(&mut self.cursor, start, interner)
                         }
                     }
                 }
             }
         } else {
-            Err(Error::syntax(
-                "Abrupt end: Expecting Token /,*,= or regex",
+            Ok(Token::new_by_position_group(
+                Punctuator::Div.into(),
                 start,
+                self.cursor.pos_group(),
             ))
         }
     }
@@ -185,7 +192,7 @@ impl<R> Lexer<R> {
             return Ok(());
         }
 
-        while self.cursor.peek_char()?.map_or(false, is_whitespace) {
+        while self.cursor.peek_char()?.is_some_and(is_whitespace) {
             let _next = self.cursor.next_char();
         }
 
@@ -195,7 +202,7 @@ impl<R> Lexer<R> {
             let _next = self.cursor.next_char();
             let _next = self.cursor.next_char();
 
-            let start = self.cursor.pos();
+            let start = self.cursor.pos_group();
             SingleLineComment.lex(&mut self.cursor, start, interner)?;
         }
 
@@ -212,9 +219,7 @@ impl<R> Lexer<R> {
     where
         R: ReadChar,
     {
-        let _timer = Profiler::global().start_event("next()", "Lexing");
-
-        let mut start = self.cursor.pos();
+        let mut start = self.cursor.pos_group();
         let Some(mut next_ch) = self.cursor.next_char()? else {
             return Ok(None);
         };
@@ -226,13 +231,13 @@ impl<R> Lexer<R> {
             if next_ch == 0x23 && self.cursor.peek_char()? == Some(0x21) {
                 let _token = HashbangComment.lex(&mut self.cursor, start, interner);
                 return self.next(interner);
-            };
+            }
         }
 
         // Ignore whitespace
         if is_whitespace(next_ch) {
             loop {
-                start = self.cursor.pos();
+                start = self.cursor.pos_group();
                 let Some(next) = self.cursor.next_char()? else {
                     return Ok(None);
                 };
@@ -245,62 +250,72 @@ impl<R> Lexer<R> {
 
         if let Ok(c) = char::try_from(next_ch) {
             let token = match c {
-                '\r' | '\n' | '\u{2028}' | '\u{2029}' => Ok(Token::new(
+                '\r' | '\n' | '\u{2028}' | '\u{2029}' => Ok(Token::new_by_position_group(
                     TokenKind::LineTerminator,
-                    Span::new(start, self.cursor.pos()),
+                    start,
+                    self.cursor.pos_group(),
                 )),
                 '"' | '\'' => StringLiteral::new(c).lex(&mut self.cursor, start, interner),
                 '`' => TemplateLiteral.lex(&mut self.cursor, start, interner),
-                ';' => Ok(Token::new(
+                ';' => Ok(Token::new_by_position_group(
                     Punctuator::Semicolon.into(),
-                    Span::new(start, self.cursor.pos()),
+                    start,
+                    self.cursor.pos_group(),
                 )),
-                ':' => Ok(Token::new(
+                ':' => Ok(Token::new_by_position_group(
                     Punctuator::Colon.into(),
-                    Span::new(start, self.cursor.pos()),
+                    start,
+                    self.cursor.pos_group(),
                 )),
                 '.' => {
                     if self
                         .cursor
                         .peek_char()?
-                        .filter(|c| (0x30..=0x39/* 0..=9 */).contains(c))
-                        .is_some()
+                        .as_ref()
+                        .is_some_and(|c| (0x30..=0x39/* 0..=9 */).contains(c))
                     {
                         NumberLiteral::new(b'.').lex(&mut self.cursor, start, interner)
                     } else {
                         SpreadLiteral::new().lex(&mut self.cursor, start, interner)
                     }
                 }
-                '(' => Ok(Token::new(
+                '(' => Ok(Token::new_by_position_group(
                     Punctuator::OpenParen.into(),
-                    Span::new(start, self.cursor.pos()),
+                    start,
+                    self.cursor.pos_group(),
                 )),
-                ')' => Ok(Token::new(
+                ')' => Ok(Token::new_by_position_group(
                     Punctuator::CloseParen.into(),
-                    Span::new(start, self.cursor.pos()),
+                    start,
+                    self.cursor.pos_group(),
                 )),
-                ',' => Ok(Token::new(
+                ',' => Ok(Token::new_by_position_group(
                     Punctuator::Comma.into(),
-                    Span::new(start, self.cursor.pos()),
+                    start,
+                    self.cursor.pos_group(),
                 )),
-                '{' => Ok(Token::new(
+                '{' => Ok(Token::new_by_position_group(
                     Punctuator::OpenBlock.into(),
-                    Span::new(start, self.cursor.pos()),
+                    start,
+                    self.cursor.pos_group(),
                 )),
-                '}' => Ok(Token::new(
+                '}' => Ok(Token::new_by_position_group(
                     Punctuator::CloseBlock.into(),
-                    Span::new(start, self.cursor.pos()),
+                    start,
+                    self.cursor.pos_group(),
                 )),
-                '[' => Ok(Token::new(
+                '[' => Ok(Token::new_by_position_group(
                     Punctuator::OpenBracket.into(),
-                    Span::new(start, self.cursor.pos()),
+                    start,
+                    self.cursor.pos_group(),
                 )),
-                ']' => Ok(Token::new(
+                ']' => Ok(Token::new_by_position_group(
                     Punctuator::CloseBracket.into(),
-                    Span::new(start, self.cursor.pos()),
+                    start,
+                    self.cursor.pos_group(),
                 )),
                 '#' => PrivateIdentifier::new().lex(&mut self.cursor, start, interner),
-                '/' => self.lex_slash_token(start, interner),
+                '/' => self.lex_slash_token(start, interner, false),
                 #[cfg(feature = "annex-b")]
                 // <!--
                 '<' if !self.module()
@@ -309,7 +324,7 @@ impl<R> Lexer<R> {
                     let _next = self.cursor.next_char();
                     let _next = self.cursor.next_char();
                     let _next = self.cursor.next_char();
-                    let start = self.cursor.pos();
+                    let start = self.cursor.pos_group();
                     SingleLineComment.lex(&mut self.cursor, start, interner)
                 }
                 #[allow(clippy::cast_possible_truncation)]
@@ -327,12 +342,8 @@ impl<R> Lexer<R> {
                     NumberLiteral::new(next_ch as u8).lex(&mut self.cursor, start, interner)
                 }
                 _ => {
-                    let details = format!(
-                        "unexpected '{c}' at line {}, column {}",
-                        start.line_number(),
-                        start.column_number()
-                    );
-                    Err(Error::syntax(details, start))
+                    let details = format!("unexpected '{c}'");
+                    Err(Error::syntax(details, start.position()))
                 }
             }?;
 
@@ -344,7 +355,7 @@ impl<R> Lexer<R> {
                     start.line_number(),
                     start.column_number()
                 ),
-                start,
+                start.position(),
             ))
         }
     }
@@ -374,13 +385,17 @@ impl<R> Lexer<R> {
     /// Performs the lexing of a template literal.
     pub(crate) fn lex_template(
         &mut self,
-        start: Position,
+        start: PositionGroup,
         interner: &mut Interner,
     ) -> Result<Token, Error>
     where
         R: ReadChar,
     {
         TemplateLiteral.lex(&mut self.cursor, start, interner)
+    }
+
+    pub(super) fn take_source(&mut self) -> boa_ast::SourceText {
+        self.cursor.take_source()
     }
 }
 
@@ -393,18 +408,13 @@ impl<'a> From<&'a [u8]> for Lexer<UTF8Input<&'a [u8]>> {
 /// ECMAScript goal symbols.
 ///
 /// <https://tc39.es/ecma262/#sec-ecmascript-language-lexical-grammar>
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputElement {
     Div,
+    #[default]
     RegExp,
     TemplateTail,
     HashbangOrRegExp,
-}
-
-impl Default for InputElement {
-    fn default() -> Self {
-        Self::RegExp
-    }
 }
 
 /// Checks if a character is whitespace as per ECMAScript standards.
@@ -419,7 +429,7 @@ const fn is_whitespace(ch: u32) -> bool {
     matches!(
         ch,
         0x0020 | 0x0009 | 0x000B | 0x000C | 0x00A0 | 0xFEFF |
-            // Unicode Space_Seperator category (minus \u{0020} and \u{00A0} which are allready stated above)
+            // Unicode Space_Separator category (minus \u{0020} and \u{00A0} which are already stated above)
             0x1680 | 0x2000..=0x200A | 0x202F | 0x205F | 0x3000
     )
 }

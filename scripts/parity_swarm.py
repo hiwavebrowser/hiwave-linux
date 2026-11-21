@@ -1,62 +1,141 @@
 #!/usr/bin/env python3
 """
-parity_swarm.py - Parallel/sharded parity test execution for Linux
+parity_swarm.py - Parallel/sharded swarm parity testing
 
-Runs parity tests in parallel using multiprocessing with sharding support
-for CI environments. Uses Xvfb for headless display.
-
-Platform: Linux (ported from macOS)
+This script enables:
+- Parallel execution across multiple processes
+- CI sharding for distributed testing
+- Scout-then-Exploit scheduling for maximum ROI
+- Run-scoped artifacts (safe for parallel execution)
 
 Usage:
-    python scripts/parity_swarm.py --jobs 4 --scope all
-    python scripts/parity_swarm.py --shard-index 0 --shard-count 4
-    python scripts/parity_swarm.py --cases new_tab,about --iterations 5
+    # Local parallel run (4 workers)
+    python3 scripts/parity_swarm.py --jobs 4
+
+    # CI shard 0 of 4
+    python3 scripts/parity_swarm.py --shard-index 0 --shard-count 4
+
+    # Scout then exploit top 5 worst cases
+    python3 scripts/parity_swarm.py --jobs 4 --exploit-top 5 --exploit-iterations 3
+
+    # Time-budgeted run
+    python3 scripts/parity_swarm.py --jobs 4 --budget-minutes 30
 """
 
 import argparse
 import json
 import multiprocessing as mp
-import os
 import sys
 import time
-from dataclasses import asdict
+from collections import defaultdict
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-# Add parent to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
+from typing import List, Dict, Any, Optional, Tuple
 
 from parity_lib import (
     REPO_ROOT,
-    RESULTS_DIR,
+    DEFAULT_RESULTS_ROOT,
+    BUILTINS,
+    WEBSUITE,
+    MICRO_TESTS,
+    VIEWPORTS,
     WorkUnit,
     CaseResult,
     AggregatedResult,
-    create_work_units,
+    get_threshold,
+    get_case_type,
+    get_all_cases,
+    generate_run_id,
     execute_work_unit,
-    aggregate_results,
-    ensure_display,
+    aggregate_iterations,
+    ensure_parity_capture_built,
+    result_to_dict,
+    aggregated_to_dict,
 )
 
 
-def worker_init():
-    """Initialize worker process with display."""
-    ensure_display()
+# ============================================================================
+# Work unit generation
+# ============================================================================
 
 
-def worker_execute(args: Tuple[WorkUnit, Path, bool]) -> Tuple[str, List[CaseResult]]:
-    """Worker function to execute a single work unit."""
-    unit, output_dir, verbose = args
-    try:
-        results = execute_work_unit(unit, output_dir, verbose=verbose)
-        return (unit.case_id, results)
-    except Exception as e:
-        return (unit.case_id, [CaseResult(
-            case_id=unit.case_id,
-            iteration=0,
-            error=str(e),
-        )])
+def fmt_diff(diff_pct) -> str:
+    """Render a score, or say plainly that there is not one.
+
+    diff_pct is Optional since 2026-07-29: None means the instrument refused
+    to measure (dimension mismatch, blank frame, missing baseline) rather than
+    measuring a 100% difference. Every display path has to say which, because
+    printing "100.00%" for a capture that never happened is the exact lie the
+    three-state model exists to stop.
+    """
+    return "NOT-MEASURED" if diff_pct is None else f"{diff_pct:.2f}%"
+
+
+def generate_work_units(
+    scope: str = "all",
+    cases: Optional[List[str]] = None,
+    viewports: Optional[List[str]] = None,
+    iterations: int = 1,
+) -> List[WorkUnit]:
+    """
+    Generate deterministic ordered list of work units.
+    
+    Order is stable for reproducible sharding:
+    - Sorted by (case_id, viewport, iteration)
+    """
+    all_cases = get_all_cases()
+    
+    # Filter cases by scope or explicit list
+    if cases:
+        case_list = [(cid, *all_cases[cid][1:]) for cid in cases if cid in all_cases]
+    else:
+        case_list = []
+        if scope in ["all", "builtins"]:
+            case_list.extend([(c[0], c[1], c[2], c[3], "builtins") for c in BUILTINS])
+        if scope in ["all", "websuite"]:
+            case_list.extend([(c[0], c[1], c[2], c[3], "websuite") for c in WEBSUITE])
+        if scope in ["all", "micro"]:
+            case_list.extend([(c[0], c[1], c[2], c[3], "micro") for c in MICRO_TESTS])
+    
+    # Filter viewports
+    if viewports:
+        vp_set = set(viewports)
+        viewport_list = [(w, h, name) for w, h, name in VIEWPORTS if name in vp_set]
+    else:
+        # Use case's native viewport (width x height from case definition)
+        viewport_list = None
+    
+    # Generate work units
+    units = []
+    for case_id, html_path, case_w, case_h, case_type in sorted(case_list, key=lambda x: x[0]):
+        if viewport_list:
+            for vp_w, vp_h, vp_name in viewport_list:
+                for iter_idx in range(iterations):
+                    units.append(WorkUnit(
+                        case_id=case_id,
+                        html_path=html_path,
+                        width=vp_w,
+                        height=vp_h,
+                        case_type=case_type,
+                        viewport_name=vp_name,
+                        iteration=iter_idx + 1,
+                    ))
+        else:
+            # Use native viewport
+            vp_name = f"{case_w}x{case_h}"
+            for iter_idx in range(iterations):
+                units.append(WorkUnit(
+                    case_id=case_id,
+                    html_path=html_path,
+                    width=case_w,
+                    height=case_h,
+                    case_type=case_type,
+                    viewport_name=vp_name,
+                    iteration=iter_idx + 1,
+                ))
+    
+    return units
 
 
 def shard_work_units(
@@ -64,231 +143,538 @@ def shard_work_units(
     shard_index: int,
     shard_count: int,
 ) -> List[WorkUnit]:
-    """Shard work units for distributed execution."""
-    if shard_count <= 1:
-        return units
+    """
+    Deterministically shard work units, keeping every iteration of a
+    (case, viewport) cell in ONE shard.
 
-    # Simple modulo-based sharding
-    return [u for i, u in enumerate(units) if i % shard_count == shard_index]
+    shard 0/4 gets cells 0, 4, 8, ...
+    shard 1/4 gets cells 1, 5, 9, ...
+
+    WHY CELLS AND NOT UNITS. This sharded by raw unit index until 2026-08-08,
+    which silently destroyed stability measurement the moment the scout started
+    running more than one iteration. Units are generated as consecutive
+    iterations of the same cell:
+
+        [c0-iter1, c0-iter2, c0-iter3, c1-iter1, c1-iter2, c1-iter3, ...]
+
+    so `i % 4` scattered a cell's three iterations across three different
+    shards. Each shard then aggregated one run per cell, `iteration_diffs`
+    came out length 1 everywhere, and `parity_aggregate` does not recombine
+    runs across shards — so no cell in a sharded run could ever show the
+    STABILITY_MIN_RUNS measured iterations the pr_merge gate requires.
+
+    The observed cost: the first PR after the stability bar tightened went red
+    with 22 of 26 cases `stability_unmeasured`. The four that passed were the
+    exploit phase's top cases, which happened to pick up 2 extra runs at their
+    own viewport and reach 3 by a route the scout was supposed to provide.
+    Tripling the scout bought exactly zero evidence and three times the wall
+    clock.
+
+    Balance is unchanged in practice: cells are still dealt round-robin, and
+    every cell carries the same iteration count, so shards differ by at most
+    one cell's worth of work.
+    """
+    cell_order: Dict[Tuple[str, str], int] = {}
+    for unit in units:
+        key = (unit.case_id, unit.viewport_name)
+        if key not in cell_order:
+            cell_order[key] = len(cell_order)
+    return [
+        u
+        for u in units
+        if cell_order[(u.case_id, u.viewport_name)] % shard_count == shard_index
+    ]
 
 
-def run_swarm(
-    scope: str = "all",
-    jobs: int = 4,
-    iterations: int = 3,
-    shard_index: int = 0,
-    shard_count: int = 1,
-    case_filter: Optional[List[str]] = None,
-    verbose: bool = False,
-    run_id: Optional[str] = None,
-    threshold: float = 25.0,
-) -> Dict:
-    """Run parity tests in parallel."""
-    # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_id = run_id or f"swarm_{timestamp}"
-    output_dir = RESULTS_DIR / run_id
-    output_dir.mkdir(parents=True, exist_ok=True)
+# ============================================================================
+# Worker process
+# ============================================================================
 
-    print("=" * 60)
-    print("Parity Swarm - Linux")
-    print("=" * 60)
-    print(f"Run ID: {run_id}")
-    print(f"Scope: {scope}")
-    print(f"Jobs: {jobs}")
-    print(f"Iterations: {iterations}")
-    if shard_count > 1:
-        print(f"Shard: {shard_index + 1}/{shard_count}")
-    print(f"Output: {output_dir}")
-    print()
+def worker_execute(args: Tuple[WorkUnit, str, Path]) -> CaseResult:
+    """Worker function for multiprocessing pool."""
+    work_unit, run_id, results_root = args
+    return execute_work_unit(work_unit, run_id, results_root)
 
-    # Ensure DISPLAY is set
-    ensure_display()
-    print(f"DISPLAY: {os.environ.get('DISPLAY', 'not set')}")
 
-    # Create work units
-    all_units = create_work_units(scope=scope, iterations=iterations, case_filter=case_filter)
+# ============================================================================
+# Scout-Exploit scheduler
+# ============================================================================
 
-    if not all_units:
-        print("No work units to process!")
-        return {"error": "No work units"}
+@dataclass
+class SwarmConfig:
+    """Configuration for swarm run."""
+    run_id: str
+    results_root: Path
+    jobs: int
+    scope: str
+    cases: Optional[List[str]]
+    viewports: Optional[List[str]]
+    iterations: int
+    exploit_top: int
+    exploit_iterations: int
+    exploit_viewports: List[str]
+    budget_minutes: Optional[int]
+    max_variance: float
+    dry_run: bool
 
-    # Apply sharding
-    units = shard_work_units(all_units, shard_index, shard_count)
-    print(f"Work units: {len(units)} (of {len(all_units)} total)")
-    print()
 
-    # Prepare work items
-    work_items = [(u, output_dir, verbose) for u in units]
-
-    # Execute in parallel
-    start_time = time.time()
-    all_results: Dict[str, List[CaseResult]] = {}
-
-    print("Running tests...")
-    print("-" * 60)
-
-    if jobs == 1:
+def run_scout_phase(
+    config: SwarmConfig,
+    units: List[WorkUnit],
+) -> Tuple[List[CaseResult], float]:
+    """
+    Scout phase: 1 iteration, 1 viewport per case.
+    Returns results and elapsed seconds.
+    """
+    print(f"\n{'='*60}")
+    print("SCOUT PHASE: Quick scan of all cases")
+    print(f"{'='*60}")
+    print(f"Work units: {len(units)}")
+    print(f"Workers: {config.jobs}")
+    
+    if config.dry_run:
+        print("[DRY RUN] Would execute:")
+        for u in units[:10]:
+            print(f"  - {u.case_id} @ {u.viewport_name} iter {u.iteration}")
+        if len(units) > 10:
+            print(f"  ... and {len(units) - 10} more")
+        return [], 0.0
+    
+    start = time.time()
+    
+    # Prepare args for pool
+    args = [(u, config.run_id, config.results_root) for u in units]
+    
+    results: List[CaseResult] = []
+    
+    if config.jobs == 1:
         # Sequential execution
-        for item in work_items:
-            case_id, results = worker_execute(item)
-            all_results[case_id] = results
-            agg = aggregate_results(results, threshold=threshold)
-            status = "+" if agg.passed else "x"
-            print(f"  {status} {case_id}: {agg.diff_pct_median:.2f}% (median)")
+        for i, arg in enumerate(args):
+            result = worker_execute(arg)
+            results.append(result)
+            status = "✓" if result.passed else "✗" if not result.error else "E"
+            print(f"  [{i+1}/{len(args)}] {result.case_id}: {status} {fmt_diff(result.diff_pct)}")
     else:
-        # Parallel execution using fork (default on Linux)
-        with mp.Pool(processes=jobs, initializer=worker_init) as pool:
-            for case_id, results in pool.imap_unordered(worker_execute, work_items):
-                all_results[case_id] = results
-                agg = aggregate_results(results, threshold=threshold)
-                status = "+" if agg.passed else "x"
-                print(f"  {status} {case_id}: {agg.diff_pct_median:.2f}% (median)")
+        # Parallel execution
+        with mp.Pool(processes=config.jobs) as pool:
+            for i, result in enumerate(pool.imap_unordered(worker_execute, args)):
+                results.append(result)
+                status = "✓" if result.passed else "✗" if not result.error else "E"
+                print(f"  [{i+1}/{len(args)}] {result.case_id}: {status} {fmt_diff(result.diff_pct)}")
+    
+    elapsed = time.time() - start
+    
+    # Summary
+    passed = sum(1 for r in results if r.passed)
+    errors = sum(1 for r in results if r.error)
+    # Average over MEASURED results only. `not r.error` already excludes
+    # refusals (they always carry an error), but the None-guard is explicit so
+    # a future path that sets diff_pct=None without an error cannot poison it.
+    # 65-G: max(1, 0) would make "nothing measured" read as 0.0 — perfect
+    # parity from zero evidence, the same lie as 65-B in a second place.
+    measured = [r.diff_pct for r in results if not r.error and r.diff_pct is not None]
+    avg_diff = (sum(measured) / len(measured)) if measured else None
+    
+    print(f"\nScout complete: {passed}/{len(results)} passed, {errors} errors")
+    print(f"Average diff: {fmt_diff(avg_diff)} ({len(measured)}/{len(results)} measured)")
+    print(f"Elapsed: {elapsed:.1f}s")
+    
+    return results, elapsed
 
-    elapsed = time.time() - start_time
-    print("-" * 60)
-    print(f"Completed in {elapsed:.1f}s")
-    print()
 
-    # Aggregate all results
-    aggregated: Dict[str, AggregatedResult] = {}
-    for case_id, results in all_results.items():
-        aggregated[case_id] = aggregate_results(results, threshold=threshold)
+def run_exploit_phase(
+    config: SwarmConfig,
+    scout_results: List[CaseResult],
+    time_remaining: Optional[float],
+) -> Tuple[List[CaseResult], float]:
+    """
+    Exploit phase: More iterations and viewports on worst cases.
+    Returns additional results and elapsed seconds.
+    """
+    # Rank cases by diff (worst first)
+    case_diffs: Dict[str, float] = {}
+    case_info: Dict[str, Tuple[str, str]] = {}  # case_id -> (html_path, case_type)
+    
+    for r in scout_results:
+        if not r.error and r.diff_pct is not None:
+            existing = case_diffs.get(r.case_id, float('inf'))
+            if r.diff_pct > existing or r.case_id not in case_diffs:
+                case_diffs[r.case_id] = r.diff_pct
+    
+    # Get case info
+    all_cases = get_all_cases()
+    for case_id in case_diffs:
+        if case_id in all_cases:
+            _, html, w, h, ctype = all_cases[case_id]
+            case_info[case_id] = (html, ctype)
+    
+    # Select top K worst
+    sorted_cases = sorted(case_diffs.items(), key=lambda x: -x[1])
+    exploit_cases = sorted_cases[:config.exploit_top]
+    
+    if not exploit_cases:
+        print("\nNo cases to exploit.")
+        return [], 0.0
+    
+    print(f"\n{'='*60}")
+    print(f"EXPLOIT PHASE: Deep dive on top {len(exploit_cases)} worst cases")
+    print(f"{'='*60}")
+    print("Target cases:")
+    for case_id, diff in exploit_cases:
+        print(f"  - {case_id}: {diff:.2f}%")
+    
+    # Generate exploit work units
+    exploit_units = []
+    for case_id, _ in exploit_cases:
+        if case_id not in case_info:
+            continue
+        html_path, case_type = case_info[case_id]
+        
+        # Multiple viewports
+        for vp_name in config.exploit_viewports:
+            vp = next((v for v in VIEWPORTS if v[2] == vp_name), None)
+            if not vp:
+                continue
+            vp_w, vp_h, _ = vp
+            
+            # Multiple iterations
+            for iter_idx in range(config.exploit_iterations):
+                exploit_units.append(WorkUnit(
+                    case_id=case_id,
+                    html_path=html_path,
+                    width=vp_w,
+                    height=vp_h,
+                    case_type=case_type,
+                    viewport_name=vp_name,
+                    iteration=iter_idx + 1,
+                ))
+    
+    print(f"Exploit work units: {len(exploit_units)}")
+    print(f"Viewports: {config.exploit_viewports}")
+    print(f"Iterations per viewport: {config.exploit_iterations}")
+    
+    if config.dry_run:
+        print("[DRY RUN] Would execute exploit units")
+        return [], 0.0
+    
+    start = time.time()
+    
+    # Prepare args for pool
+    args = [(u, config.run_id, config.results_root) for u in exploit_units]
+    
+    results: List[CaseResult] = []
+    
+    if config.jobs == 1:
+        for i, arg in enumerate(args):
+            result = worker_execute(arg)
+            results.append(result)
+            status = "✓" if result.passed else "✗" if not result.error else "E"
+            print(f"  [{i+1}/{len(args)}] {result.case_id}@{result.viewport}: {status} {fmt_diff(result.diff_pct)}")
+    else:
+        with mp.Pool(processes=config.jobs) as pool:
+            for i, result in enumerate(pool.imap_unordered(worker_execute, args)):
+                results.append(result)
+                status = "✓" if result.passed else "✗" if not result.error else "E"
+                print(f"  [{i+1}/{len(args)}] {result.case_id}@{result.viewport}: {status} {fmt_diff(result.diff_pct)}")
+    
+    elapsed = time.time() - start
+    print(f"\nExploit complete. Elapsed: {elapsed:.1f}s")
+    
+    return results, elapsed
 
-    # Calculate summary statistics
-    passed = sum(1 for a in aggregated.values() if a.passed)
-    failed = len(aggregated) - passed
-    avg_diff = sum(a.diff_pct_median for a in aggregated.values()) / len(aggregated) if aggregated else 100.0
-    stable_count = sum(1 for a in aggregated.values() if a.stable)
 
-    # Build report
-    report = {
-        "run_id": run_id,
+# ============================================================================
+# Result aggregation and output
+# ============================================================================
+
+def aggregate_swarm_results(
+    scout_results: List[CaseResult],
+    exploit_results: List[CaseResult],
+    config: SwarmConfig,
+) -> Dict[str, Any]:
+    """
+    Aggregate all results into final report.
+    
+    Groups by (case_id, viewport) and computes stats.
+    """
+    all_results = scout_results + exploit_results
+    
+    # Group by (case_id, viewport)
+    groups: Dict[Tuple[str, str], List[CaseResult]] = defaultdict(list)
+    for r in all_results:
+        key = (r.case_id, r.viewport)
+        groups[key].append(r)
+    
+    # Aggregate each group
+    aggregated: List[Dict[str, Any]] = []
+    for (case_id, viewport), results in groups.items():
+        agg = aggregate_iterations(results, config.max_variance)
+        aggregated.append(aggregated_to_dict(agg))
+    
+    # Sort worst-first, unmeasured leading. Unary minus on an Optional raises,
+    # and a cell nobody measured needs attention before any number does — the
+    # same ordering parity_aggregate._worst_first uses.
+    aggregated.sort(key=lambda x: (x["diff_pct_median"] is not None,
+                                   -(x["diff_pct_median"] or 0.0)))
+
+    # Global stats over MEASURED cells only.
+    all_diffs = [a["diff_pct_median"] for a in aggregated
+                 if a["diff_pct_median"] is not None]
+    passed = sum(1 for a in aggregated if a["passed"])
+    stable = sum(1 for a in aggregated if a.get("stable", False))
+    
+    # Global taxonomy (sum contributions across cases)
+    global_taxonomy: Dict[str, float] = defaultdict(float)
+    for a in aggregated:
+        if a.get("best_taxonomy"):
+            for bucket, pct in a["best_taxonomy"].items():
+                global_taxonomy[bucket] += pct
+    
+    # Normalize taxonomy
+    total_tax = sum(global_taxonomy.values())
+    if total_tax > 0:
+        global_taxonomy = {k: (v / total_tax) * 100 for k, v in global_taxonomy.items()}
+    
+    return {
+        "run_id": config.run_id,
         "timestamp": datetime.now().isoformat(),
-        "platform": "linux",
-        "scope": scope,
-        "shard_index": shard_index,
-        "shard_count": shard_count,
-        "iterations": iterations,
-        "threshold": threshold,
-        "elapsed_seconds": elapsed,
-        "summary": {
-            "total": len(aggregated),
-            "passed": passed,
-            "failed": failed,
-            "stable": stable_count,
-            "avg_diff_pct": avg_diff,
-            "pass_rate": passed / len(aggregated) * 100 if aggregated else 0,
+        "config": {
+            "scope": config.scope,
+            "jobs": config.jobs,
+            "scout_iterations": config.iterations,
+            "exploit_top": config.exploit_top,
+            "exploit_iterations": config.exploit_iterations,
+            "exploit_viewports": config.exploit_viewports,
+            "max_variance": config.max_variance,
         },
-        "results": [asdict(a) for a in aggregated.values()],
+        "summary": {
+            "total_cases": len(aggregated),
+            "passed": passed,
+            "failed": len(aggregated) - passed,
+            "stable": stable,
+            # `else 100` published a total mismatch for a run that measured
+            # NOTHING — the decorative lie this whole change set removes,
+            # surviving one function past where it was fixed. No measurements
+            # means no statistics.
+            "measured_cases": len(all_diffs),
+            "not_measured_cases": len(aggregated) - len(all_diffs),
+            "avg_diff_pct": (sum(all_diffs) / len(all_diffs)) if all_diffs else None,
+            "min_diff_pct": min(all_diffs) if all_diffs else None,
+            "max_diff_pct": max(all_diffs) if all_diffs else None,
+        },
+        "global_taxonomy": dict(sorted(global_taxonomy.items(), key=lambda x: -x[1])),
+        "results": aggregated,
+        "raw_results": {
+            "scout": [result_to_dict(r) for r in scout_results],
+            "exploit": [result_to_dict(r) for r in exploit_results],
+        },
     }
 
-    # Save report
-    report_path = output_dir / "swarm_report.json"
+
+def save_results(report: Dict[str, Any], config: SwarmConfig) -> Path:
+    """Save final report to run directory."""
+    run_dir = config.results_root / config.run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    report_path = run_dir / "swarm_report.json"
     with open(report_path, "w") as f:
-        json.dump(report, f, indent=2, default=str)
+        json.dump(report, f, indent=2)
+    
+    # Also save a summary for quick viewing
+    summary_path = run_dir / "summary.txt"
+    with open(summary_path, "w") as f:
+        s = report["summary"]
+        f.write(f"Parity Swarm Report: {config.run_id}\n")
+        f.write(f"{'='*50}\n\n")
+        f.write(f"Passed: {s['passed']}/{s['total_cases']}\n")
+        f.write(f"Average Diff: {fmt_diff(s['avg_diff_pct'])}\n")
+        f.write(f"Stable: {s['stable']}\n\n")
+        f.write("Top Taxonomy Buckets:\n")
+        for bucket, pct in list(report["global_taxonomy"].items())[:5]:
+            f.write(f"  {bucket}: {pct:.1f}%\n")
+        f.write("\nWorst Cases:\n")
+        for r in report["results"][:10]:
+            f.write(f"  {r['case_id']}@{r['viewport']}: {fmt_diff(r['diff_pct_median'])}\n")
+    
+    return report_path
 
-    # Print summary
-    print("=" * 60)
-    print("Summary")
-    print("=" * 60)
-    print(f"Total: {len(aggregated)}")
-    print(f"Passed: {passed} ({passed / len(aggregated) * 100:.1f}%)" if aggregated else "Passed: 0")
-    print(f"Failed: {failed}")
-    print(f"Stable: {stable_count}")
-    print(f"Average Diff: {avg_diff:.2f}%")
-    print()
-    print(f"Report saved to: {report_path}")
 
-    # List failures
-    failures = [a for a in aggregated.values() if not a.passed]
-    if failures:
-        print()
-        print("Failed cases:")
-        for f in sorted(failures, key=lambda x: -x.diff_pct_median):
-            print(f"  x {f.case_id}: {f.diff_pct_median:.2f}%")
-            if f.error:
-                print(f"      Error: {f.error}")
-
-    return report
-
+# ============================================================================
+# Main
+# ============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Parallel parity test execution for Linux"
+        description="Swarm parity testing with parallel/sharded execution",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
     )
-    parser.add_argument(
-        "--scope",
-        choices=["all", "builtins", "websuite", "micro"],
-        default="all",
-        help="Test scope (default: all)",
-    )
-    parser.add_argument(
-        "--jobs", "-j",
-        type=int,
-        default=4,
-        help="Number of parallel jobs (default: 4)",
-    )
-    parser.add_argument(
-        "--iterations", "-n",
-        type=int,
-        default=3,
-        help="Iterations per case (default: 3)",
-    )
-    parser.add_argument(
-        "--shard-index",
-        type=int,
-        default=0,
-        help="Shard index for distributed runs (default: 0)",
-    )
-    parser.add_argument(
-        "--shard-count",
-        type=int,
-        default=1,
-        help="Total shard count (default: 1)",
-    )
-    parser.add_argument(
-        "--cases",
-        type=str,
-        help="Comma-separated list of specific cases to run",
-    )
-    parser.add_argument(
-        "--run-id",
-        type=str,
-        help="Custom run identifier",
-    )
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=25.0,
-        help="Pass threshold percentage (default: 25.0)",
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Verbose output",
-    )
-
+    
+    # Execution mode
+    parser.add_argument("--jobs", "-j", type=int, default=1,
+                        help="Number of parallel workers (default: 1)")
+    parser.add_argument("--shard-index", type=int, default=None,
+                        help="Shard index for CI distribution (0-based)")
+    parser.add_argument("--shard-count", type=int, default=None,
+                        help="Total number of shards")
+    
+    # Scope
+    parser.add_argument("--scope", type=str, default="all",
+                        choices=["all", "builtins", "websuite", "micro"],
+                        help="Test scope (default: all)")
+    parser.add_argument("--cases", type=str, default=None,
+                        help="Comma-separated list of specific cases")
+    parser.add_argument("--viewports", type=str, default=None,
+                        help="Comma-separated viewports (e.g., 800x600,1280x800)")
+    
+    # Scout phase
+    parser.add_argument("--iterations", type=int, default=1,
+                        help="Scout iterations per case (default: 1)")
+    
+    # Exploit phase
+    parser.add_argument("--exploit-top", type=int, default=0,
+                        help="Exploit top N worst cases after scout (default: 0 = no exploit)")
+    parser.add_argument("--exploit-iterations", type=int, default=3,
+                        help="Iterations per exploit case (default: 3)")
+    parser.add_argument("--exploit-viewports", type=str, default="800x600,1280x800,1920x1080",
+                        help="Viewports for exploit phase")
+    
+    # Budget
+    parser.add_argument("--budget-minutes", type=int, default=None,
+                        help="Time budget in minutes (best effort)")
+    
+    # Stability
+    parser.add_argument("--max-variance", type=float, default=0.10,
+                        help="Max variance for stability (default: 0.10)")
+    
+    # Output
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Results root directory")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Custom run ID (default: auto-generated)")
+    
+    # Other
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print planned work without executing")
+    parser.add_argument("--skip-build", action="store_true",
+                        help="Skip building parity-capture")
+    
     args = parser.parse_args()
-
-    case_filter = args.cases.split(",") if args.cases else None
-
-    report = run_swarm(
-        scope=args.scope,
+    
+    # Validate sharding
+    if (args.shard_index is None) != (args.shard_count is None):
+        parser.error("--shard-index and --shard-count must be used together")
+    
+    # Build config
+    run_id = args.run_id or generate_run_id()
+    results_root = Path(args.output_dir) if args.output_dir else DEFAULT_RESULTS_ROOT
+    
+    config = SwarmConfig(
+        run_id=run_id,
+        results_root=results_root,
         jobs=args.jobs,
+        scope=args.scope,
+        cases=args.cases.split(",") if args.cases else None,
+        viewports=args.viewports.split(",") if args.viewports else None,
         iterations=args.iterations,
-        shard_index=args.shard_index,
-        shard_count=args.shard_count,
-        case_filter=case_filter,
-        verbose=args.verbose,
-        run_id=args.run_id,
-        threshold=args.threshold,
+        exploit_top=args.exploit_top,
+        exploit_iterations=args.exploit_iterations,
+        exploit_viewports=args.exploit_viewports.split(","),
+        budget_minutes=args.budget_minutes,
+        max_variance=args.max_variance,
+        dry_run=args.dry_run,
     )
+    
+    print("=" * 60)
+    print("PARITY SWARM")
+    print("=" * 60)
+    print(f"Run ID: {config.run_id}")
+    print(f"Results: {config.results_root / config.run_id}")
+    print(f"Workers: {config.jobs}")
+    print(f"Scope: {config.scope}")
+    if args.shard_index is not None:
+        print(f"Shard: {args.shard_index + 1}/{args.shard_count}")
+    print(f"Timestamp: {datetime.now().isoformat()}")
+    
+    # Build parity-capture
+    if not args.dry_run and not args.skip_build:
+        print("\nBuilding parity-capture...")
+        if not ensure_parity_capture_built():
+            print("ERROR: Failed to build parity-capture")
+            sys.exit(1)
+        print("Build complete.")
+    
+    # Generate work units
+    all_units = generate_work_units(
+        scope=config.scope,
+        cases=config.cases,
+        viewports=config.viewports,
+        iterations=config.iterations,
+    )
+    
+    # Apply sharding if specified
+    if args.shard_index is not None:
+        all_units = shard_work_units(all_units, args.shard_index, args.shard_count)
+        print(f"\nShard {args.shard_index + 1}/{args.shard_count}: {len(all_units)} units")
+    
+    if not all_units:
+        print("\nNo work units to execute.")
+        sys.exit(0)
+    
+    # Run scout phase
+    start_time = time.time()
+    scout_results, scout_elapsed = run_scout_phase(config, all_units)
+    
+    # Run exploit phase if configured
+    exploit_results: List[CaseResult] = []
+    if config.exploit_top > 0 and scout_results:
+        time_remaining = None
+        if config.budget_minutes:
+            time_remaining = (config.budget_minutes * 60) - scout_elapsed
+            if time_remaining < 60:
+                print(f"\nSkipping exploit phase: only {time_remaining:.0f}s remaining")
+            else:
+                exploit_results, _ = run_exploit_phase(config, scout_results, time_remaining)
+        else:
+            exploit_results, _ = run_exploit_phase(config, scout_results, None)
+    
+    total_elapsed = time.time() - start_time
+    
+    # Aggregate and save
+    if not config.dry_run:
+        report = aggregate_swarm_results(scout_results, exploit_results, config)
+        report["elapsed_seconds"] = total_elapsed
+        report_path = save_results(report, config)
+        
+        # Final summary
+        print("\n" + "=" * 60)
+        print("FINAL SUMMARY")
+        print("=" * 60)
+        s = report["summary"]
+        print(f"Total cases: {s['total_cases']}")
+        print(f"Passed: {s['passed']}/{s['total_cases']} ({100*s['passed']/max(1,s['total_cases']):.1f}%)")
+        print(f"Average diff: {fmt_diff(s['avg_diff_pct'])}")
+        print(f"Stable: {s['stable']}")
+        print(f"\nTotal elapsed: {total_elapsed:.1f}s ({total_elapsed/60:.1f}m)")
+        print(f"\nReport saved to: {report_path}")
+        
+        # Show worst cases
+        print("\nWorst 5 cases:")
+        for r in report["results"][:5]:
+            stable_str = " (stable)" if r.get("stable") else ""
+            print(f"  {r['case_id']}@{r['viewport']}: {fmt_diff(r['diff_pct_median'])}{stable_str}")
+        
+        # Show taxonomy
+        if report["global_taxonomy"]:
+            print("\nGlobal taxonomy:")
+            for bucket, pct in list(report["global_taxonomy"].items())[:5]:
+                print(f"  {bucket}: {pct:.1f}%")
 
-    # Exit with error code if any failures
-    if report.get("summary", {}).get("failed", 0) > 0:
-        sys.exit(1)
+    # Always exit 0 - let parity_gate.py handle pass/fail decisions
+    sys.exit(0)
 
 
 if __name__ == "__main__":
+    # Required for multiprocessing on macOS
+    mp.set_start_method("spawn", force=True)
     main()

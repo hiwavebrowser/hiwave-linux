@@ -10,33 +10,73 @@ use rustkit_net::{LoaderConfig, ResourceLoader};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use url::Url;
 
 pub(crate) struct Server {
     pub(crate) port: u16,
     pub(crate) hits: Arc<AtomicUsize>,
+    /// Every request in arrival order: its path, when it arrived, and when
+    /// its answer was written.
+    pub(crate) requests: Arc<Mutex<Vec<ServedRequest>>>,
 }
 
-/// `/echo` answers with the request body, `/slow*` after 300 ms, anything
-/// else with its own path as the body.
+#[derive(Debug, Clone)]
+pub(crate) struct ServedRequest {
+    pub(crate) path: String,
+    pub(crate) arrived: Instant,
+    pub(crate) answered: Option<Instant>,
+    /// `answered` on the wall clock, to compare with a page's `Date.now()`.
+    pub(crate) answered_wall: Option<std::time::SystemTime>,
+}
+
+impl Server {
+    /// The requests for `path`, in arrival order.
+    pub(crate) fn served(&self, path: &str) -> Vec<ServedRequest> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.path == path)
+            .cloned()
+            .collect()
+    }
+}
+
+/// `/echo` answers with the request body, `/slow*` after 300 ms, `/beacon*`
+/// after 2 s, anything with `delay=<ms>` in its query after that long,
+/// anything else with its own path as the body.
 fn serve() -> Server {
     serve_routes(Vec::new())
 }
 
 /// `serve`, plus fixed `routes` (path, content type, body) that take
-/// precedence.
+/// precedence. A route whose path starts with `/held` answers after
+/// 300 ms.
 pub(crate) fn serve_routes(routes: Vec<(&'static str, &'static str, String)>) -> Server {
+    serve_byte_routes(
+        routes
+            .into_iter()
+            .map(|(path, content_type, body)| (path, content_type, body.into_bytes()))
+            .collect(),
+    )
+}
+
+/// [`serve_routes`] with bodies that need not be text (images).
+pub(crate) fn serve_byte_routes(routes: Vec<(&'static str, &'static str, Vec<u8>)>) -> Server {
     let routes = Arc::new(routes);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let hits = Arc::new(AtomicUsize::new(0));
     let counted = hits.clone();
+    let requests: Arc<Mutex<Vec<ServedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let logged = requests.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
             let counted = counted.clone();
+            let logged = logged.clone();
             let routes = routes.clone();
             std::thread::spawn(move || {
                 let mut request = Vec::new();
@@ -53,6 +93,11 @@ pub(crate) fn serve_routes(routes: Vec<(&'static str, &'static str, String)>) ->
                 counted.fetch_add(1, Ordering::SeqCst);
                 let head = String::from_utf8_lossy(&request[..header_end]).to_string();
                 let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let entry = {
+                    let mut log = logged.lock().unwrap();
+                    log.push(ServedRequest { path: path.clone(), arrived: Instant::now(), answered: None, answered_wall: None });
+                    log.len() - 1
+                };
                 let length = head
                     .lines()
                     .find_map(|l| {
@@ -68,29 +113,57 @@ pub(crate) fn serve_routes(routes: Vec<(&'static str, &'static str, String)>) ->
                     }
                 }
                 let fixed = routes.iter().find(|(p, _, _)| *p == path);
+                // A fixed route can be slow too: `/held...`.
+                if path.starts_with("/held") {
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                // Any path with `delay=<ms>` in its query answers that late.
+                if let Some(ms) = path
+                    .split_once('?')
+                    .and_then(|(_, query)| query.split('&').find_map(|kv| kv.strip_prefix("delay=")))
+                    .and_then(|ms| ms.parse::<u64>().ok())
+                {
+                    std::thread::sleep(Duration::from_millis(ms));
+                }
                 let content_type = fixed.map(|(_, ct, _)| *ct).unwrap_or("text/plain");
                 let body = if let Some((_, _, body)) = fixed {
-                    body.clone().into_bytes()
+                    body.clone()
                 } else if path == "/echo" {
                     request[header_end..].to_vec()
                 } else {
                     if path.starts_with("/slow") {
                         std::thread::sleep(Duration::from_millis(300));
                     }
+                    if path.starts_with("/beacon") {
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
                     path.clone().into_bytes()
                 };
                 // `/missing...` is a 404, for the failure cases.
                 let status = if fixed.is_none() && path.starts_with("/missing") { "404 Not Found" } else { "200 OK" };
+                // `/redir_<name>` is a 302 to `/<name>`, for the redirect cases.
+                let location = path.strip_prefix("/redir_").filter(|_| fixed.is_none());
+                let (status, body) = match location {
+                    Some(_) => ("302 Found", Vec::new()),
+                    None => (status, body),
+                };
+                let location = location.map(|to| format!("Location: /{to}\r\n")).unwrap_or_default();
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\n{location}Content-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(&body);
+                let _ = stream.flush();
+                {
+                    let mut log = logged.lock().unwrap();
+                    log[entry].answered = Some(Instant::now());
+                    log[entry].answered_wall = Some(std::time::SystemTime::now());
+                }
             });
         }
     });
-    Server { port, hits }
+    Server { port, hits, requests }
 }
 
 struct Rig {
@@ -106,6 +179,9 @@ fn rig() -> Rig {
     let server = serve();
     let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
     bindings.enable_net_bridge().unwrap();
+    // The bridge for these tests' page script (the engine keeps it on the
+    // host object, out of any page's reach).
+    bindings.host_turn("window.__net = __rk.net; return 0;", &[]).unwrap();
     Rig {
         policy: FetchPolicy::for_page(
             Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap(),
@@ -140,6 +216,8 @@ impl Rig {
             tokio::time::Instant::now() + within,
             rounds,
             None,
+            &crate::inspector::Inspector::new(&Default::default()),
+            false,
         ))
     }
 
@@ -152,7 +230,7 @@ impl Rig {
 fn a_same_origin_request_is_fetched_under_the_policy_and_delivered() {
     let rig = rig();
     rig.js(&format!(
-        "var got; window.__rustkit_net.request({{ url: '{}', destination: 'xhr' }}, function (r) {{ got = r; }});",
+        "var got; window.__net.request({{ url: '{}', destination: 'xhr' }}, function (r) {{ got = r; }});",
         rig.url("/hello")
     ));
     let found = rig.pump(8, Duration::from_secs(10));
@@ -169,7 +247,7 @@ fn a_request_body_survives_both_directions_as_bytes() {
     let rig = rig();
     // "hi", a NUL and a non-UTF-8 byte.
     rig.js(&format!(
-        "var got; window.__rustkit_net.request({{ method: 'POST', url: '{}', body_b64: 'aGkA/w==' }}, function (r) {{ got = r; }});",
+        "var got; window.__net.request({{ method: 'POST', url: '{}', body_b64: 'aGkA/w==' }}, function (r) {{ got = r; }});",
         rig.url("/echo")
     ));
     rig.pump(8, Duration::from_secs(10));
@@ -184,10 +262,10 @@ fn a_denied_request_is_a_generic_network_error_and_never_connects() {
     // Another private address than the page's own: refused before connect.
     rig.js(&format!(
         "var log = []; \
-         window.__rustkit_net.request({{ url: 'http://127.0.0.2:{}/secret' }}, function (r) {{ log.push(r.ok + ':' + r.error); }}); \
-         window.__rustkit_net.request({{ url: 'http://10.0.0.1:9/' }}, function (r) {{ log.push(r.ok + ':' + r.error); }}); \
-         window.__rustkit_net.request({{ url: 'ftp://127.0.0.1/' }}, function (r) {{ log.push(r.ok + ':' + r.error); }}); \
-         window.__rustkit_net.request({{ method: 'NOT A METHOD', url: '{}' }}, function (r) {{ log.push(r.ok + ':' + r.error); }});",
+         window.__net.request({{ url: 'http://127.0.0.2:{}/secret' }}, function (r) {{ log.push(r.ok + ':' + r.error); }}); \
+         window.__net.request({{ url: 'http://10.0.0.1:9/' }}, function (r) {{ log.push(r.ok + ':' + r.error); }}); \
+         window.__net.request({{ url: 'ftp://127.0.0.1/' }}, function (r) {{ log.push(r.ok + ':' + r.error); }}); \
+         window.__net.request({{ method: 'NOT A METHOD', url: '{}' }}, function (r) {{ log.push(r.ok + ':' + r.error); }});",
         rig.port,
         rig.url("/x")
     ));
@@ -206,9 +284,9 @@ fn deliveries_follow_request_order_not_completion_order() {
     let rig = rig();
     rig.js(&format!(
         "var order = []; \
-         window.__rustkit_net.request({{ url: '{}' }}, function () {{ order.push('slow'); }}); \
-         window.__rustkit_net.request({{ url: '{}' }}, function () {{ order.push('fast1'); }}); \
-         window.__rustkit_net.request({{ url: '{}' }}, function () {{ order.push('fast2'); }});",
+         window.__net.request({{ url: '{}' }}, function () {{ order.push('slow'); }}); \
+         window.__net.request({{ url: '{}' }}, function () {{ order.push('fast1'); }}); \
+         window.__net.request({{ url: '{}' }}, function () {{ order.push('fast2'); }});",
         rig.url("/slow"),
         rig.url("/a"),
         rig.url("/b")
@@ -219,7 +297,7 @@ fn deliveries_follow_request_order_not_completion_order() {
 
 const CHAIN: &str = "var path = []; \
      function next(n) {{ \
-         window.__rustkit_net.request({{ url: '{base}/step' + n }}, function (r) {{ \
+         window.__net.request({{ url: '{base}/step' + n }}, function (r) {{ \
              path.push(r.ok ? 'ok' + n : 'err' + n); \
              if (n < {last}) next(n + 1); \
          }}); \
@@ -268,7 +346,7 @@ fn what_outlasts_the_rounds_completes_with_an_error() {
 fn a_retry_loop_on_failure_cannot_hold_the_pump() {
     let rig = rig();
     rig.js(&format!(
-        "var failures = 0;          function again() {{              window.__rustkit_net.request({{ url: '{}' }}, function (r) {{ if (!r.ok) {{ failures++; again(); }} }});          }}          again();",
+        "var failures = 0;          function again() {{              window.__net.request({{ url: '{}' }}, function (r) {{ if (!r.ok) {{ failures++; again(); }} }});          }}          again();",
         rig.url("/never")
     ));
     let found = rig.pump(0, Duration::from_secs(10));
@@ -284,7 +362,7 @@ fn a_retry_loop_on_failure_cannot_hold_the_pump() {
 fn with_no_budget_nothing_is_fetched_and_everything_fails() {
     let rig = rig();
     rig.js(&format!(
-        "var log = []; window.__rustkit_net.request({{ url: '{}' }}, function (r) {{ log.push(r.ok + ':' + r.error); }});",
+        "var log = []; window.__net.request({{ url: '{}' }}, function (r) {{ log.push(r.ok + ':' + r.error); }});",
         rig.url("/late")
     ));
     let found = rig.pump(8, Duration::ZERO);
@@ -305,6 +383,27 @@ fn a_page_without_the_bridge_has_no_requests() {
         tokio::time::Instant::now() + Duration::from_secs(1),
         8,
         None,
+        &crate::inspector::Inspector::new(&Default::default()),
+        false,
     ));
     assert_eq!((found.requests, found.rounds, found.poisoned), (0, 0, false));
+}
+
+/// #730 follow-up (f), Prometheus NIT: a stopped `load` listener marked the
+/// last record with the same URL. Two inserts of one URL could swap: the
+/// first element's stop landed on the second element's run.
+#[test]
+fn a_stopped_listener_marks_its_own_scripts_record_not_another_with_the_same_url() {
+    use crate::script_net::mark_listener_stopped;
+    use crate::{ScriptOutcome, ScriptRecord};
+    let run = |source: &str| ScriptRecord { source: source.into(), bytes: 1, elapsed_ms: 1, outcome: ScriptOutcome::Ran };
+    let mut out = Pump::default();
+    out.records.push(run("https://a.test/x.js"));
+    out.records.push(run("https://a.test/x.js"));
+    mark_listener_stopped(&mut out, Some(0), "https://a.test/x.js".into());
+    assert_eq!(out.records[0].outcome, ScriptOutcome::OverBudget, "the first element's record");
+    assert_eq!(out.records[1].outcome, ScriptOutcome::Ran, "the second element's run was marked");
+    mark_listener_stopped(&mut out, None, "https://a.test/x.js".into());
+    assert_eq!(out.records.len(), 3, "an event owed to a later turn adds its own record");
+    assert_eq!(out.records[1].outcome, ScriptOutcome::Ran);
 }

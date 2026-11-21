@@ -10,16 +10,29 @@ implements them):
                colour).
   READABLE     >= 80% of the distinct words Chrome shows in the first
                viewport appear in RustKit's first-viewport text runs.
-  LOOKS RIGHT  first-viewport pixel diff vs Chrome <= 15%. If Chrome vs
-               Chrome for the site already exceeds 15% in the same run, the
+  LOOKS RIGHT  first-viewport pixel diff vs Chrome <= 20% (LOOKS_RIGHT_MAX;
+               15% until 2026-11-06). If Chrome vs Chrome for the site
+               already exceeds that bound in the same run, the
                check is scored "unstable" (0 points, reported separately).
+
+The Chrome oracle runs headless by default. Headed, off-screen (A1) is opt-in
+with --oracle-headed (or REALSITE_ORACLE_HEADED=1): it needs the seat idle for
+>= 600 s (else it falls back to headless and says why) and holds
+~/.claude/realwindow.lock for the run (waits up to --oracle-lock-wait s, then
+stops with ORACLE BLOCKED rather than run unlocked). --oracle-headless is
+still accepted and always wins. A Chrome capture that landed on Chrome's own error page or a
+top-level HTTP >= 400 document is `oracle_blocked`: it is no oracle, so
+READABLE and LOOKS RIGHT are oracle failures for that site, the summary names
+it, and SCORABLE n/m (A2) leaves it out. /60 itself is unchanged.
 
 Writes trench/realsite/runs/<ts>/<site>.json and summary.json, prints a
 one-screen table. Exits 0 even when sites fail; non-zero only when the
-instrument itself is broken (no Chrome, no parity-capture, no node).
+instrument itself is broken (no Chrome, no parity-capture, no node) or a
+requested headed oracle could not get the real-window lock.
 
-  python3 scripts/realsite_board.py                 # all sites
+  python3 scripts/realsite_board.py                 # all sites, headless oracle
   python3 scripts/realsite_board.py --site google   # one site (repeatable)
+  python3 scripts/realsite_board.py --oracle-headed # headed oracle (idle seat + lock)
 """
 
 import argparse
@@ -27,6 +40,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -48,8 +62,17 @@ PINNED_CHROME_VERSION = "148.0.7778.216"
 LOAD_TIMEOUT_MS = 30000
 BLANK_MIN_FRACTION = 0.02
 READABLE_MIN = 0.80
-LOOKS_RIGHT_MAX = 15.0
+# Pete 2026-11-06: "raise the real site board to 20% looks right for now"
+# (was 15 % since T1). docs/GATES.md lists every gate.
+LOOKS_RIGHT_MAX = 20.0
 CHROME_SETTLE_MS = 5000
+
+# Real-window lock (agent-briefs common.md, 11-05/11-06): anything that puts a
+# real window on the seat holds it; a headed oracle is such a window.
+REALWINDOW_LOCK = Path.home() / ".claude" / "realwindow.lock"
+REALWINDOW_LOCK_WAIT_S = 1200
+REALWINDOW_LOCK_POLL_S = 5.0
+HEADED_MIN_IDLE_S = 600
 
 WORD_RE = re.compile(r"\w+", re.UNICODE)
 
@@ -359,7 +382,18 @@ def fmt_row(r):
         r["id"], mark(r["loads"]), mark(rd), ratio, mark(lk), diff, noise, r["points"], why[:60])
 
 
-def summarize(rows, ts, width, height, all_ids):
+def settle_cut_short(rows):
+    """Sites whose RustKit capture stopped its settle at the real-time budget (parity-capture's
+    `settle_stats.cut_short`): how far the page's virtual time got depends on the machine's speed, so
+    these captures are not comparable run to run. Named in the summary; scores are unchanged."""
+    return [r["id"] for r in rows
+            if ((r.get("rustkit") or {}).get("settle_stats") or {}).get("cut_short")]
+
+
+def summarize(rows, ts, width, height, all_ids, oracle=None):
+    caps = [c for r in rows for c in r["chrome"] if "oracle_headless" in c]
+    headless = (all(c["oracle_headless"] for c in caps) if caps
+                else not (oracle and oracle.headed_any))
     summary = {
         "ts": ts,
         "chrome": PINNED_CHROME_VERSION,
@@ -380,6 +414,7 @@ def summarize(rows, ts, width, height, all_ids):
         "blocked": {r["id"]: "%s/%s" % (r["access"]["vendor"], r["access"]["status"])
                     for r in rows if r["access"]["blocked"]},
         "per_site": {r["id"]: r["points"] for r in rows},
+        "settle_cut_short": settle_cut_short(rows),
     }
     # n/scorable (PLAN A2): points on the sites the board can score at all,
     # i.e. neither RustKit's access probe nor Chrome's oracle was blocked.
@@ -495,6 +530,8 @@ def main():
         summary["looks_right"], ", ".join(summary["looks_right_unstable"]) or "none",
         ", ".join(summary["oracle_failed"]) or "none"))
     print("BLOCKED %s" % (", ".join("%s (%s)" % kv for kv in summary["blocked"].items()) or "none"))
+    print("SETTLE CUT SHORT %s" % (", ".join(summary["settle_cut_short"]) or "none")
+          + ("   (timing-bound: not comparable run to run)" if summary["settle_cut_short"] else ""))
     print("ORACLE BLOCKED %s" % (
         ", ".join("%s (%s)" % kv for kv in summary["oracle_blocked"].items()) or "none"))
     print("SCORABLE %d/%d on %d sites" % (

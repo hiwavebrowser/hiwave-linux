@@ -36,10 +36,10 @@ fn intl_is_an_object_with_its_constructors() {
             &b,
             "[typeof Intl, Object.prototype.toString.call(Intl), typeof Intl.NumberFormat, \
               typeof Intl.DateTimeFormat, typeof Intl.PluralRules, typeof Intl.Collator, \
-              typeof Intl.ListFormat, typeof Intl.RelativeTimeFormat, \
+              typeof Intl.ListFormat, typeof Intl.RelativeTimeFormat, typeof Intl.Segmenter, \
               typeof Intl.getCanonicalLocales].join(',')"
         ),
-        "object,[object Intl],function,function,function,function,function,function,function"
+        "object,[object Intl],function,function,function,function,function,function,function,function"
     );
 }
 
@@ -491,5 +491,182 @@ fn canonical_locales_and_supported_locales_of() {
             "var t; try { Intl.getCanonicalLocales('en_US'); t = 'no throw'; } catch (e) { t = e.name; } t"
         ),
         "RangeError"
+    );
+}
+
+#[test]
+fn intl_segmenter_grapheme_word_and_sentence() {
+    let b = bindings();
+    assert_eq!(
+        ev(
+            &b,
+            "[typeof Intl.Segmenter, typeof Intl.Segmenter.supportedLocalesOf].join(',')"
+        ),
+        "function,function"
+    );
+    // resolvedOptions default
+    assert_eq!(
+        ev(
+            &b,
+            "var s = new Intl.Segmenter('en-US'); \
+             var o = s.resolvedOptions(); \
+             [o.locale, o.granularity].join(',')"
+        ),
+        "en-US,grapheme"
+    );
+    // options granularity
+    assert_eq!(
+        ev(
+            &b,
+            "var s = new Intl.Segmenter('en-US', { granularity: 'word' }); \
+             s.resolvedOptions().granularity"
+        ),
+        "word"
+    );
+    // invalid granularity throws RangeError
+    assert_eq!(
+        ev(
+            &b,
+            "var t; try { new Intl.Segmenter('en', { granularity: 'invalid' }); t = 'no throw'; } \
+             catch (e) { t = e.name; } t"
+        ),
+        "RangeError"
+    );
+    // segment iterating graphemes
+    assert_eq!(
+        ev(
+            &b,
+            "var seg = new Intl.Segmenter('en', { granularity: 'grapheme' }); \
+             var res = []; \
+             for (var item of seg.segment('Hello!')) { \
+                 res.push(item.segment + '@' + item.index + '@' + (typeof item.isWordLike)); \
+             } \
+             res.join('|')"
+        ),
+        "H@0@undefined|e@1@undefined|l@2@undefined|l@3@undefined|o@4@undefined|!@5@undefined"
+    );
+    // segment iterating words with isWordLike
+    assert_eq!(
+        ev(
+            &b,
+            "var seg = new Intl.Segmenter('en', { granularity: 'word' }); \
+             var res = []; \
+             for (var item of seg.segment('Hello, world!')) { \
+                 res.push(item.segment + ':' + item.isWordLike + '@' + item.index); \
+             } \
+             res.join('|')"
+        ),
+        "Hello:true@0|,:false@5| :false@6|world:true@7|!:false@12"
+    );
+    // containing(index)
+    assert_eq!(
+        ev(
+            &b,
+            "var seg = new Intl.Segmenter('en', { granularity: 'word' }); \
+             var segments = seg.segment('Hello world'); \
+             var c = segments.containing(7); \
+             [c.segment, c.index, c.isWordLike].join(',')"
+        ),
+        "world,6,true"
+    );
+    // containing out of bounds returns undefined
+    assert_eq!(
+        ev(
+            &b,
+            "var seg = new Intl.Segmenter('en'); \
+             var segments = seg.segment('abc'); \
+             [String(segments.containing(-1)), String(segments.containing(3))].join(',')"
+        ),
+        "undefined,undefined"
+    );
+}
+
+/// yahoo's locale helper runs `new Intl.Locale(lang)` and reads `language`
+/// and `region` while React renders the page; without `Intl.Locale` the
+/// render throws "not a constructor".
+#[test]
+fn intl_locale_parses_a_tag_its_keywords_and_options() {
+    let b = bindings();
+    assert_eq!(
+        ev(
+            &b,
+            "var r = [], L = Intl.Locale, a = new L('EN-us'); \
+             r.push(typeof L, Object.prototype.toString.call(a), String(a), a.language, a.region, \
+                    String(a.script), a.baseName, a.language.toLowerCase() + '-' + (a.region ?? 'x').toLowerCase()); \
+             var z = new L('zh-hant-tw-u-ca-chinese-hc-h12'); \
+             r.push(z.toString(), z.script, z.baseName, z.calendar, z.hourCycle, String(z.numeric)); \
+             var o = new L('en', { region: 'gb', calendar: 'gregory', numeric: true }); \
+             r.push(o.toString(), o.region, o.numeric, o.calendar); \
+             r.push(new L(a).toString(), new Intl.NumberFormat(a).resolvedOptions().locale); \
+             [function () { return new L('x'); }, function () { return new L(); }, function () { return L('en'); }] \
+                 .forEach(function (f) { try { f(); r.push('no throw'); } catch (e) { r.push(e.name); } }); \
+             r.join(',')"
+        ),
+        "function,[object Intl.Locale],en-US,en,US,undefined,en-US,en-us,\
+         zh-Hant-TW-u-ca-chinese-hc-h12,Hant,zh-Hant-TW,chinese,h12,false,\
+         en-GB-u-ca-gregory-kn,GB,true,gregory,en-US,en-US,RangeError,TypeError,TypeError"
+    );
+}
+
+/// One case's script in a fresh page: its completion value, or what it threw.
+fn locale_answer(js: &str) -> String {
+    let b = bindings();
+    match b.evaluate(js) {
+        Ok(JsValue::String(s)) => s,
+        Ok(other) => format!("{other:?}"),
+        Err(e) => format!("THREW {e}"),
+    }
+}
+
+/// `Intl.Locale.prototype.maximize`/`minimize` (CLDR likely subtags),
+/// `getTextInfo` and `getWeekInfo`, against what the pinned Chrome answers
+/// for the same scripts (tools/parity_oracle/intl_locale_cases.json, written
+/// by `js_cases_log.mjs --write`). A case with a `gap` is a known difference,
+/// pinned by its `engine` answer so that it closes on purpose.
+#[test]
+fn intl_locale_likely_subtags_text_and_week_info_match_chrome() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tools/parity_oracle/intl_locale_cases.json")).unwrap();
+    assert_eq!(data["chrome_version"].as_str(), Some("148.0.7778.216"));
+    let cases = data["cases"].as_array().unwrap();
+    assert!(cases.len() >= 53, "the case file lost cases: {}", cases.len());
+    let (mut wrong, mut gaps) = (Vec::new(), 0);
+    for case in cases {
+        let (name, js) = (case["name"].as_str().unwrap(), case["js"].as_str().unwrap());
+        let chrome = case["chrome"].as_str().expect("run js_cases_log.mjs --write");
+        let expected = match case.get("gap") {
+            Some(_) => {
+                gaps += 1;
+                case["engine"].as_str().expect("a gap names the engine's answer")
+            }
+            None => chrome,
+        };
+        let ours = locale_answer(js);
+        if ours != expected {
+            wrong.push(format!("{name}\n    chrome: {chrome}\n    ours:   {ours}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} of {} cases differ from Chrome:\n{}", wrong.len(), cases.len(), wrong.join("\n"));
+    assert!(gaps <= 1, "the known differences grew to {gaps}");
+}
+
+/// What react-aria's locale module runs while it is evaluated: without
+/// `maximize()` the import throws "not a callable function" and the page
+/// that imports it shows its error screen instead of hydrating.
+#[test]
+fn intl_locale_maximize_gives_the_text_direction_a_component_library_asks_for() {
+    let b = bindings();
+    assert_eq!(
+        ev(
+            &b,
+            "function isRTL(tag) { \
+                 var locale = new Intl.Locale(tag).maximize(); \
+                 var textInfo = typeof locale.getTextInfo === 'function' ? locale.getTextInfo() : locale.textInfo; \
+                 if (textInfo) return textInfo.direction === 'rtl'; \
+                 return ['Arab', 'Hebr', 'Thaa'].indexOf(locale.script) >= 0; \
+             } \
+             ['en-US', 'ar-AE', 'he-IL', 'fa', 'ur', 'ja-JP', 'dv', 'ckb'].map(isRTL).join()"
+        ),
+        "false,true,true,true,true,false,true,true"
     );
 }

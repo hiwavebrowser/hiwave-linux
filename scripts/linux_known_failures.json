@@ -1,0 +1,137 @@
+{
+  "_comment": "Tests this Linux tree is KNOWN to fail, each with the reason. collect-metrics reports them every run and fails only on a failure NOT listed here (or on a test run that exits non-zero naming no failing test). A listed test that passes is reported as 'known now passing' (remove its entry), never red: the hosted runner's fonts differ from a developer machine's, so these can flip between them. Names are `binary::test::path`. Entries may only LEAVE this list; add one only with a root cause, never to make a run green.",
+  "known": [
+    {
+      "test": "rustkit_layout::tests::test_an_emoji_label_lifts_a_styled_buttons_line",
+      "reason": "Pinned on Chrome for macOS (Apple Color Emoji lifts the label's line, button 32 -> 39). Chrome 148 on Linux measures this button 33 (Noto Color Emoji lifts Arial 14px's line 16 -> 17), and RustKit on Linux now builds 33 too (fallback faces united into the line; Noto Color Emoji measured from its hhea with Blink's rounding). The test's 39 is the macOS number; a Linux pin would be 33."
+    },
+    {
+      "test": "rustkit_layout::tests::test_negative_half_leading_inline_keeps_the_line_baseline",
+      "reason": "macOS #997: pins the 32px bold `-apple-system` strut seat at 28; the family resolves to a different face and ascent on Linux (27)."
+    },
+    {
+      "test": "rustkit_engine::text_control_select_tests::a_click_places_the_caret_at_the_click_point",
+      "reason": "The test sets Menlo 20px and expects a 10px advance; Menlo does not exist on Linux and the fallback face's advance differs."
+    },
+    {
+      "test": "rustkit_renderer::layer_cost_tests::a_frame_past_the_glyph_atlas_matches_the_submit_per_pass_path",
+      "reason": "macOS #992: the test fills the glyph atlas with CJK ideographs (U+4E00..) and asserts the atlas reset at least once. The hosted runner installs only fonts-dejavu-core and fonts-liberation, which have no ideographs, so no glyph ink is produced and the atlas never fills ('resets 0'). Passes where a CJK font is installed (a developer machine with Noto CJK). Fix options: install fonts-noto-cjk in the workflow, or make the test skip loudly without a CJK face."
+    },
+    {
+      "test": "rustkit_engine::paint_only_web_font_tests::static_text_keeps_its_web_font_across_paint_only_frames_when_another_view_paints",
+      "reason": "macOS #1017 (E52): the test reads the shaped face from DisplayCommand::Text.run (`r.face.postscript_name`), a shaped-run record that only the macOS CoreText path produces; Linux text commands carry `run: None`, so the face reads as empty. Measured, not assumed: with only that face-name assertion skipped, the test passes on Linux, including its pixel checks (the static line's pixels unchanged across paint-only frames after another view paints; no relayout), so the E52 behaviour itself holds here."
+    },
+    {
+      "test": "rustkit_engine::paint_only_web_font_tests::an_element_scroll_keeps_the_web_font_when_another_view_painted",
+      "reason": "macOS #1017 (E52): the test reads the shaped face from DisplayCommand::Text.run (`r.face.postscript_name`), a shaped-run record that only the macOS CoreText path produces; Linux text commands carry `run: None`, so the face reads as empty. Measured, not assumed: with only that face-name assertion skipped, the test passes on Linux, including its pixel checks (the static line's pixels unchanged across paint-only frames after another view paints; no relayout), so the E52 behaviour itself holds here."
+    },
+    {
+      "test": "rustkit_engine::paint_only_web_font_tests::web_faces_hold_by_weight_when_another_view_on_the_thread_paints",
+      "reason": "S22 (macOS E52 follow-up): reads the face from DisplayCommand::Text.run.face.postscript_name, a shaped-run record only the macOS CoreText path produces (Linux: run None, face reads empty), the same cause as the two entries above. The face-name read fails first; the rest of the test was not measured separately on Linux."
+    },
+    {
+      "test": "rustkit_engine::paint_only_web_font_tests::web_faces_hold_while_another_thread_installs_its_own",
+      "reason": "S22: the same shaped-run face-name read as the entry above (Linux records no run face). The rest of the test was not measured separately on Linux."
+    },
+    {
+      "test": "rustkit_engine::flex_aspect_ratio_tests::aspect_ratio_minimum_size_inherit_and_the_card_are_as_in_chrome",
+      "reason": "S22: the inherit-em case's text box is 11 px high on Linux where the pin (Chrome 148 on macOS) is 13: a font-metric pin, as on Windows (hiwave-windows pinned it to Chrome on Windows). Not yet pinned to Chrome 148 on Linux."
+    },
+    {
+      "test": "rustkit_layout::tests::inline_block_with_text_sits_on_its_last_line_baseline",
+      "reason": "Upstream n53 pin (Chrome for macOS: input top +4, tolerance 2 px). With upstream's control sizing (S22), the CI runner's fonts (DejaVu + Liberation only) seat the input at +1.5 (171x21 box); legion5's fonts seat it at +2.5 and pass. Not measured against Chrome on Linux; the campaign's form-controls case against Linux Chrome 148 improved with S22 (2.8983 -> 2.8274)."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::a_new_src_cancels_the_old_fetch",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::a_server_that_ignores_range_still_loads",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::a_whole_body_past_the_cap_is_a_network_error",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::media_is_fetched_by_range",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::removing_a_video_cancels_its_fetch_and_frees_its_bytes",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_fetch_tests::the_metadata_fetches_only_what_it_reads",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::a_small_videos_box_takes_its_size",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::a_video_with_preload_auto_loads_its_metadata",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::a_video_with_the_default_preload_loads_its_metadata",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::a_videos_box_takes_its_ratio_after_metadata",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::an_audio_element_loads_its_metadata",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::bytes_that_are_not_media_are_an_error",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::can_play_type_answers",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_load_tests::source_selection_skips_a_type_that_cannot_play",
+      "reason": "No media backend on Linux yet. Upstream's backend is AVFoundation (MEDIA-AVF, macOS only, #1332/#1344), so on Linux canPlayType answers \"\" and a media element errors before its metadata (readyState 0), where Chrome loads it. The same 14 tests are ignored on Windows (hiwave-windows patch 661). A Linux backend is a separate row."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::a_failed_item_is_a_decode_error",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::a_new_frame_is_presented_with_no_build_and_no_layout",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::a_new_presentation_size_is_a_resize",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::a_video_gets_a_player_on_the_host_and_loses_it_with_its_resource",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::an_audio_element_gets_a_player_with_no_frames",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::an_unanswered_command_keeps_the_media_busy",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::the_first_frame_paints_as_chrome_paints_it",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::media_host_tests::with_no_host_a_video_loads_its_metadata_and_nothing_more",
+      "reason": "Upstream MEDIA-AVF step 3 (batch 113, synced in S26): the main-thread media host and its players. Linux has no media backend to decode a resource's metadata or frames (with no host, metadata reads 0 where the test wants 64), the same gap as media_load_tests and media_fetch_tests."
+    },
+    {
+      "test": "rustkit_engine::replaced_float_avoid_tests::boxes_that_avoid_floats_are_placed_as_chrome_places_them",
+      "reason": "1 of 28 cases ('inline img with clear beside a float'): the image sits at x 130.23, Chrome 148 on Linux at 128 (measured 2026-11-20). The text before it is set in Liberation Sans because rustkit-css's INITIAL_FONT_FAMILY is 'sans-serif' off macOS; Chrome's initial font on Linux is its standard font, Times New Roman (Liberation Serif: 'text ' is 28, not 30.23). A shared-code fix, raised upstream; not an S26 regression (the test is new in batch 113)."
+    }
+  ]
+}

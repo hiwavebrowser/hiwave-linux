@@ -1,10 +1,9 @@
 //! This module implements lexing for number literals (123, 787) used in ECMAScript.
 
-use crate::lexer::{token::Numeric, Cursor, Error, Token, TokenKind, Tokenizer};
+use crate::lexer::{Cursor, Error, Token, TokenKind, Tokenizer, token::Numeric};
 use crate::source::ReadChar;
-use boa_ast::{Position, Span};
+use boa_ast::PositionGroup;
 use boa_interner::Interner;
-use boa_profiler::Profiler;
 use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};
 use std::str;
@@ -142,12 +141,10 @@ where
             Some(0x5F /* _ */) if !separator_allowed => {
                 return Err(Error::syntax("separator is not allowed", pos));
             }
-            Some(c) => {
-                if char::from_u32(c).map(|ch| ch.is_digit(kind.base())) == Some(true) {
-                    prev_is_underscore = false;
-                    #[allow(clippy::cast_possible_truncation)]
-                    buf.push(c as u8);
-                }
+            Some(c) if char::from_u32(c).is_some_and(|ch| ch.is_digit(kind.base())) => {
+                prev_is_underscore = false;
+                #[allow(clippy::cast_possible_truncation)]
+                buf.push(c as u8);
             }
             _ => (),
         }
@@ -185,14 +182,12 @@ impl<R> Tokenizer<R> for NumberLiteral {
     fn lex(
         &mut self,
         cursor: &mut Cursor<R>,
-        start_pos: Position,
+        start_pos: PositionGroup,
         _interner: &mut Interner,
     ) -> Result<Token, Error>
     where
         R: ReadChar,
     {
-        let _timer = Profiler::global().start_event("NumberLiteral", "Lexing");
-
         let mut buf = vec![self.init];
 
         // Default assume the number is a base 10 integer.
@@ -260,9 +255,10 @@ impl<R> Tokenizer<R> for NumberLiteral {
                         cursor.next_char()?.expect("n character vanished");
 
                         // DecimalBigIntegerLiteral '0n'
-                        return Ok(Token::new(
+                        return Ok(Token::new_by_position_group(
                             TokenKind::NumericLiteral(Numeric::BigInt(BigInt::zero().into())),
-                            Span::new(start_pos, cursor.pos()),
+                            start_pos,
+                            cursor.pos_group(),
                         ));
                     }
                     byte => {
@@ -309,9 +305,10 @@ impl<R> Tokenizer<R> for NumberLiteral {
             } else {
                 // DecimalLiteral lexing.
                 // Indicates that the number is just a single 0.
-                return Ok(Token::new(
+                return Ok(Token::new_by_position_group(
                     TokenKind::NumericLiteral(Numeric::Integer(0)),
-                    Span::new(start_pos, cursor.pos()),
+                    start_pos,
+                    cursor.pos_group(),
                 ));
             }
         }
@@ -423,9 +420,10 @@ impl<R> Tokenizer<R> for NumberLiteral {
             }
         };
 
-        Ok(Token::new(
+        Ok(Token::new_by_position_group(
             TokenKind::NumericLiteral(num),
-            Span::new(start_pos, cursor.pos()),
+            start_pos,
+            cursor.pos_group(),
         ))
     }
 }
