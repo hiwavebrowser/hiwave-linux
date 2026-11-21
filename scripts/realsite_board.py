@@ -472,6 +472,24 @@ def pixel_diff(a, b, diff_png, env):
     return res
 
 
+def capture_flags(archive):
+    """Every flag score_site passes parity-capture (--dump-har only while archiving)."""
+    flags = ["--url", "--width", "--height", "--timeout-ms", "--dump-frame",
+             "--dump-display-list", "--dump-scripts"]
+    return flags + (["--dump-har"] if archive else [])
+
+
+def capture_flags_missing(capture_bin, flags):
+    """The flags in `flags` that `capture_bin --help` does not list: a binary older than this
+    board rejects them, and every live capture of a run fails. Checked before any site loads."""
+    try:
+        r = subprocess.run([str(capture_bin), "--help"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return ["(--help failed: %s)" % e]
+    text = r.stdout + r.stderr
+    return [f for f in flags if not re.search(r"(^|[\s,\[])" + re.escape(f) + r"([\s=,\]]|$)", text, re.M)]
+
+
 def score_site(site, capture_bin, outdir, width, height, env):
     sid, url = site["id"], site["url"]
     d = outdir / sid
@@ -509,6 +527,7 @@ def score_site(site, capture_bin, outdir, width, height, env):
     rk_scripts = d / "rustkit-scripts.json"
     started = time.time()
     rk, rk_err, rk_code = run_json(
+        # Every flag here is in capture_flags(), which the preflight checks against the binary.
         [str(capture_bin), "--url", url, "--width", str(width), "--height", str(height),
          "--timeout-ms", str(LOAD_TIMEOUT_MS), "--dump-frame", str(rk_frame),
          "--dump-display-list", str(rk_dl), "--dump-scripts", str(rk_scripts)]
@@ -710,6 +729,11 @@ def main():
         problems.append("pinned Chrome not found: %s" % chrome_path)
     if not Path(args.capture_bin).exists():
         problems.append("parity-capture not built: %s" % args.capture_bin)
+    else:
+        missing = capture_flags_missing(args.capture_bin, capture_flags(realsite_har.archive_enabled()))
+        if missing:
+            problems.append("parity-capture at %s does not accept %s (older than this board? build it "
+                            "from this tree)" % (args.capture_bin, ", ".join(missing)))
     if not shutil.which("node"):
         problems.append("node not on PATH")
     if problems:
