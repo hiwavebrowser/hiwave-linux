@@ -767,6 +767,14 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
         board = load_board(Path(args.board))
         if args.report_only:
             return report_only(board, out, Path(args.census) if args.census else latest_census())
+        # Real captures open windows: never on a live desktop
+        # (scripts/display_guard.py). A test's stand-in capture opens none.
+        if capture is globals()["capture"]:
+            from display_guard import live_display_reason
+            reason = live_display_reason(os.environ)
+            if reason:
+                print(f"refused: {reason} (HIWAVE_ALLOW_LIVE_DISPLAY=1 to override)", file=sys.stderr)
+                return 2
         rows = plan(board, REPO_ROOT, work, only=args.only)
         chrome_path = pinned_chrome_path(version_of=chrome_version)
     except (BoardError, OSError, KeyError, json.JSONDecodeError) as exc:

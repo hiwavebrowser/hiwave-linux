@@ -586,6 +586,11 @@ def main() -> int:
     if a.input:
         metrics = json.loads(Path(a.input).read_text(encoding="utf-8"))
     else:
+        # `cargo test --workspace` opens windows when it finds a display:
+        # never on a live desktop (scripts/display_guard.py).
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from display_guard import refuse_live_display
+        refuse_live_display(tool="collect_metrics")
         metrics = collect(a.commit, a.branch)
 
     if a.output:
